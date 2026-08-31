@@ -1,5 +1,6 @@
 import { ResultList, SearchResultView } from "common.slint";
 
+// 鼠标中键弹出的快捷动作窗口，根据选中文本推荐工具。
 export component QuickActionWindow inherits Window {
     in-out property <string> selected-text;
     in property <[SearchResultView]> actions;
@@ -16,6 +17,7 @@ export component QuickActionWindow inherits Window {
     resize-border-width: 8px;
     background: root.dark-mode ? #0f141d : #f3f6fb;
 
+    // 有选中文本时展示摘要；没有选中内容时直接展示通用动作列表。
     VerticalLayout {
         padding: 12px;
         spacing: 10px;

@@ -19,6 +19,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tokio::{runtime::Runtime, sync::mpsc};
 use tracing::{error, info, warn};
 
+// Slint 窗口句柄需要保留强引用，否则窗口会被释放关闭。
 thread_local! {
     static TOOL_WINDOWS: RefCell<Vec<ToolWindow>> = const { RefCell::new(Vec::new()) };
     static CLIPBOARD_WINDOWS: RefCell<Vec<ClipboardWindow>> = const { RefCell::new(Vec::new()) };
@@ -26,10 +27,12 @@ thread_local! {
 }
 
 fn main() -> Result<()> {
+    // 初始化日志，方便排查全局快捷键、托盘、剪贴板等平台能力。
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // 存储和核心运行时先启动，UI 通过 channel 与其通信。
     let storage = Storage::open_default()?;
     let hotkey = storage
         .get_setting("hotkey")?
@@ -40,10 +43,12 @@ fn main() -> Result<()> {
 
     runtime.spawn(AppRuntime::new(storage.clone(), request_rx, event_tx).run());
 
+    // 平台服务各自运行在后台，通过统一 AppRequest 进入核心运行时。
     start_clipboard_bridge(&runtime, request_tx.clone());
     start_shortcut_bridge(&runtime, request_tx.clone(), hotkey);
     start_tray_bridge(&runtime, request_tx.clone());
 
+    // 主窗口默认使用中文和深色主题，真正持久化设置会在 LoadTheme/SettingsLoaded 中覆盖。
     let app = SearchWindow::new()?;
     let app_weak = app.as_weak();
     let search_ids = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -80,6 +85,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// 将剪贴板服务事件转发到核心运行时。
 fn start_clipboard_bridge(runtime: &Runtime, request_tx: mpsc::UnboundedSender<AppRequest>) {
     let (clipboard_tx, mut clipboard_rx) = mpsc::unbounded_channel::<ClipboardEvent>();
     runtime.spawn(run_clipboard_watcher(clipboard_tx));
@@ -100,6 +106,7 @@ fn start_clipboard_bridge(runtime: &Runtime, request_tx: mpsc::UnboundedSender<A
     });
 }
 
+/// 注册并桥接全局快捷键事件。
 fn start_shortcut_bridge(
     runtime: &Runtime,
     request_tx: mpsc::UnboundedSender<AppRequest>,
@@ -123,6 +130,7 @@ fn start_shortcut_bridge(
     });
 }
 
+/// 注册并桥接系统托盘事件。
 fn start_tray_bridge(runtime: &Runtime, request_tx: mpsc::UnboundedSender<AppRequest>) {
     let (tray_tx, mut tray_rx) = mpsc::unbounded_channel::<TrayEvent>();
 
@@ -145,6 +153,7 @@ fn start_tray_bridge(runtime: &Runtime, request_tx: mpsc::UnboundedSender<AppReq
     });
 }
 
+/// 启动鼠标中键快捷动作桥接，事件最终回到 Slint UI 线程创建小窗口。
 fn start_middle_bridge(runtime: &Runtime, app_weak: slint::Weak<SearchWindow>, storage: Storage) {
     let (quick_tx, mut quick_rx) = mpsc::unbounded_channel::<QuickActionEvent>();
     spawn_middle_click_listener(quick_tx);
@@ -170,6 +179,7 @@ fn start_middle_bridge(runtime: &Runtime, app_weak: slint::Weak<SearchWindow>, s
     });
 }
 
+/// 绑定 Slint 回调。UI 只发送请求或打开窗口，耗时逻辑放到运行时/服务层。
 fn bind_ui_callbacks(
     app: &SearchWindow,
     request_tx: mpsc::UnboundedSender<AppRequest>,
@@ -178,6 +188,7 @@ fn bind_ui_callbacks(
     tool_ids: Arc<Mutex<Vec<String>>>,
 ) {
     let search_tx = request_tx.clone();
+    // 搜索输入实时进入核心运行时，结果通过 AppEvent 异步回填。
     app.on_query_changed(move |query| {
         let _ = search_tx.send(AppRequest::Search {
             query: query.to_string(),
@@ -187,6 +198,7 @@ fn bind_ui_callbacks(
     let activate_app = app.as_weak();
     let activate_storage = storage.clone();
     let activate_tx = request_tx.clone();
+    // 主搜索结果和工具列表共用激活逻辑，靠 ID 判断实际动作。
     app.on_activate_result(move |index| {
         if let Some(result_id) = get_id(&search_ids, index) {
             activate_item(
@@ -227,6 +239,7 @@ fn bind_ui_callbacks(
     });
 
     let show_tools_app = app.as_weak();
+    // tools 页面只展示工具类命令，并按当前语言生成列表文案。
     app.on_show_tools(move || {
         if let Some(app) = show_tools_app.upgrade() {
             let language = app.get_language().to_string();
@@ -255,6 +268,7 @@ fn bind_ui_callbacks(
 
     let language_tx = request_tx.clone();
     let language_app = app.as_weak();
+    // 语言切换先立即更新 UI，再写入存储，减少界面反馈延迟。
     app.on_language_selected(move |language| {
         let language = language.to_string();
         if let Some(app) = language_app.upgrade() {
@@ -283,6 +297,7 @@ fn bind_ui_callbacks(
     });
 }
 
+/// 后台运行时事件必须切回 Slint 事件循环线程处理。
 fn bind_runtime_events(
     app_weak: slint::Weak<SearchWindow>,
     search_ids: Arc<Mutex<Vec<String>>>,
@@ -310,6 +325,7 @@ fn bind_runtime_events(
         .expect("failed to spawn ui event bridge");
 }
 
+/// 将核心事件应用到主窗口状态，所有 UI 属性更新集中在这里。
 fn apply_event(app: &SearchWindow, search_ids: &Arc<Mutex<Vec<String>>>, event: AppEvent) {
     match event {
         AppEvent::SearchCompleted(results) => {
@@ -379,6 +395,7 @@ fn apply_event(app: &SearchWindow, search_ids: &Arc<Mutex<Vec<String>>>, event: 
     }
 }
 
+/// 根据结果 ID 执行动作：设置项打开设置，剪贴板打开历史窗口，其它工具打开工具窗口。
 fn activate_item(
     app_weak: &slint::Weak<SearchWindow>,
     storage: Storage,
@@ -422,6 +439,7 @@ fn activate_item(
     }
 }
 
+/// 打开独立工具窗口。工具窗口继承当前主题和语言，并支持置顶。
 fn open_tool_window(
     tool_id: String,
     title: String,
@@ -438,6 +456,7 @@ fn open_tool_window(
     window.set_language(language.into());
     window.set_pinned(false);
 
+    // 工具运行直接在 UI 回调中执行，当前内置工具都是轻量文本处理。
     let run_window = window.as_weak();
     let run_tool_id = tool_id.clone();
     window.on_run(move |input| {
@@ -465,6 +484,7 @@ fn open_tool_window(
     TOOL_WINDOWS.with(|windows| windows.borrow_mut().push(window));
 }
 
+/// 打开剪贴板历史窗口，并维护 UI 行索引到数据库 ID 的映射。
 fn open_clipboard_window(storage: Storage, dark_mode: bool, language: String) {
     let window = ClipboardWindow::new().expect("failed to create clipboard window");
     let ids = Rc::new(RefCell::new(Vec::<String>::new()));
@@ -498,6 +518,7 @@ fn open_clipboard_window(storage: Storage, dark_mode: bool, language: String) {
     CLIPBOARD_WINDOWS.with(|windows| windows.borrow_mut().push(window));
 }
 
+/// 打开中键快捷动作窗口，动作列表会根据选中文本内容做简单推荐。
 fn open_quick_action_window(
     storage: Storage,
     selected_text: Option<String>,
@@ -545,6 +566,7 @@ fn open_quick_action_window(
     QUICK_WINDOWS.with(|windows| windows.borrow_mut().push(window));
 }
 
+/// 重新加载剪贴板窗口列表，并同步更新行 ID 映射。
 fn refresh_clipboard_window(
     window: &ClipboardWindow,
     storage: &Storage,
@@ -560,6 +582,7 @@ fn refresh_clipboard_window(
     window.set_rows(clipboard_model(rows, language));
 }
 
+/// 根据选中文本生成快捷动作。JSON 外形的文本优先推荐 JSON 工具。
 fn quick_actions_for(selected_text: &str, language: &str) -> Vec<SearchResult> {
     let mut ids = Vec::new();
     if selected_text.trim_start().starts_with('{') || selected_text.trim_start().starts_with('[') {
@@ -594,11 +617,13 @@ fn quick_actions_for(selected_text: &str, language: &str) -> Vec<SearchResult> {
         .collect()
 }
 
+/// 应用主题到主窗口状态。
 fn apply_theme(app: &SearchWindow, theme: &str) {
     app.set_settings_theme(theme.into());
     app.set_dark_mode(theme != "light");
 }
 
+/// 根据当前语言选择状态提示文本。
 fn localized_status(app: &SearchWindow, zh: &str, en: &str) -> SharedString {
     if app.get_language() == "en" {
         en.into()
@@ -607,18 +632,21 @@ fn localized_status(app: &SearchWindow, zh: &str, en: &str) -> SharedString {
     }
 }
 
+/// 从行索引查找真实结果 ID。
 fn get_id(ids: &Arc<Mutex<Vec<String>>>, index: i32) -> Option<String> {
     ids.lock()
         .ok()
         .and_then(|ids| ids.get(index as usize).cloned())
 }
 
+/// 更新行索引到结果 ID 的映射。
 fn set_ids(ids: &Arc<Mutex<Vec<String>>>, values: impl Iterator<Item = String>) {
     if let Ok(mut ids) = ids.lock() {
         *ids = values.collect();
     }
 }
 
+/// 将命令描述符转换成 Slint 列表模型。
 fn command_model(commands: Vec<CommandDescriptor>, language: &str) -> ModelRc<SearchResultView> {
     let rows = commands
         .into_iter()
@@ -635,6 +663,7 @@ fn command_model(commands: Vec<CommandDescriptor>, language: &str) -> ModelRc<Se
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
 
+/// 将剪贴板记录转换成 Slint 列表模型，并按语言显示来源标签。
 fn clipboard_model(records: Vec<ClipboardRecord>, language: &str) -> ModelRc<SearchResultView> {
     let rows = records
         .into_iter()
@@ -679,6 +708,7 @@ fn clipboard_model(records: Vec<ClipboardRecord>, language: &str) -> ModelRc<Sea
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
 
+/// 将核心搜索结果转换成 Slint 列表模型。
 fn results_to_model(results: Vec<SearchResult>, language: &str) -> ModelRc<SearchResultView> {
     let rows = results
         .into_iter()
@@ -697,6 +727,7 @@ fn results_to_model(results: Vec<SearchResult>, language: &str) -> ModelRc<Searc
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
 
+/// 将命令来源本地化成短标签，显示在结果行左侧徽标中。
 fn source_label_from_command(source: &CommandSource, language: &str) -> SharedString {
     match source {
         CommandSource::BuiltInTool => if language == "en" { "Tool" } else { "工具" }.into(),
@@ -717,6 +748,7 @@ fn source_label_from_command(source: &CommandSource, language: &str) -> SharedSt
     }
 }
 
+/// 将搜索来源本地化成短标签。
 fn source_label(source: &devtools_core::search::SearchSource, language: &str) -> SharedString {
     match source {
         devtools_core::search::SearchSource::BuiltInTool => {
@@ -743,6 +775,7 @@ fn source_label(source: &devtools_core::search::SearchSource, language: &str) ->
     }
 }
 
+/// 根据结果 ID 尝试读取本地化标题，找不到时使用搜索结果原文。
 fn localized_title(result_id: &str, language: &str, fallback: &str) -> String {
     if result_id.starts_with("tool.") || result_id.starts_with("setting.") {
         devtools_tools::localized_title_for(result_id, language)
@@ -751,6 +784,7 @@ fn localized_title(result_id: &str, language: &str, fallback: &str) -> String {
     }
 }
 
+/// 根据结果 ID 尝试读取本地化副标题。
 fn localized_subtitle(result_id: &str, language: &str, fallback: &str) -> String {
     if result_id.starts_with("tool.") || result_id.starts_with("setting.") {
         devtools_tools::localized_subtitle_for(result_id, language)
@@ -759,6 +793,7 @@ fn localized_subtitle(result_id: &str, language: &str, fallback: &str) -> String
     }
 }
 
+/// 压缩长文本摘要，避免剪贴板列表行被超长内容撑开。
 fn summarize(content: &str) -> String {
     let single_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
     if single_line.chars().count() > 72 {

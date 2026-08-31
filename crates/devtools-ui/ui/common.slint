@@ -1,5 +1,6 @@
 import { Button, ListView } from "std-widgets.slint";
 
+// Rust 侧传给 Slint 列表组件的统一行数据。
 export struct SearchResultView {
     id: string,
     title: string,
@@ -7,6 +8,7 @@ export struct SearchResultView {
     source: string,
 }
 
+// 小节标题组件，设置页和编辑器面板复用。
 export component SectionLabel inherits Rectangle {
     in property <string> text;
     in property <bool> dark-mode;
@@ -23,6 +25,7 @@ export component SectionLabel inherits Rectangle {
     }
 }
 
+// 左侧导航按钮，selected 决定高亮状态。
 export component NavButton inherits Rectangle {
     in property <string> text;
     in property <string> icon;
@@ -65,6 +68,7 @@ export component NavButton inherits Rectangle {
     }
 }
 
+// 设置页使用的轻量按钮，支持 active 状态展示。
 export component GhostButton inherits Rectangle {
     in property <string> text;
     in property <bool> dark-mode;
@@ -95,6 +99,7 @@ export component GhostButton inherits Rectangle {
     }
 }
 
+// 通用搜索/工具/剪贴板结果列表。
 export component ResultList inherits Rectangle {
     in property <[SearchResultView]> rows;
     in property <bool> dark-mode;
@@ -103,6 +108,7 @@ export component ResultList inherits Rectangle {
     background: transparent;
 
     ListView {
+        // 行内采用固定左侧定位，避免不同 Slint 布局版本把徽标水平居中。
         for row[index] in root.rows: item := Rectangle {
             height: 74px;
             border-radius: 8px;
@@ -166,6 +172,7 @@ export component ResultList inherits Rectangle {
     }
 }
 
+// 标准主按钮占位组件，后续统一按钮风格时可继续扩展。
 export component PrimaryButton inherits Button {
     in property <string> label;
     text: label;

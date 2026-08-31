@@ -9,12 +9,14 @@ use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
 };
 
+/// 托盘线程发给应用运行时的事件。
 #[derive(Clone, Debug)]
 pub enum TrayEvent {
     ShowWindow,
     Exit,
 }
 
+/// 创建系统托盘图标、菜单，并监听左键点击和菜单动作。
 pub fn spawn_tray_listener(tx: mpsc::UnboundedSender<TrayEvent>) -> Result<()> {
     let menu = Menu::new();
     let show_item = MenuItem::new("Show DevTools Hub", true, None);
@@ -80,10 +82,12 @@ pub fn spawn_tray_listener(tx: mpsc::UnboundedSender<TrayEvent>) -> Result<()> {
             }
         })?;
 
+    // 托盘对象需要一直存活，否则系统托盘图标会被释放。
     Box::leak(Box::new(tray));
     Ok(())
 }
 
+/// 生成一个简单圆形 RGBA 图标，后续可替换成正式品牌资源。
 fn create_icon() -> Result<Icon> {
     let size = 32u32;
     let mut rgba = Vec::with_capacity((size * size * 4) as usize);

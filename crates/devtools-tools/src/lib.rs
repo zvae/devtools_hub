@@ -3,6 +3,7 @@ use devtools_plugin_api::{
     CommandAction, CommandDescriptor, CommandI18n, CommandResult, CommandSource,
 };
 
+/// 内置工具清单。默认文本使用英文，中文通过 i18n 字段提供。
 pub fn builtin_commands() -> Vec<CommandDescriptor> {
     vec![
         command(
@@ -80,6 +81,7 @@ pub fn builtin_commands() -> Vec<CommandDescriptor> {
     ]
 }
 
+/// 创建内置命令描述，统一补齐中文本地化和关键词。
 fn command(
     id: &str,
     title: &str,
@@ -104,6 +106,7 @@ fn command(
     }
 }
 
+/// 将命令 ID 转成默认动作，供搜索结果激活时复用。
 pub fn action_for(command_id: &str) -> CommandAction {
     match command_id {
         "tool.uuid.v4" => CommandAction::CopyText {
@@ -115,6 +118,7 @@ pub fn action_for(command_id: &str) -> CommandAction {
     }
 }
 
+/// 执行内置工具。需要 UI 的工具只返回占位，实际由独立窗口承载。
 pub fn execute(command_id: &str, input: &str) -> CommandResult {
     match command_id {
         "tool.json.format" => format_json(input),
@@ -151,6 +155,7 @@ pub fn execute(command_id: &str, input: &str) -> CommandResult {
     }
 }
 
+/// 返回需要打开交互窗口的工具 ID，排除 UUID 这种立即复制型工具。
 pub fn interactive_tool_ids() -> Vec<String> {
     builtin_commands()
         .into_iter()
@@ -159,10 +164,12 @@ pub fn interactive_tool_ids() -> Vec<String> {
         .collect()
 }
 
+/// 英文标题兜底接口，保留给暂未传入语言的调用方。
 pub fn title_for(command_id: &str) -> String {
     localized_title_for(command_id, "en")
 }
 
+/// 按语言查找命令标题。
 pub fn localized_title_for(command_id: &str, locale: &str) -> String {
     builtin_commands()
         .into_iter()
@@ -171,6 +178,7 @@ pub fn localized_title_for(command_id: &str, locale: &str) -> String {
         .unwrap_or_else(|| command_id.to_string())
 }
 
+/// 按语言查找命令副标题。
 pub fn localized_subtitle_for(command_id: &str, locale: &str) -> String {
     builtin_commands()
         .into_iter()
@@ -179,6 +187,7 @@ pub fn localized_subtitle_for(command_id: &str, locale: &str) -> String {
         .unwrap_or_default()
 }
 
+/// 从命令描述中选择本地化文本，找不到指定语言时回退到默认文本。
 pub fn localized_command_text(command: &CommandDescriptor, locale: &str) -> (String, String) {
     command
         .i18n
@@ -188,6 +197,7 @@ pub fn localized_command_text(command: &CommandDescriptor, locale: &str) -> (Str
         .unwrap_or_else(|| (command.title.clone(), command.subtitle.clone()))
 }
 
+/// JSON 格式化：解析成功后输出 pretty JSON，失败时返回错误文本。
 fn format_json(input: &str) -> CommandResult {
     let content = serde_json::from_str::<serde_json::Value>(input)
         .and_then(|value| serde_json::to_string_pretty(&value))
@@ -199,6 +209,7 @@ fn format_json(input: &str) -> CommandResult {
     }
 }
 
+/// JSON 压缩：解析成功后输出单行 JSON。
 fn minify_json(input: &str) -> CommandResult {
     let content = serde_json::from_str::<serde_json::Value>(input)
         .and_then(|value| serde_json::to_string(&value))
@@ -210,6 +221,7 @@ fn minify_json(input: &str) -> CommandResult {
     }
 }
 
+/// JSON 校验：只报告是否合法，不改写输入内容。
 fn validate_json(input: &str) -> CommandResult {
     let content = match serde_json::from_str::<serde_json::Value>(input) {
         Ok(_) => "Valid JSON".to_string(),
@@ -226,12 +238,14 @@ fn validate_json(input: &str) -> CommandResult {
 mod tests {
     use super::execute;
 
+    /// JSON 格式化应输出带缩进和空格的 pretty JSON。
     #[test]
     fn formats_json() {
         let result = execute("tool.json.format", r#"{"hello":"world"}"#);
         assert!(result.content.contains("\"hello\": \"world\""));
     }
 
+    /// Base64 解码应返回原始 UTF-8 文本。
     #[test]
     fn decodes_base64() {
         let result = execute("tool.base64.decode", "aGVsbG8=");

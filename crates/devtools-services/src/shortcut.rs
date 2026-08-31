@@ -9,11 +9,13 @@ use global_hotkey::{
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+/// 全局快捷键事件。当前只有显示/隐藏主窗口一种动作。
 #[derive(Clone, Debug)]
 pub enum ShortcutEvent {
     ToggleWindow,
 }
 
+/// 注册全局快捷键并启动监听线程。
 pub fn spawn_global_shortcut_listener(
     tx: mpsc::UnboundedSender<ShortcutEvent>,
     binding: Option<&str>,
@@ -43,17 +45,18 @@ pub fn spawn_global_shortcut_listener(
             }
         })?;
 
-    // Keep the manager alive for the process lifetime. Phase 1 can replace this with
-    // an owned service that supports unregistering and hotkey changes.
+    // 全局快捷键管理器需要常驻进程生命周期，后续可替换为支持注销/热更新的服务。
     Box::leak(Box::new(manager));
     Ok(())
 }
 
+/// macOS 默认修饰键也先使用 Alt/Option，和 README 中的说明保持一致。
 #[cfg(target_os = "macos")]
 fn default_modifier() -> Modifiers {
     Modifiers::ALT
 }
 
+/// 解析形如 Alt+Space 的快捷键配置，无法识别的按键片段会被忽略。
 fn parse_hotkey(binding: &str) -> HotKey {
     let mut modifiers = Modifiers::empty();
     let mut code = Code::Space;
@@ -83,6 +86,7 @@ fn parse_hotkey(binding: &str) -> HotKey {
     HotKey::new(Some(modifiers), code)
 }
 
+/// Windows/Linux 默认使用 Alt 作为全局唤起修饰键。
 #[cfg(not(target_os = "macos"))]
 fn default_modifier() -> Modifiers {
     Modifiers::ALT

@@ -1,6 +1,7 @@
 import { LineEdit } from "std-widgets.slint";
 import { ResultList, SearchResultView } from "common.slint";
 
+// 剪贴板历史窗口：作为一个工具打开，支持搜索和点击复制。
 export component ClipboardWindow inherits Window {
     in property <[SearchResultView]> rows;
     in-out property <bool> dark-mode;
@@ -17,6 +18,7 @@ export component ClipboardWindow inherits Window {
     resize-border-width: 8px;
     background: root.dark-mode ? #0f141d : #f3f6fb;
 
+    // 顶部搜索框过滤本地剪贴板记录。
     VerticalLayout {
         padding: 14px;
         spacing: 12px;

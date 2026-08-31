@@ -2,6 +2,7 @@ import { LineEdit } from "std-widgets.slint";
 import { NavButton, ResultList, SearchResultView } from "common.slint";
 import { SettingsPanel } from "settings_panel.slint";
 
+// 主窗口：左侧导航固定，右侧根据 active-view 切换搜索、工具、设置页面。
 export component SearchWindow inherits Window {
     in-out property <string> query;
     in property <[SearchResultView]> results;
@@ -32,6 +33,7 @@ export component SearchWindow inherits Window {
     resize-border-width: 8px;
     background: root.dark-mode ? #0f141d : #f3f6fb;
 
+    // 外层横向布局保持 uTools 风格：导航和内容区并排。
     HorizontalLayout {
         padding: 14px;
         spacing: 14px;
@@ -107,6 +109,7 @@ export component SearchWindow inherits Window {
             VerticalLayout {
                 spacing: 12px;
 
+                // 使用条件组件而不是 visible，避免隐藏页面继续占用布局空间。
                 if root.active-view == 0: Rectangle {
                     background: transparent;
                     vertical-stretch: 1;
@@ -164,6 +167,7 @@ export component SearchWindow inherits Window {
                     }
                 }
 
+                // 工具页只展示工具命令，具体工具界面在独立窗口中打开。
                 if root.active-view == 1: Rectangle {
                     background: transparent;
                     vertical-stretch: 1;
@@ -191,6 +195,7 @@ export component SearchWindow inherits Window {
                     }
                 }
 
+                // 设置页承载主题、语言、快捷键和本地数据操作。
                 if root.active-view == 2: Rectangle {
                     background: transparent;
                     vertical-stretch: 1;

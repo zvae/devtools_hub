@@ -10,16 +10,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
+/// 所有数据库迁移脚本在编译期嵌入，运行时按版本顺序执行。
 const MIGRATIONS: &[(&str, &str)] = &[(
     "0001_initial",
     include_str!("../../../migrations/0001_initial.sql"),
 )];
 
+/// SQLite 存储入口。Connection 通过 Mutex 保护，方便被后台任务和 UI 回调共享。
 #[derive(Clone)]
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// 剪贴板记录的应用层模型，source_app 用于展示复制来源窗口。
 #[derive(Clone, Debug)]
 pub struct ClipboardRecord {
     pub id: i64,
@@ -31,6 +34,7 @@ pub struct ClipboardRecord {
 }
 
 impl Storage {
+    /// 打开平台默认数据目录下的数据库。
     pub fn open_default() -> Result<Self> {
         let data_dir = data_dir()?;
         fs::create_dir_all(&data_dir)
@@ -38,6 +42,7 @@ impl Storage {
         Self::open(data_dir.join("devtools.db"))
     }
 
+    /// 打开指定路径数据库，并立即执行迁移。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path.as_ref()).with_context(|| {
             format!("failed to open sqlite database {}", path.as_ref().display())
@@ -52,6 +57,7 @@ impl Storage {
         Ok(storage)
     }
 
+    /// 执行未应用的 SQL 迁移，已执行版本记录在 schema_migrations 中。
     pub fn migrate(&self) -> Result<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
@@ -85,10 +91,12 @@ impl Storage {
         Ok(())
     }
 
+    /// 兼容旧调用：未提供来源应用时按普通剪贴板文本保存。
     pub fn upsert_clipboard_text(&self, content: &str) -> Result<Option<ClipboardRecord>> {
         self.upsert_clipboard_text_from(content, None)
     }
 
+    /// 保存剪贴板文本。使用内容哈希去重，重复复制时只刷新更新时间和来源应用。
     pub fn upsert_clipboard_text_from(
         &self,
         content: &str,
@@ -139,6 +147,7 @@ impl Storage {
         }))
     }
 
+    /// 获取最近更新的剪贴板记录，用于空查询时展示历史列表。
     pub fn latest_clipboard(&self, limit: usize) -> Result<Vec<ClipboardRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -153,6 +162,7 @@ impl Storage {
         Ok(records)
     }
 
+    /// 使用 SQLite FTS5 搜索剪贴板内容。
     pub fn search_clipboard(&self, query: &str, limit: usize) -> Result<Vec<ClipboardRecord>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
@@ -175,6 +185,7 @@ impl Storage {
         Ok(records)
     }
 
+    /// 按 ID 读取剪贴板记录，点击历史项复制回剪贴板时使用。
     pub fn clipboard_by_id(&self, id: i64) -> Result<Option<ClipboardRecord>> {
         let conn = self.lock()?;
         let record = conn
@@ -199,12 +210,14 @@ impl Storage {
         Ok(record)
     }
 
+    /// 清空剪贴板历史，不影响系统当前剪贴板内容。
     pub fn clear_clipboard(&self) -> Result<()> {
         let conn = self.lock()?;
         conn.execute("DELETE FROM clipboard_item", [])?;
         Ok(())
     }
 
+    /// 读取键值配置。
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         let conn = self.lock()?;
         let value = conn
@@ -215,6 +228,7 @@ impl Storage {
         Ok(value)
     }
 
+    /// 写入键值配置，已存在时更新时间和值。
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
@@ -228,6 +242,7 @@ impl Storage {
         Ok(())
     }
 
+    /// 记录命令执行历史，输入只存哈希，避免保留敏感原文。
     pub fn record_execution(&self, command_id: &str, input_hash: Option<&str>) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
@@ -238,6 +253,7 @@ impl Storage {
         Ok(())
     }
 
+    /// 获取 SQLite 连接锁，统一处理 mutex poisoned 错误。
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
@@ -245,6 +261,7 @@ impl Storage {
     }
 }
 
+/// 将 rusqlite 行游标转换成剪贴板模型列表。
 fn rows_to_clipboard(mut rows: rusqlite::Rows<'_>) -> Result<Vec<ClipboardRecord>> {
     let mut records = Vec::new();
     while let Some(row) = rows.next()? {
@@ -260,22 +277,26 @@ fn rows_to_clipboard(mut rows: rusqlite::Rows<'_>) -> Result<Vec<ClipboardRecord
     Ok(records)
 }
 
+/// 解析系统应用数据目录。
 pub fn data_dir() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("", "", "DevToolsHub")
         .context("failed to resolve platform application data directory")?;
     Ok(dirs.data_dir().to_path_buf())
 }
 
+/// 计算内容哈希，用于剪贴板去重和执行历史输入摘要。
 pub fn hash_text(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
+/// 返回 UTC Unix 秒时间戳。
 fn now_unix() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
 }
 
+/// 基于文本特征粗略判断内容类型，用于后续工具推荐和列表筛选。
 fn detect_content_type(content: &str) -> &'static str {
     let trimmed = content.trim();
     if serde_json_like(trimmed) {
@@ -291,11 +312,13 @@ fn detect_content_type(content: &str) -> &'static str {
     }
 }
 
+/// 快速判断文本外形是否像 JSON，避免每次都完整解析。
 fn serde_json_like(value: &str) -> bool {
     (value.starts_with('{') && value.ends_with('}'))
         || (value.starts_with('[') && value.ends_with(']'))
 }
 
+/// 识别常见敏感内容形态，列表展示时会自动打码。
 fn is_sensitive(content: &str) -> bool {
     let lower = content.to_ascii_lowercase();
     content.starts_with("ghp_")
@@ -308,6 +331,7 @@ fn is_sensitive(content: &str) -> bool {
         || lower.contains("mysql://")
 }
 
+/// 将普通查询词转换为 FTS5 前缀查询表达式。
 fn build_fts_query(query: &str) -> String {
     query
         .split_whitespace()
@@ -323,6 +347,7 @@ fn build_fts_query(query: &str) -> String {
 mod tests {
     use super::*;
 
+    /// 临时数据库应能自动迁移，并支持剪贴板全文搜索。
     #[test]
     fn migrates_and_searches_clipboard_text() {
         let db_path = std::env::temp_dir().join(format!(
@@ -348,6 +373,7 @@ mod tests {
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 
+    /// 设置表应支持写入后再次读取。
     #[test]
     fn stores_settings() {
         let db_path = std::env::temp_dir().join(format!(

@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 
 use crate::search::{SearchEngine, SearchResult};
 
+/// UI、托盘、快捷键、剪贴板等前端入口发送给核心运行时的请求。
 #[derive(Clone, Debug)]
 pub enum AppRequest {
     Search {
@@ -37,6 +38,7 @@ pub enum AppRequest {
     Exit,
 }
 
+/// 核心运行时处理完成后发回 UI 线程的事件。
 #[derive(Clone, Debug)]
 pub enum AppEvent {
     SearchCompleted(Vec<SearchResult>),
@@ -75,6 +77,7 @@ pub enum AppEvent {
     Error(String),
 }
 
+/// 应用运行时负责任务调度、持久化调用和搜索结果生成，不直接操作 UI。
 pub struct AppRuntime {
     storage: Storage,
     search: SearchEngine,
@@ -83,6 +86,7 @@ pub struct AppRuntime {
 }
 
 impl AppRuntime {
+    /// 创建核心运行时，并用内置工具初始化搜索引擎。
     pub fn new(
         storage: Storage,
         requests: mpsc::UnboundedReceiver<AppRequest>,
@@ -96,6 +100,7 @@ impl AppRuntime {
         }
     }
 
+    /// 持续消费请求通道，任何错误都会转成 AppEvent::Error 回传给 UI。
     pub async fn run(mut self) {
         while let Some(request) = self.requests.recv().await {
             if let Err(error) = self.handle_request(request).await {
@@ -105,6 +110,7 @@ impl AppRuntime {
         }
     }
 
+    /// 将不同来源的请求分发到对应处理逻辑，保持 UI 回调尽量轻量。
     async fn handle_request(&mut self, request: AppRequest) -> Result<()> {
         match request {
             AppRequest::Search { query } => {
@@ -162,6 +168,7 @@ impl AppRuntime {
         Ok(())
     }
 
+    /// 激活搜索结果。可立即复制的命令直接执行，其它工具交给 UI 打开窗口。
     fn activate_result(&self, result_id: &str) -> Result<()> {
         if result_id == "setting.theme" {
             return self.load_settings();
@@ -196,6 +203,7 @@ impl AppRuntime {
         Ok(())
     }
 
+    /// 执行工具并记录输入摘要，避免把原始输入重复写入执行历史。
     fn run_tool(&self, tool_id: &str, input: &str) -> Result<()> {
         self.storage
             .record_execution(tool_id, Some(&hash_text(input)))?;
@@ -207,6 +215,7 @@ impl AppRuntime {
         Ok(())
     }
 
+    /// 读取设置页需要的完整配置。
     fn load_settings(&self) -> Result<()> {
         let theme = self
             .storage
@@ -228,6 +237,7 @@ impl AppRuntime {
         Ok(())
     }
 
+    /// 启动时只需要先加载主题，避免强制切到设置页。
     fn load_theme(&self) -> Result<()> {
         let theme = self
             .storage
@@ -237,6 +247,7 @@ impl AppRuntime {
         Ok(())
     }
 
+    /// 当前阶段先搜索命令，后续会合并剪贴板、历史和插件结果。
     fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
         let mut results = self.search.search_commands(query, 12);
         results.sort_by(|left, right| right.score.total_cmp(&left.score));

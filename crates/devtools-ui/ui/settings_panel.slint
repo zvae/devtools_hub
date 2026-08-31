@@ -1,6 +1,7 @@
 import { LineEdit } from "std-widgets.slint";
 import { GhostButton, SectionLabel } from "common.slint";
 
+// 设置面板：只负责展示和派发配置变更，实际存储由 Rust 运行时处理。
 export component SettingsPanel inherits Rectangle {
     in property <bool> dark-mode;
     in property <string> language;
@@ -17,6 +18,7 @@ export component SettingsPanel inherits Rectangle {
     VerticalLayout {
         spacing: 18px;
 
+        // 外观设置：当前只提供深色/浅色两种主题。
         SectionLabel {
             text: root.language == "en" ? "Appearance" : "外观";
             dark-mode: root.dark-mode;
@@ -42,6 +44,7 @@ export component SettingsPanel inherits Rectangle {
             }
         }
 
+        // 语言设置：默认中文，英文作为预留能力。
         SectionLabel {
             text: root.language == "en" ? "Language" : "语言";
             dark-mode: root.dark-mode;
@@ -67,6 +70,7 @@ export component SettingsPanel inherits Rectangle {
             }
         }
 
+        // 快捷键设置：保存后重启生效，避免运行期重复注册冲突。
         SectionLabel {
             text: root.language == "en" ? "Shortcut" : "快捷键";
             dark-mode: root.dark-mode;
@@ -99,6 +103,7 @@ export component SettingsPanel inherits Rectangle {
             }
         }
 
+        // 本地数据操作：目前提供剪贴板历史清理。
         SectionLabel {
             text: root.language == "en" ? "Local Data" : "本地数据";
             dark-mode: root.dark-mode;

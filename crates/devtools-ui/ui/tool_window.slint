@@ -1,6 +1,7 @@
 import { Button } from "std-widgets.slint";
 import { EditorPane } from "editor_pane.slint";
 
+// 独立工具窗口：使用系统原生窗口按钮，内部只保留置顶控制。
 export component ToolWindow inherits Window {
     in-out property <string> tool-id;
     in-out property <string> title-text;
@@ -23,6 +24,7 @@ export component ToolWindow inherits Window {
     always-on-top: root.pinned;
     background: root.dark-mode ? #0f141d : #f3f6fb;
 
+    // 输入/输出区域使用弹性布局，窗口最大化或拖拽缩放时自动拉伸。
     VerticalLayout {
         padding: 14px;
         spacing: 12px;
@@ -44,6 +46,7 @@ export component ToolWindow inherits Window {
                     horizontal-stretch: 1;
                 }
 
+                // 置顶按钮放在内容区右上角，避免定制系统标题栏。
                 Rectangle {
                     width: 72px;
                     height: 34px;
@@ -70,6 +73,7 @@ export component ToolWindow inherits Window {
             }
         }
 
+        // 工具输入和输出并排展示，后续可按工具类型替换成专用 UI。
         HorizontalLayout {
             spacing: 12px;
             vertical-stretch: 1;
@@ -91,6 +95,7 @@ export component ToolWindow inherits Window {
             }
         }
 
+        // 底部操作栏：运行工具并复制输出。
         Rectangle {
             height: 42px;
             background: transparent;
