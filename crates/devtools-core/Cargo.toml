@@ -1,0 +1,15 @@
+[package]
+name = "devtools-core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+devtools-plugin-api = { path = "../devtools-plugin-api" }
+devtools-storage = { path = "../devtools-storage" }
+devtools-tools = { path = "../devtools-tools" }
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true

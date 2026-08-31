@@ -1,0 +1,769 @@
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
+
+use anyhow::Result;
+use devtools_core::{AppEvent, AppRequest, AppRuntime, SearchResult};
+use devtools_plugin_api::{CommandDescriptor, CommandSource};
+use devtools_services::{
+    clipboard::{run_clipboard_watcher, set_clipboard_text, ClipboardEvent},
+    middle_click::{spawn_middle_click_listener, QuickActionEvent},
+    shortcut::{spawn_global_shortcut_listener, ShortcutEvent},
+    tray::{spawn_tray_listener, TrayEvent},
+};
+use devtools_storage::{ClipboardRecord, Storage};
+use devtools_ui::{ClipboardWindow, QuickActionWindow, SearchResultView, SearchWindow, ToolWindow};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use tokio::{runtime::Runtime, sync::mpsc};
+use tracing::{error, info, warn};
+
+thread_local! {
+    static TOOL_WINDOWS: RefCell<Vec<ToolWindow>> = const { RefCell::new(Vec::new()) };
+    static CLIPBOARD_WINDOWS: RefCell<Vec<ClipboardWindow>> = const { RefCell::new(Vec::new()) };
+    static QUICK_WINDOWS: RefCell<Vec<QuickActionWindow>> = const { RefCell::new(Vec::new()) };
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let storage = Storage::open_default()?;
+    let hotkey = storage
+        .get_setting("hotkey")?
+        .unwrap_or_else(|| "Alt+Space".into());
+    let runtime = Runtime::new()?;
+    let (request_tx, request_rx) = mpsc::unbounded_channel::<AppRequest>();
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
+
+    runtime.spawn(AppRuntime::new(storage.clone(), request_rx, event_tx).run());
+
+    start_clipboard_bridge(&runtime, request_tx.clone());
+    start_shortcut_bridge(&runtime, request_tx.clone(), hotkey);
+    start_tray_bridge(&runtime, request_tx.clone());
+
+    let app = SearchWindow::new()?;
+    let app_weak = app.as_weak();
+    let search_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let tool_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    app.set_active_view(0);
+    app.set_dark_mode(true);
+    app.set_language("zh-CN".into());
+    app.set_settings_theme("dark".into());
+    app.set_settings_hotkey("Alt+Space".into());
+    app.set_tools(command_model(devtools_tools::builtin_commands(), "zh-CN"));
+    set_ids(
+        &tool_ids,
+        devtools_tools::builtin_commands()
+            .into_iter()
+            .map(|cmd| cmd.id),
+    );
+
+    bind_ui_callbacks(
+        &app,
+        request_tx.clone(),
+        storage.clone(),
+        Arc::clone(&search_ids),
+        Arc::clone(&tool_ids),
+    );
+    bind_runtime_events(app_weak.clone(), Arc::clone(&search_ids), event_rx);
+    start_middle_bridge(&runtime, app_weak, storage);
+
+    request_tx.send(AppRequest::Search {
+        query: String::new(),
+    })?;
+    request_tx.send(AppRequest::LoadTheme)?;
+    app.run()?;
+    Ok(())
+}
+
+fn start_clipboard_bridge(runtime: &Runtime, request_tx: mpsc::UnboundedSender<AppRequest>) {
+    let (clipboard_tx, mut clipboard_rx) = mpsc::unbounded_channel::<ClipboardEvent>();
+    runtime.spawn(run_clipboard_watcher(clipboard_tx));
+    runtime.spawn(async move {
+        while let Some(event) = clipboard_rx.recv().await {
+            match event {
+                ClipboardEvent::TextChanged {
+                    content,
+                    source_app,
+                } => {
+                    let _ = request_tx.send(AppRequest::ClipboardChanged {
+                        content,
+                        source_app,
+                    });
+                }
+            }
+        }
+    });
+}
+
+fn start_shortcut_bridge(
+    runtime: &Runtime,
+    request_tx: mpsc::UnboundedSender<AppRequest>,
+    hotkey: String,
+) {
+    let (shortcut_tx, mut shortcut_rx) = mpsc::unbounded_channel::<ShortcutEvent>();
+
+    match spawn_global_shortcut_listener(shortcut_tx, Some(&hotkey)) {
+        Ok(()) => info!(%hotkey, "global shortcut registered"),
+        Err(error) => warn!(?error, "global shortcut unavailable; window remains usable"),
+    }
+
+    runtime.spawn(async move {
+        while let Some(event) = shortcut_rx.recv().await {
+            match event {
+                ShortcutEvent::ToggleWindow => {
+                    let _ = request_tx.send(AppRequest::ToggleWindow);
+                }
+            }
+        }
+    });
+}
+
+fn start_tray_bridge(runtime: &Runtime, request_tx: mpsc::UnboundedSender<AppRequest>) {
+    let (tray_tx, mut tray_rx) = mpsc::unbounded_channel::<TrayEvent>();
+
+    match spawn_tray_listener(tray_tx) {
+        Ok(()) => info!("tray menu registered"),
+        Err(error) => warn!(?error, "tray unavailable; app can still be closed normally"),
+    }
+
+    runtime.spawn(async move {
+        while let Some(event) = tray_rx.recv().await {
+            match event {
+                TrayEvent::ShowWindow => {
+                    let _ = request_tx.send(AppRequest::ToggleWindow);
+                }
+                TrayEvent::Exit => {
+                    let _ = request_tx.send(AppRequest::Exit);
+                }
+            }
+        }
+    });
+}
+
+fn start_middle_bridge(runtime: &Runtime, app_weak: slint::Weak<SearchWindow>, storage: Storage) {
+    let (quick_tx, mut quick_rx) = mpsc::unbounded_channel::<QuickActionEvent>();
+    spawn_middle_click_listener(quick_tx);
+
+    runtime.spawn(async move {
+        while let Some(event) = quick_rx.recv().await {
+            let app_weak = app_weak.clone();
+            let storage = storage.clone();
+            if let Err(error) = slint::invoke_from_event_loop(move || {
+                let dark_mode = app_weak
+                    .upgrade()
+                    .map(|app| app.get_dark_mode())
+                    .unwrap_or(true);
+                let language = app_weak
+                    .upgrade()
+                    .map(|app| app.get_language().to_string())
+                    .unwrap_or_else(|| "zh-CN".into());
+                open_quick_action_window(storage, event.selected_text, dark_mode, language);
+            }) {
+                error!(?error, "failed to open quick action window");
+            }
+        }
+    });
+}
+
+fn bind_ui_callbacks(
+    app: &SearchWindow,
+    request_tx: mpsc::UnboundedSender<AppRequest>,
+    storage: Storage,
+    search_ids: Arc<Mutex<Vec<String>>>,
+    tool_ids: Arc<Mutex<Vec<String>>>,
+) {
+    let search_tx = request_tx.clone();
+    app.on_query_changed(move |query| {
+        let _ = search_tx.send(AppRequest::Search {
+            query: query.to_string(),
+        });
+    });
+
+    let activate_app = app.as_weak();
+    let activate_storage = storage.clone();
+    let activate_tx = request_tx.clone();
+    app.on_activate_result(move |index| {
+        if let Some(result_id) = get_id(&search_ids, index) {
+            activate_item(
+                &activate_app,
+                activate_storage.clone(),
+                activate_tx.clone(),
+                &result_id,
+                None,
+            );
+        }
+    });
+
+    let tools_app = app.as_weak();
+    let tools_storage = storage.clone();
+    let tools_tx = request_tx.clone();
+    let activate_tool_ids = Arc::clone(&tool_ids);
+    app.on_activate_tool(move |index| {
+        if let Some(result_id) = get_id(&activate_tool_ids, index) {
+            activate_item(
+                &tools_app,
+                tools_storage.clone(),
+                tools_tx.clone(),
+                &result_id,
+                None,
+            );
+        }
+    });
+
+    let show_search_app = app.as_weak();
+    let show_search_tx = request_tx.clone();
+    app.on_show_search(move || {
+        if let Some(app) = show_search_app.upgrade() {
+            app.set_active_view(0);
+            let _ = show_search_tx.send(AppRequest::Search {
+                query: app.get_query().to_string(),
+            });
+        }
+    });
+
+    let show_tools_app = app.as_weak();
+    app.on_show_tools(move || {
+        if let Some(app) = show_tools_app.upgrade() {
+            let language = app.get_language().to_string();
+            let commands = devtools_tools::builtin_commands()
+                .into_iter()
+                .filter(|command| command.id.starts_with("tool."))
+                .collect::<Vec<_>>();
+            set_ids(&tool_ids, commands.iter().map(|cmd| cmd.id.clone()));
+            app.set_tools(command_model(commands, &language));
+            app.set_active_view(1);
+            app.set_status("".into());
+        }
+    });
+
+    let settings_tx = request_tx.clone();
+    app.on_show_settings(move || {
+        let _ = settings_tx.send(AppRequest::OpenSettings);
+    });
+
+    let theme_tx = request_tx.clone();
+    app.on_theme_selected(move |theme| {
+        let _ = theme_tx.send(AppRequest::SetTheme {
+            theme: theme.to_string(),
+        });
+    });
+
+    let language_tx = request_tx.clone();
+    let language_app = app.as_weak();
+    app.on_language_selected(move |language| {
+        let language = language.to_string();
+        if let Some(app) = language_app.upgrade() {
+            app.set_language(language.clone().into());
+            let commands = devtools_tools::builtin_commands()
+                .into_iter()
+                .filter(|command| command.id.starts_with("tool."))
+                .collect::<Vec<_>>();
+            app.set_tools(command_model(commands, &language));
+            let _ = language_tx.send(AppRequest::Search {
+                query: app.get_query().to_string(),
+            });
+        }
+        let _ = language_tx.send(AppRequest::SetLanguage { language });
+    });
+
+    let hotkey_tx = request_tx.clone();
+    app.on_hotkey_changed(move |hotkey| {
+        let _ = hotkey_tx.send(AppRequest::SetHotkey {
+            hotkey: hotkey.to_string(),
+        });
+    });
+
+    app.on_clear_clipboard(move || {
+        let _ = request_tx.send(AppRequest::ClearClipboard);
+    });
+}
+
+fn bind_runtime_events(
+    app_weak: slint::Weak<SearchWindow>,
+    search_ids: Arc<Mutex<Vec<String>>>,
+    mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
+) {
+    std::thread::Builder::new()
+        .name("ui-event-bridge".into())
+        .spawn(move || {
+            let runtime = Runtime::new().expect("failed to create ui event bridge runtime");
+            runtime.block_on(async move {
+                while let Some(event) = event_rx.recv().await {
+                    let app_weak = app_weak.clone();
+                    let search_ids = Arc::clone(&search_ids);
+                    if let Err(error) = slint::invoke_from_event_loop(move || {
+                        if let Some(app) = app_weak.upgrade() {
+                            apply_event(&app, &search_ids, event);
+                        }
+                    }) {
+                        error!(?error, "failed to dispatch UI event");
+                        return;
+                    }
+                }
+            });
+        })
+        .expect("failed to spawn ui event bridge");
+}
+
+fn apply_event(app: &SearchWindow, search_ids: &Arc<Mutex<Vec<String>>>, event: AppEvent) {
+    match event {
+        AppEvent::SearchCompleted(results) => {
+            set_ids(search_ids, results.iter().map(|result| result.id.clone()));
+            let language = app.get_language().to_string();
+            app.set_results(results_to_model(results, &language));
+        }
+        AppEvent::ClipboardStored => {
+            app.set_status(localized_status(app, "剪贴板已保存", "Clipboard saved"));
+        }
+        AppEvent::SettingsLoaded {
+            theme,
+            language,
+            hotkey,
+        } => {
+            apply_theme(app, &theme);
+            app.set_language(language.into());
+            app.set_settings_hotkey(hotkey.into());
+            app.set_active_view(2);
+            app.set_status("".into());
+        }
+        AppEvent::ThemeChanged { theme } => {
+            apply_theme(app, &theme);
+            app.set_status(localized_status(app, "主题已更新", "Theme updated"));
+        }
+        AppEvent::LanguageChanged { language } => {
+            app.set_language(language.into());
+            app.set_status(localized_status(app, "语言已更新", "Language updated"));
+        }
+        AppEvent::HotkeyChanged { hotkey } => {
+            app.set_settings_hotkey(hotkey.into());
+            app.set_status(localized_status(
+                app,
+                "快捷键已保存，重启后生效",
+                "Hotkey saved. Restart to apply.",
+            ));
+        }
+        AppEvent::CommandExecuted { title, content }
+        | AppEvent::ToolCompleted { title, content } => {
+            app.set_status(format!("{title}: {content}").into());
+        }
+        AppEvent::CopyRequested { text } => {
+            if let Err(error) = set_clipboard_text(&text) {
+                app.set_status(format!("Copy failed: {error}").into());
+            }
+        }
+        AppEvent::ToolOpened { tool_id, title } => {
+            let language = app.get_language().to_string();
+            open_tool_window(
+                tool_id.clone(),
+                localized_title(&tool_id, &language, &title),
+                String::new(),
+                app.get_dark_mode(),
+                language,
+            );
+        }
+        AppEvent::ToggleWindow => {
+            app.window().show().ok();
+            app.window().request_redraw();
+        }
+        AppEvent::ExitRequested => {
+            slint::quit_event_loop().ok();
+        }
+        AppEvent::Error(message) => {
+            app.set_status(format!("Error: {message}").into());
+        }
+    }
+}
+
+fn activate_item(
+    app_weak: &slint::Weak<SearchWindow>,
+    storage: Storage,
+    request_tx: mpsc::UnboundedSender<AppRequest>,
+    result_id: &str,
+    input: Option<String>,
+) {
+    let dark_mode = app_weak
+        .upgrade()
+        .map(|app| app.get_dark_mode())
+        .unwrap_or(true);
+    let language = app_weak
+        .upgrade()
+        .map(|app| app.get_language().to_string())
+        .unwrap_or_else(|| "zh-CN".into());
+
+    match result_id {
+        "setting.theme" => {
+            let _ = request_tx.send(AppRequest::OpenSettings);
+        }
+        "tool.clipboard.history" => {
+            open_clipboard_window(storage, dark_mode, language);
+        }
+        "tool.uuid.v4" => {
+            let result = devtools_tools::execute(result_id, "");
+            let _ = set_clipboard_text(&result.content);
+            if let Some(app) = app_weak.upgrade() {
+                app.set_status(localized_status(&app, "UUID 已复制", "UUID copied"));
+            }
+        }
+        id if id.starts_with("tool.") => {
+            open_tool_window(
+                id.to_string(),
+                devtools_tools::localized_title_for(id, &language),
+                input.unwrap_or_default(),
+                dark_mode,
+                language,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn open_tool_window(
+    tool_id: String,
+    title: String,
+    input: String,
+    dark_mode: bool,
+    language: String,
+) {
+    let window = ToolWindow::new().expect("failed to create tool window");
+    window.set_tool_id(tool_id.clone().into());
+    window.set_title_text(title.into());
+    window.set_input(input.into());
+    window.set_output("".into());
+    window.set_dark_mode(dark_mode);
+    window.set_language(language.into());
+    window.set_pinned(false);
+
+    let run_window = window.as_weak();
+    let run_tool_id = tool_id.clone();
+    window.on_run(move |input| {
+        let result = devtools_tools::execute(&run_tool_id, &input);
+        if let Some(window) = run_window.upgrade() {
+            window.set_output(result.content.into());
+        }
+    });
+
+    let copy_window = window.as_weak();
+    window.on_copy_output(move || {
+        if let Some(window) = copy_window.upgrade() {
+            let _ = set_clipboard_text(&window.get_output());
+        }
+    });
+
+    let pin_window = window.as_weak();
+    window.on_toggle_pin(move || {
+        if let Some(window) = pin_window.upgrade() {
+            window.set_pinned(!window.get_pinned());
+        }
+    });
+
+    window.show().ok();
+    TOOL_WINDOWS.with(|windows| windows.borrow_mut().push(window));
+}
+
+fn open_clipboard_window(storage: Storage, dark_mode: bool, language: String) {
+    let window = ClipboardWindow::new().expect("failed to create clipboard window");
+    let ids = Rc::new(RefCell::new(Vec::<String>::new()));
+    window.set_dark_mode(dark_mode);
+    window.set_language(language.clone().into());
+    refresh_clipboard_window(&window, &storage, &ids, "", &language);
+
+    let query_window = window.as_weak();
+    let query_storage = storage.clone();
+    let query_ids = Rc::clone(&ids);
+    let query_language = language.clone();
+    window.on_query_changed(move |query| {
+        if let Some(window) = query_window.upgrade() {
+            refresh_clipboard_window(&window, &query_storage, &query_ids, &query, &query_language);
+        }
+    });
+
+    let activate_storage = storage;
+    window.on_activate_item(move |index| {
+        let id = ids.borrow().get(index as usize).cloned();
+        if let Some(raw_id) = id.and_then(|id| id.strip_prefix("clipboard:").map(str::to_string)) {
+            if let Ok(id) = raw_id.parse::<i64>() {
+                if let Ok(Some(record)) = activate_storage.clipboard_by_id(id) {
+                    let _ = set_clipboard_text(&record.content);
+                }
+            }
+        }
+    });
+
+    window.show().ok();
+    CLIPBOARD_WINDOWS.with(|windows| windows.borrow_mut().push(window));
+}
+
+fn open_quick_action_window(
+    storage: Storage,
+    selected_text: Option<String>,
+    dark_mode: bool,
+    language: String,
+) {
+    let text = selected_text.unwrap_or_default();
+    let actions = quick_actions_for(&text, &language);
+    let action_ids = Rc::new(RefCell::new(
+        actions
+            .iter()
+            .map(|action| action.id.clone())
+            .collect::<Vec<_>>(),
+    ));
+
+    let window = QuickActionWindow::new().expect("failed to create quick action window");
+    window.set_selected_text(text.clone().into());
+    window.set_actions(results_to_model(actions, &language));
+    window.set_dark_mode(dark_mode);
+    window.set_language(language.clone().into());
+
+    let activate_window = window.as_weak();
+    let activate_language = language.clone();
+    window.on_activate_action(move |index| {
+        let action_id = action_ids.borrow().get(index as usize).cloned();
+        if let Some(action_id) = action_id {
+            if action_id == "tool.clipboard.history" {
+                open_clipboard_window(storage.clone(), dark_mode, activate_language.clone());
+            } else {
+                open_tool_window(
+                    action_id.clone(),
+                    devtools_tools::localized_title_for(&action_id, &activate_language),
+                    text.clone(),
+                    dark_mode,
+                    activate_language.clone(),
+                );
+            }
+            if let Some(window) = activate_window.upgrade() {
+                window.hide().ok();
+            }
+        }
+    });
+
+    window.show().ok();
+    QUICK_WINDOWS.with(|windows| windows.borrow_mut().push(window));
+}
+
+fn refresh_clipboard_window(
+    window: &ClipboardWindow,
+    storage: &Storage,
+    ids: &Rc<RefCell<Vec<String>>>,
+    query: &str,
+    language: &str,
+) {
+    let rows = storage.search_clipboard(query, 100).unwrap_or_default();
+    *ids.borrow_mut() = rows
+        .iter()
+        .map(|record| format!("clipboard:{}", record.id))
+        .collect();
+    window.set_rows(clipboard_model(rows, language));
+}
+
+fn quick_actions_for(selected_text: &str, language: &str) -> Vec<SearchResult> {
+    let mut ids = Vec::new();
+    if selected_text.trim_start().starts_with('{') || selected_text.trim_start().starts_with('[') {
+        ids.push("tool.json.format");
+        ids.push("tool.json.minify");
+        ids.push("tool.json.validate");
+    }
+    ids.push("tool.base64.encode");
+    ids.push("tool.base64.decode");
+    ids.push("tool.clipboard.history");
+
+    ids.into_iter()
+        .map(|id| SearchResult {
+            id: id.into(),
+            title: devtools_tools::localized_title_for(id, language),
+            subtitle: if selected_text.is_empty() {
+                if language == "en" {
+                    "Open tool".into()
+                } else {
+                    "打开工具".into()
+                }
+            } else {
+                if language == "en" {
+                    "Use selected text".into()
+                } else {
+                    "使用选中文本".into()
+                }
+            },
+            source: devtools_core::search::SearchSource::BuiltInTool,
+            score: 1.0,
+        })
+        .collect()
+}
+
+fn apply_theme(app: &SearchWindow, theme: &str) {
+    app.set_settings_theme(theme.into());
+    app.set_dark_mode(theme != "light");
+}
+
+fn localized_status(app: &SearchWindow, zh: &str, en: &str) -> SharedString {
+    if app.get_language() == "en" {
+        en.into()
+    } else {
+        zh.into()
+    }
+}
+
+fn get_id(ids: &Arc<Mutex<Vec<String>>>, index: i32) -> Option<String> {
+    ids.lock()
+        .ok()
+        .and_then(|ids| ids.get(index as usize).cloned())
+}
+
+fn set_ids(ids: &Arc<Mutex<Vec<String>>>, values: impl Iterator<Item = String>) {
+    if let Ok(mut ids) = ids.lock() {
+        *ids = values.collect();
+    }
+}
+
+fn command_model(commands: Vec<CommandDescriptor>, language: &str) -> ModelRc<SearchResultView> {
+    let rows = commands
+        .into_iter()
+        .map(|command| {
+            let (title, subtitle) = devtools_tools::localized_command_text(&command, language);
+            SearchResultView {
+                id: command.id.into(),
+                title: title.into(),
+                subtitle: subtitle.into(),
+                source: source_label_from_command(&command.source, language).into(),
+            }
+        })
+        .collect::<Vec<_>>();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+fn clipboard_model(records: Vec<ClipboardRecord>, language: &str) -> ModelRc<SearchResultView> {
+    let rows = records
+        .into_iter()
+        .map(|record| {
+            let title = if record.sensitive {
+                format!(
+                    "{}: {}...",
+                    if language == "en" {
+                        "Clipboard"
+                    } else {
+                        "剪贴板"
+                    },
+                    record.content.chars().take(12).collect::<String>()
+                )
+            } else {
+                format!(
+                    "{}: {}",
+                    if language == "en" {
+                        "Clipboard"
+                    } else {
+                        "剪贴板"
+                    },
+                    summarize(&record.content)
+                )
+            };
+            let subtitle = record.source_app.unwrap_or_else(|| {
+                if language == "en" {
+                    "Local clipboard".into()
+                } else {
+                    "本地剪贴板".into()
+                }
+            });
+            SearchResultView {
+                id: format!("clipboard:{}", record.id).into(),
+                title: title.into(),
+                subtitle: subtitle.into(),
+                source: source_label(&devtools_core::search::SearchSource::Clipboard, language)
+                    .into(),
+            }
+        })
+        .collect::<Vec<_>>();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+fn results_to_model(results: Vec<SearchResult>, language: &str) -> ModelRc<SearchResultView> {
+    let rows = results
+        .into_iter()
+        .map(|result| {
+            let title = localized_title(&result.id, language, &result.title);
+            let subtitle = localized_subtitle(&result.id, language, &result.subtitle);
+            SearchResultView {
+                id: result.id.into(),
+                title: title.into(),
+                subtitle: subtitle.into(),
+                source: source_label(&result.source, language).into(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+fn source_label_from_command(source: &CommandSource, language: &str) -> SharedString {
+    match source {
+        CommandSource::BuiltInTool => if language == "en" { "Tool" } else { "工具" }.into(),
+        CommandSource::Plugin => if language == "en" { "Plugin" } else { "插件" }.into(),
+        CommandSource::Clipboard => if language == "en" { "Clip" } else { "剪贴" }.into(),
+        CommandSource::History => if language == "en" {
+            "History"
+        } else {
+            "历史"
+        }
+        .into(),
+        CommandSource::Setting => if language == "en" {
+            "Setting"
+        } else {
+            "设置"
+        }
+        .into(),
+    }
+}
+
+fn source_label(source: &devtools_core::search::SearchSource, language: &str) -> SharedString {
+    match source {
+        devtools_core::search::SearchSource::BuiltInTool => {
+            if language == "en" { "Tool" } else { "工具" }.into()
+        }
+        devtools_core::search::SearchSource::Clipboard => {
+            if language == "en" { "Clip" } else { "剪贴" }.into()
+        }
+        devtools_core::search::SearchSource::Plugin => {
+            if language == "en" { "Plugin" } else { "插件" }.into()
+        }
+        devtools_core::search::SearchSource::History => if language == "en" {
+            "History"
+        } else {
+            "历史"
+        }
+        .into(),
+        devtools_core::search::SearchSource::Setting => if language == "en" {
+            "Setting"
+        } else {
+            "设置"
+        }
+        .into(),
+    }
+}
+
+fn localized_title(result_id: &str, language: &str, fallback: &str) -> String {
+    if result_id.starts_with("tool.") || result_id.starts_with("setting.") {
+        devtools_tools::localized_title_for(result_id, language)
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn localized_subtitle(result_id: &str, language: &str, fallback: &str) -> String {
+    if result_id.starts_with("tool.") || result_id.starts_with("setting.") {
+        devtools_tools::localized_subtitle_for(result_id, language)
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn summarize(content: &str) -> String {
+    let single_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if single_line.chars().count() > 72 {
+        format!("{}...", single_line.chars().take(72).collect::<String>())
+    } else {
+        single_line
+    }
+}

@@ -1,0 +1,6 @@
+/target/
+/.slint/
+*.db
+*.db-shm
+*.db-wal
+*.log

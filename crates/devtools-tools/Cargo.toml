@@ -1,0 +1,12 @@
+[package]
+name = "devtools-tools"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+base64.workspace = true
+devtools-plugin-api = { path = "../devtools-plugin-api" }
+serde_json.workspace = true
+uuid.workspace = true

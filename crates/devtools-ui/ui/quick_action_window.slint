@@ -1,0 +1,60 @@
+import { ResultList, SearchResultView } from "common.slint";
+
+export component QuickActionWindow inherits Window {
+    in-out property <string> selected-text;
+    in property <[SearchResultView]> actions;
+    in-out property <bool> dark-mode;
+    in-out property <string> language;
+
+    callback activate-action(int);
+
+    title: root.language == "en" ? "Quick Actions" : "快捷动作";
+    preferred-width: 420px;
+    preferred-height: 360px;
+    min-width: 360px;
+    min-height: 260px;
+    resize-border-width: 8px;
+    background: root.dark-mode ? #0f141d : #f3f6fb;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        Rectangle {
+            height: root.selected-text == "" ? 0px : 58px;
+            visible: root.selected-text != "";
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.dark-mode ? #293449 : #e0e6ef;
+            background: root.dark-mode ? #151d2b : #ffffff;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 4px;
+
+                Text {
+                    text: root.language == "en" ? "Selection" : "已选文本";
+                    color: root.dark-mode ? #8f9aae : #637083;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: root.selected-text;
+                    color: root.dark-mode ? #f3f6fb : #172033;
+                    font-size: 13px;
+                    overflow: elide;
+                }
+            }
+        }
+
+        ResultList {
+            rows: root.actions;
+            dark-mode: root.dark-mode;
+            vertical-stretch: 1;
+            activate-row(index) => {
+                root.activate-action(index);
+            }
+        }
+    }
+}

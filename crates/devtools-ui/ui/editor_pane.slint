@@ -1,0 +1,35 @@
+import { TextEdit } from "std-widgets.slint";
+import { SectionLabel } from "common.slint";
+
+export component EditorPane inherits Rectangle {
+    in property <string> label;
+    in property <bool> dark-mode;
+    in-out property <string> text;
+    in property <bool> read-only;
+
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.dark-mode ? #2f3a4f : #d9e0ea;
+    background: root.dark-mode ? #121926 : #ffffff;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        SectionLabel {
+            text: root.label;
+            dark-mode: root.dark-mode;
+        }
+
+        TextEdit {
+            text: root.text;
+            read-only: root.read-only;
+            font-size: 14px;
+            edited(value) => {
+                if (!root.read-only) {
+                    root.text = value;
+                }
+            }
+        }
+    }
+}

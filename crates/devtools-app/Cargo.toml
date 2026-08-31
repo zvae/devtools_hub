@@ -1,0 +1,19 @@
+[package]
+name = "devtools-app"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+devtools-core = { path = "../devtools-core" }
+devtools-plugin-api = { path = "../devtools-plugin-api" }
+devtools-services = { path = "../devtools-services" }
+devtools-storage = { path = "../devtools-storage" }
+devtools-tools = { path = "../devtools-tools" }
+devtools-ui = { path = "../devtools-ui" }
+slint.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

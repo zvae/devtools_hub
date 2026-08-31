@@ -1,0 +1,10 @@
+[package]
+name = "devtools-plugin-host"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+devtools-plugin-api = { path = "../devtools-plugin-api" }
+thiserror.workspace = true

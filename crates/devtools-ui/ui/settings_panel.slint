@@ -1,0 +1,119 @@
+import { LineEdit } from "std-widgets.slint";
+import { GhostButton, SectionLabel } from "common.slint";
+
+export component SettingsPanel inherits Rectangle {
+    in property <bool> dark-mode;
+    in property <string> language;
+    in-out property <string> settings-theme;
+    in-out property <string> settings-hotkey;
+
+    callback theme-selected(string);
+    callback language-selected(string);
+    callback hotkey-changed(string);
+    callback clear-clipboard;
+
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 18px;
+
+        SectionLabel {
+            text: root.language == "en" ? "Appearance" : "外观";
+            dark-mode: root.dark-mode;
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            GhostButton {
+                text: root.language == "en" ? "Dark" : "深色";
+                dark-mode: root.dark-mode;
+                active: root.settings-theme != "light";
+                clicked => {
+                    root.theme-selected("dark");
+                }
+            }
+            GhostButton {
+                text: root.language == "en" ? "Light" : "浅色";
+                dark-mode: root.dark-mode;
+                active: root.settings-theme == "light";
+                clicked => {
+                    root.theme-selected("light");
+                }
+            }
+        }
+
+        SectionLabel {
+            text: root.language == "en" ? "Language" : "语言";
+            dark-mode: root.dark-mode;
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            GhostButton {
+                text: "简体中文";
+                dark-mode: root.dark-mode;
+                active: root.language != "en";
+                clicked => {
+                    root.language-selected("zh-CN");
+                }
+            }
+            GhostButton {
+                text: "English";
+                dark-mode: root.dark-mode;
+                active: root.language == "en";
+                clicked => {
+                    root.language-selected("en");
+                }
+            }
+        }
+
+        SectionLabel {
+            text: root.language == "en" ? "Shortcut" : "快捷键";
+            dark-mode: root.dark-mode;
+        }
+
+        Rectangle {
+            height: 46px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.dark-mode ? #303a4e : #d9e0ea;
+            background: root.dark-mode ? #151c28 : #ffffff;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+
+                LineEdit {
+                    text: root.settings-hotkey;
+                    placeholder-text: "Alt+Space";
+                    font-size: 15px;
+                    edited(value) => {
+                        root.settings-hotkey = value;
+                        root.hotkey-changed(value);
+                    }
+                    accepted(value) => {
+                        root.settings-hotkey = value;
+                        root.hotkey-changed(value);
+                    }
+                }
+            }
+        }
+
+        SectionLabel {
+            text: root.language == "en" ? "Local Data" : "本地数据";
+            dark-mode: root.dark-mode;
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            GhostButton {
+                text: root.language == "en" ? "Clear Clips" : "清空剪贴板";
+                dark-mode: root.dark-mode;
+                active: false;
+                clicked => {
+                    root.clear-clipboard();
+                }
+            }
+        }
+    }
+}

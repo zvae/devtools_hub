@@ -1,0 +1,172 @@
+import { Button, ListView } from "std-widgets.slint";
+
+export struct SearchResultView {
+    id: string,
+    title: string,
+    subtitle: string,
+    source: string,
+}
+
+export component SectionLabel inherits Rectangle {
+    in property <string> text;
+    in property <bool> dark-mode;
+
+    height: 26px;
+    background: transparent;
+
+    Text {
+        text: root.text;
+        color: root.dark-mode ? #8f9aae : #5f6b7a;
+        font-size: 12px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+}
+
+export component NavButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> selected;
+    in property <bool> dark-mode;
+    callback clicked;
+
+    height: 42px;
+    border-radius: 8px;
+    background: root.selected ? (root.dark-mode ? #263247 : #e8eef8) : transparent;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+
+        Text {
+            text: root.icon;
+            color: root.selected ? #5ea1ff : (root.dark-mode ? #8894a7 : #687386);
+            font-size: 15px;
+            width: 18px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.text;
+            color: root.selected ? (root.dark-mode ? #eef5ff : #1c3354) : (root.dark-mode ? #bdc6d4 : #425066);
+            font-size: 14px;
+            font-weight: root.selected ? 700 : 500;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component GhostButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> dark-mode;
+    in property <bool> active;
+    callback clicked;
+
+    min-width: 74px;
+    height: 34px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.active ? #5ea1ff : (root.dark-mode ? #303a4e : #d9e0ea);
+    background: root.active ? (root.dark-mode ? #203555 : #eaf2ff) : (root.dark-mode ? #161d29 : #ffffff);
+
+    Text {
+        text: root.text;
+        color: root.active ? (root.dark-mode ? #eaf3ff : #1c4e91) : (root.dark-mode ? #d2d9e4 : #2d3748);
+        font-size: 13px;
+        font-weight: root.active ? 700 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component ResultList inherits Rectangle {
+    in property <[SearchResultView]> rows;
+    in property <bool> dark-mode;
+    callback activate-row(int);
+
+    background: transparent;
+
+    ListView {
+        for row[index] in root.rows: item := Rectangle {
+            height: 74px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: touch.has-hover ? #5ea1ff : (root.dark-mode ? #293449 : #e5e9f0);
+            background: touch.has-hover ? (root.dark-mode ? #202b3e : #f5f8fd) : (root.dark-mode ? #171e2b : #ffffff);
+
+            badge := Rectangle {
+                x: 20px;
+                y: (item.height - self.height) / 2;
+                width: 44px;
+                height: 44px;
+                border-radius: 8px;
+                background: root.dark-mode ? #27334a : #e9eef7;
+
+                Text {
+                    text: row.source;
+                    color: root.dark-mode ? #9ec5ff : #37659d;
+                    font-size: 10px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            text-pane := Rectangle {
+                x: 82px;
+                y: (item.height - self.height) / 2;
+                width: item.width - self.x - 18px;
+                height: 46px;
+                background: transparent;
+
+                VerticalLayout {
+                    spacing: 3px;
+                    alignment: center;
+
+                    Text {
+                        text: row.title;
+                        color: root.dark-mode ? #f3f6fb : #172033;
+                        font-size: 15px;
+                        font-weight: 700;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: row.subtitle;
+                        color: root.dark-mode ? #8f9aae : #637083;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            touch := TouchArea {
+                clicked => {
+                    root.activate-row(index);
+                }
+            }
+        }
+    }
+}
+
+export component PrimaryButton inherits Button {
+    in property <string> label;
+    text: label;
+}

@@ -1,0 +1,58 @@
+import { LineEdit } from "std-widgets.slint";
+import { ResultList, SearchResultView } from "common.slint";
+
+export component ClipboardWindow inherits Window {
+    in property <[SearchResultView]> rows;
+    in-out property <bool> dark-mode;
+    in-out property <string> language;
+
+    callback query-changed(string);
+    callback activate-item(int);
+
+    title: root.language == "en" ? "Clipboard History" : "剪贴板历史";
+    preferred-width: 620px;
+    preferred-height: 560px;
+    min-width: 460px;
+    min-height: 360px;
+    resize-border-width: 8px;
+    background: root.dark-mode ? #0f141d : #f3f6fb;
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 12px;
+
+        Rectangle {
+            height: 50px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.dark-mode ? #263249 : #dfe6ef;
+            background: root.dark-mode ? #151d2b : #ffffff;
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+
+                LineEdit {
+                    placeholder-text: root.language == "en" ? "Search clipboard" : "搜索剪贴板";
+                    font-size: 16px;
+                    edited(value) => {
+                        root.query-changed(value);
+                    }
+                    accepted(value) => {
+                        root.query-changed(value);
+                        root.activate-item(0);
+                    }
+                }
+            }
+        }
+
+        ResultList {
+            rows: root.rows;
+            dark-mode: root.dark-mode;
+            vertical-stretch: 1;
+            activate-row(index) => {
+                root.activate-item(index);
+            }
+        }
+    }
+}

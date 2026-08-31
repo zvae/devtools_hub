@@ -1,0 +1,122 @@
+import { Button } from "std-widgets.slint";
+import { EditorPane } from "editor_pane.slint";
+
+export component ToolWindow inherits Window {
+    in-out property <string> tool-id;
+    in-out property <string> title-text;
+    in-out property <string> input;
+    in-out property <string> output;
+    in-out property <bool> dark-mode;
+    in-out property <bool> pinned;
+    in-out property <string> language;
+
+    callback run(string);
+    callback copy-output;
+    callback toggle-pin;
+
+    title: root.title-text;
+    preferred-width: 860px;
+    preferred-height: 560px;
+    min-width: 620px;
+    min-height: 420px;
+    resize-border-width: 8px;
+    always-on-top: root.pinned;
+    background: root.dark-mode ? #0f141d : #f3f6fb;
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 12px;
+
+        Rectangle {
+            height: 46px;
+            background: transparent;
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                Text {
+                    text: root.title-text;
+                    color: root.dark-mode ? #f4f7fb : #142033;
+                    font-size: 22px;
+                    font-weight: 800;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                Rectangle {
+                    width: 72px;
+                    height: 34px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: root.pinned ? #5ea1ff : (root.dark-mode ? #303a4e : #d9e0ea);
+                    background: root.pinned ? (root.dark-mode ? #203555 : #eaf2ff) : (root.dark-mode ? #151c28 : #ffffff);
+
+                    Text {
+                        text: root.language == "en" ? "Top" : "置顶";
+                        color: root.pinned ? (root.dark-mode ? #eaf3ff : #1c4e91) : (root.dark-mode ? #d2d9e4 : #2d3748);
+                        font-size: 13px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.toggle-pin();
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
+            EditorPane {
+                label: root.language == "en" ? "Input" : "输入";
+                dark-mode: root.dark-mode;
+                text <=> root.input;
+                read-only: false;
+                horizontal-stretch: 1;
+            }
+
+            EditorPane {
+                label: root.language == "en" ? "Output" : "输出";
+                dark-mode: root.dark-mode;
+                text <=> root.output;
+                read-only: true;
+                horizontal-stretch: 1;
+            }
+        }
+
+        Rectangle {
+            height: 42px;
+            background: transparent;
+
+            HorizontalLayout {
+                spacing: 10px;
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+                }
+
+                Button {
+                    text: root.language == "en" ? "Run" : "运行";
+                    clicked => {
+                        root.run(root.input);
+                    }
+                }
+
+                Button {
+                    text: root.language == "en" ? "Copy" : "复制";
+                    clicked => {
+                        root.copy-output();
+                    }
+                }
+            }
+        }
+    }
+}

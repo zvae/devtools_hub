@@ -1,0 +1,41 @@
+[workspace]
+members = [
+    "crates/devtools-app",
+    "crates/devtools-core",
+    "crates/devtools-plugin-api",
+    "crates/devtools-plugin-host",
+    "crates/devtools-services",
+    "crates/devtools-storage",
+    "crates/devtools-tools",
+    "crates/devtools-ui",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+arboard = "3.4"
+base64 = "0.22"
+crossbeam-channel = "0.5"
+directories = "5.0"
+global-hotkey = "0.6"
+rdev = "0.5"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+slint = "1.7"
+slint-build = "1.7"
+thiserror = "1.0"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tray-icon = "0.19"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.10", features = ["v4"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
