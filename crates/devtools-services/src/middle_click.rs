@@ -1,4 +1,11 @@
-use std::{thread, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 use arboard::Clipboard;
 #[cfg(not(target_os = "macos"))]
@@ -25,16 +32,39 @@ pub struct ScreenPosition {
     pub y: i32,
 }
 
+/// Controls whether the global middle-click action is active.
+#[derive(Clone)]
+pub struct MiddleClickController {
+    enabled: Arc<AtomicBool>,
+}
+
+impl MiddleClickController {
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+}
+
 /// 启动全局中键监听线程。监听失败不会阻塞主程序启动。
-pub fn spawn_middle_click_listener(tx: mpsc::UnboundedSender<QuickActionEvent>) {
+pub fn spawn_middle_click_listener(
+    tx: mpsc::UnboundedSender<QuickActionEvent>,
+    initially_enabled: bool,
+) -> MiddleClickController {
+    let enabled = Arc::new(AtomicBool::new(initially_enabled));
     let (capture_tx, capture_rx) = std::sync::mpsc::channel::<Option<ScreenPosition>>();
     let dismiss_tx = tx.clone();
+    let capture_enabled = Arc::clone(&enabled);
 
     thread::Builder::new()
         .name("selected-text-capture".into())
         .spawn(move || {
             while let Ok(position) = capture_rx.recv() {
+                if !capture_enabled.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let selected_text = capture_selected_text();
+                if !capture_enabled.load(Ordering::Relaxed) {
+                    continue;
+                }
                 if tx
                     .send(QuickActionEvent::Show {
                         selected_text,
@@ -50,16 +80,19 @@ pub fn spawn_middle_click_listener(tx: mpsc::UnboundedSender<QuickActionEvent>) 
         .expect("failed to spawn selected text capture worker");
 
     #[cfg(target_os = "macos")]
-    spawn_macos_middle_click_listener(capture_tx, dismiss_tx);
+    spawn_macos_middle_click_listener(capture_tx, dismiss_tx, Arc::clone(&enabled));
 
     #[cfg(not(target_os = "macos"))]
-    spawn_rdev_middle_click_listener(capture_tx, dismiss_tx);
+    spawn_rdev_middle_click_listener(capture_tx, dismiss_tx, Arc::clone(&enabled));
+
+    MiddleClickController { enabled }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn spawn_rdev_middle_click_listener(
     capture_tx: std::sync::mpsc::Sender<Option<ScreenPosition>>,
     dismiss_tx: mpsc::UnboundedSender<QuickActionEvent>,
+    enabled: Arc<AtomicBool>,
 ) {
     thread::Builder::new()
         .name("middle-click-listener".into())
@@ -67,12 +100,18 @@ fn spawn_rdev_middle_click_listener(
             let mut cursor_position = None;
             let callback = move |event: Event| match event.event_type {
                 EventType::ButtonRelease(Button::Middle) => {
+                    if !enabled.load(Ordering::Relaxed) {
+                        return;
+                    }
                     let position = current_cursor_position().or(cursor_position);
                     if capture_tx.send(position).is_err() {
                         debug!("middle-click listener stopped because capture worker exited");
                     }
                 }
                 EventType::ButtonPress(button) if button != Button::Middle => {
+                    if !enabled.load(Ordering::Relaxed) {
+                        return;
+                    }
                     schedule_external_dismiss(dismiss_tx.clone());
                 }
                 EventType::MouseMove { x, y } => {
@@ -112,6 +151,7 @@ fn current_cursor_position() -> Option<ScreenPosition> {
 fn spawn_macos_middle_click_listener(
     capture_tx: std::sync::mpsc::Sender<Option<ScreenPosition>>,
     dismiss_tx: mpsc::UnboundedSender<QuickActionEvent>,
+    enabled: Arc<AtomicBool>,
 ) {
     thread::Builder::new()
         .name("middle-click-listener".into())
@@ -138,6 +178,9 @@ fn spawn_macos_middle_click_listener(
                     let button =
                         event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
                     if matches!(event_type, CGEventType::OtherMouseUp) && button == 2 {
+                        if !enabled.load(Ordering::Relaxed) {
+                            return None;
+                        }
                         let location = event.location();
                         let position = Some(ScreenPosition {
                             x: location.x.round() as i32,
@@ -152,6 +195,7 @@ fn spawn_macos_middle_click_listener(
                             | CGEventType::RightMouseDown
                             | CGEventType::OtherMouseDown
                     ) && button != 2
+                        && enabled.load(Ordering::Relaxed)
                         && {
                             let target_pid = event
                                 .get_integer_value_field(EventField::EVENT_TARGET_UNIX_PROCESS_ID);

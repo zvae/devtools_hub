@@ -33,6 +33,12 @@ pub enum AppRequest {
     SetHotkey {
         hotkey: String,
     },
+    SetAutostart {
+        enabled: bool,
+    },
+    SetMiddleClickEnabled {
+        enabled: bool,
+    },
     ClearClipboard,
     ToggleWindow,
     Exit,
@@ -59,6 +65,8 @@ pub enum AppEvent {
         theme: String,
         language: String,
         hotkey: String,
+        autostart: bool,
+        middle_click_enabled: bool,
     },
     ThemeChanged {
         theme: String,
@@ -68,6 +76,12 @@ pub enum AppEvent {
     },
     HotkeyChanged {
         hotkey: String,
+    },
+    AutostartChanged {
+        enabled: bool,
+    },
+    MiddleClickChanged {
+        enabled: bool,
     },
     CopyRequested {
         text: String,
@@ -146,6 +160,18 @@ impl AppRuntime {
             AppRequest::SetHotkey { hotkey } => {
                 self.storage.set_setting("hotkey", &hotkey)?;
                 self.events.send(AppEvent::HotkeyChanged { hotkey })?;
+            }
+            AppRequest::SetAutostart { enabled } => {
+                self.storage
+                    .set_setting("autostart", if enabled { "true" } else { "false" })?;
+                self.events.send(AppEvent::AutostartChanged { enabled })?;
+            }
+            AppRequest::SetMiddleClickEnabled { enabled } => {
+                self.storage.set_setting(
+                    "middle_click_enabled",
+                    if enabled { "true" } else { "false" },
+                )?;
+                self.events.send(AppEvent::MiddleClickChanged { enabled })?;
             }
             AppRequest::ClearClipboard => {
                 self.storage.clear_clipboard()?;
@@ -229,10 +255,22 @@ impl AppRuntime {
             .storage
             .get_setting("hotkey")?
             .unwrap_or_else(|| "Alt+Space".into());
+        let autostart = self
+            .storage
+            .get_setting("autostart")?
+            .map(|value| value == "true" || value == "1")
+            .unwrap_or(false);
+        let middle_click_enabled = self
+            .storage
+            .get_setting("middle_click_enabled")?
+            .map(|value| value == "true" || value == "1")
+            .unwrap_or(true);
         self.events.send(AppEvent::SettingsLoaded {
             theme,
             language,
             hotkey,
+            autostart,
+            middle_click_enabled,
         })?;
         Ok(())
     }

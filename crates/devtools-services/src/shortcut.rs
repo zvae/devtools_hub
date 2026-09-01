@@ -2,10 +2,7 @@ use std::{thread, time::Duration};
 
 use anyhow::Result;
 use crossbeam_channel::RecvTimeoutError;
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager,
-};
+use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -15,13 +12,19 @@ pub enum ShortcutEvent {
     ToggleWindow,
 }
 
+/// Owns the platform hotkey manager on the thread where it was created.
+pub struct GlobalShortcut {
+    manager: GlobalHotKeyManager,
+    hotkey: HotKey,
+}
+
 /// 注册全局快捷键并启动监听线程。
 pub fn spawn_global_shortcut_listener(
     tx: mpsc::UnboundedSender<ShortcutEvent>,
     binding: Option<&str>,
-) -> Result<()> {
+) -> Result<GlobalShortcut> {
     let manager = GlobalHotKeyManager::new()?;
-    let hotkey = parse_hotkey(binding.unwrap_or("Alt+Space"));
+    let hotkey = parse_hotkey(binding.unwrap_or("Alt+Space"))?;
     manager.register(hotkey)?;
 
     thread::Builder::new()
@@ -30,12 +33,13 @@ pub fn spawn_global_shortcut_listener(
             let receiver = GlobalHotKeyEvent::receiver();
             loop {
                 match receiver.recv_timeout(Duration::from_millis(250)) {
-                    Ok(_) => {
+                    Ok(event) if event.state == HotKeyState::Pressed => {
                         if tx.send(ShortcutEvent::ToggleWindow).is_err() {
                             debug!("shortcut listener stopped because receiver was dropped");
                             return;
                         }
                     }
+                    Ok(_) => {}
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(error) => {
                         warn!(?error, "global hotkey listener failed");
@@ -45,49 +49,51 @@ pub fn spawn_global_shortcut_listener(
             }
         })?;
 
-    // 全局快捷键管理器需要常驻进程生命周期，后续可替换为支持注销/热更新的服务。
-    Box::leak(Box::new(manager));
+    Ok(GlobalShortcut { manager, hotkey })
+}
+
+/// Replace the registered shortcut without restarting the application.
+pub fn update_global_shortcut(shortcut: &mut GlobalShortcut, binding: &str) -> Result<()> {
+    let new_hotkey = parse_hotkey(binding)?;
+    if new_hotkey == shortcut.hotkey {
+        return Ok(());
+    }
+
+    shortcut.manager.register(new_hotkey)?;
+    if let Err(error) = shortcut.manager.unregister(shortcut.hotkey) {
+        let _ = shortcut.manager.unregister(new_hotkey);
+        return Err(error.into());
+    }
+    shortcut.hotkey = new_hotkey;
     Ok(())
 }
 
-/// macOS 默认修饰键也先使用 Alt/Option，和 README 中的说明保持一致。
-#[cfg(target_os = "macos")]
-fn default_modifier() -> Modifiers {
-    Modifiers::ALT
-}
-
-/// 解析形如 Alt+Space 的快捷键配置，无法识别的按键片段会被忽略。
-fn parse_hotkey(binding: &str) -> HotKey {
-    let mut modifiers = Modifiers::empty();
-    let mut code = Code::Space;
-
-    for part in binding
-        .split('+')
-        .map(|part| part.trim().to_ascii_lowercase())
-    {
-        match part.as_str() {
-            "alt" | "option" => modifiers |= Modifiers::ALT,
-            "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
-            "shift" => modifiers |= Modifiers::SHIFT,
-            "cmd" | "command" | "meta" | "super" => modifiers |= Modifiers::SUPER,
-            "space" => code = Code::Space,
-            "enter" | "return" => code = Code::Enter,
-            "j" => code = Code::KeyJ,
-            "k" => code = Code::KeyK,
-            "p" => code = Code::KeyP,
-            _ => {}
-        }
+/// Parse the canonical shortcut names emitted by the settings key recorder.
+fn parse_hotkey(binding: &str) -> Result<HotKey> {
+    let binding = binding.trim();
+    if binding.is_empty() {
+        anyhow::bail!("shortcut cannot be empty")
     }
 
-    if modifiers.is_empty() {
-        modifiers = default_modifier();
-    }
-
-    HotKey::new(Some(modifiers), code)
+    binding
+        .parse::<HotKey>()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-/// Windows/Linux 默认使用 Alt 作为全局唤起修饰键。
-#[cfg(not(target_os = "macos"))]
-fn default_modifier() -> Modifiers {
-    Modifiers::ALT
+#[cfg(test)]
+mod tests {
+    use super::parse_hotkey;
+    use global_hotkey::hotkey::{Code, Modifiers};
+
+    #[test]
+    fn parses_shortcuts_emitted_by_the_key_recorder() {
+        let hotkey = parse_hotkey("Ctrl+Shift+K").expect("shortcut should parse");
+        assert_eq!(hotkey.key, Code::KeyK);
+        assert_eq!(hotkey.mods, Modifiers::CONTROL | Modifiers::SHIFT);
+    }
+
+    #[test]
+    fn rejects_empty_shortcuts() {
+        assert!(parse_hotkey(" ").is_err());
+    }
 }

@@ -1,4 +1,4 @@
-import { LineEdit } from "std-widgets.slint";
+import { CheckBox, ScrollView } from "std-widgets.slint";
 import { GhostButton, SectionLabel } from "common.slint";
 
 // 设置面板：只负责展示和派发配置变更，实际存储由 Rust 运行时处理。
@@ -7,16 +7,25 @@ export component SettingsPanel inherits Rectangle {
     in property <string> language;
     in-out property <string> settings-theme;
     in-out property <string> settings-hotkey;
+    in-out property <bool> settings-autostart;
+    in-out property <bool> settings-middle-click-enabled;
+    in property <string> control-modifier: "Ctrl";
+    in property <string> meta-modifier: "Super";
 
     callback theme-selected(string);
     callback language-selected(string);
     callback hotkey-changed(string);
+    callback autostart-changed(bool);
+    callback middle-click-enabled-changed(bool);
     callback clear-clipboard;
 
     background: transparent;
+    vertical-stretch: 1;
 
-    VerticalLayout {
-        spacing: 18px;
+    ScrollView {
+        VerticalLayout {
+            width: root.width;
+            spacing: 18px;
 
         // 外观设置：当前只提供深色/浅色两种主题。
         SectionLabel {
@@ -70,10 +79,17 @@ export component SettingsPanel inherits Rectangle {
             }
         }
 
-        // 快捷键设置：保存后重启生效，避免运行期重复注册冲突。
         SectionLabel {
-            text: root.language == "en" ? "Shortcut" : "快捷键";
+            text: root.language == "en" ? "Shortcuts & Actions" : "快捷键与行为";
             dark-mode: root.dark-mode;
+        }
+
+        Text {
+            text: root.language == "en" ? "Show main window" : "唤起主窗口";
+            color: root.dark-mode ? #d2d9e4 : #2d3748;
+            font-size: 13px;
+            height: 22px;
+            vertical-alignment: center;
         }
 
         Rectangle {
@@ -87,36 +103,170 @@ export component SettingsPanel inherits Rectangle {
                 padding-left: 12px;
                 padding-right: 12px;
 
-                LineEdit {
-                    text: root.settings-hotkey;
-                    placeholder-text: "Alt+Space";
+                TextInput {
+                    text <=> root.settings-hotkey;
+                    color: root.dark-mode ? #f3f6fb : #172033;
+                    selection-foreground-color: root.dark-mode ? #0f141d : #ffffff;
+                    selection-background-color: #5ea1ff;
                     font-size: 15px;
-                    edited(value) => {
-                        root.settings-hotkey = value;
-                        root.hotkey-changed(value);
-                    }
-                    accepted(value) => {
-                        root.settings-hotkey = value;
-                        root.hotkey-changed(value);
+                    read-only: true;
+                    width: parent.width;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    key-pressed(event) => {
+                        if (event.text == Key.Control || event.text == Key.Alt || event.text == Key.Shift || event.text == Key.Meta || key-name(event).is-empty) {
+                            accept;
+                        }
+                        root.settings-hotkey = shortcut-text(event);
+                        root.hotkey-changed(shortcut-text(event));
+                        accept;
                     }
                 }
             }
         }
 
-        // 本地数据操作：目前提供剪贴板历史清理。
         SectionLabel {
-            text: root.language == "en" ? "Local Data" : "本地数据";
+            text: root.language == "en" ? "Startup" : "启动行为";
             dark-mode: root.dark-mode;
         }
 
         HorizontalLayout {
+            height: 40px;
             spacing: 10px;
-            GhostButton {
-                text: root.language == "en" ? "Clear Clips" : "清空剪贴板";
+
+            CheckBox {
+                width: 20px;
+                text: "";
+                checked <=> root.settings-autostart;
+                toggled => {
+                    root.autostart-changed(root.settings-autostart);
+                }
+            }
+
+            Text {
+                text: root.language == "en" ? "Launch at login" : "开机自动启动";
+                color: root.dark-mode ? #d2d9e4 : #2d3748;
+                font-size: 14px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+
+                autostart-touch := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.settings-autostart = !root.settings-autostart;
+                        root.autostart-changed(root.settings-autostart);
+                    }
+                }
+            }
+        }
+
+        SectionLabel {
+            text: root.language == "en" ? "Mouse" : "鼠标行为";
+            dark-mode: root.dark-mode;
+        }
+
+        HorizontalLayout {
+            height: 40px;
+            spacing: 10px;
+
+            CheckBox {
+                width: 20px;
+                text: "";
+                checked <=> root.settings-middle-click-enabled;
+                toggled => {
+                    root.middle-click-enabled-changed(root.settings-middle-click-enabled);
+                }
+            }
+
+            Text {
+                text: root.language == "en" ? "Middle-click quick actions" : "启用鼠标中键快捷弹窗";
+                color: root.dark-mode ? #d2d9e4 : #2d3748;
+                font-size: 14px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+
+                middle-click-touch := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.settings-middle-click-enabled = !root.settings-middle-click-enabled;
+                        root.middle-click-enabled-changed(root.settings-middle-click-enabled);
+                    }
+                }
+            }
+        }
+
+        function key-name(event: KeyEvent) -> string {
+            if (event.text == Key.Space) {
+                return "Space";
+            } else if (event.text == Key.Return) {
+                return "Enter";
+            } else if (event.text == Key.Tab) {
+                return "Tab";
+            } else if (event.text == Key.Escape) {
+                return "Escape";
+            } else if (event.text == Key.Backspace) {
+                return "Backspace";
+            } else if (event.text == Key.UpArrow) {
+                return "ArrowUp";
+            } else if (event.text == Key.DownArrow) {
+                return "ArrowDown";
+            } else if (event.text == Key.LeftArrow) {
+                return "ArrowLeft";
+            } else if (event.text == Key.RightArrow) {
+                return "ArrowRight";
+            } else if (event.text == Key.F1) {
+                return "F1";
+            } else if (event.text == Key.F2) {
+                return "F2";
+            } else if (event.text == Key.F3) {
+                return "F3";
+            } else if (event.text == Key.F4) {
+                return "F4";
+            } else if (event.text == Key.F5) {
+                return "F5";
+            } else if (event.text == Key.F6) {
+                return "F6";
+            } else if (event.text == Key.F7) {
+                return "F7";
+            } else if (event.text == Key.F8) {
+                return "F8";
+            } else if (event.text == Key.F9) {
+                return "F9";
+            } else if (event.text == Key.F10) {
+                return "F10";
+            } else if (event.text == Key.F11) {
+                return "F11";
+            } else if (event.text == Key.F12) {
+                return "F12";
+            }
+            return event.text.to-uppercase();
+        }
+
+        function shortcut-text(event: KeyEvent) -> string {
+            return (event.modifiers.control ? root.control-modifier + "+" : "")
+                + (event.modifiers.alt ? "Alt+" : "")
+                + (event.modifiers.shift ? "Shift+" : "")
+                + (event.modifiers.meta ? root.meta-modifier + "+" : "")
+                + key-name(event);
+        }
+
+            // 本地数据操作：目前提供剪贴板历史清理。
+            SectionLabel {
+                text: root.language == "en" ? "Local Data" : "本地数据";
                 dark-mode: root.dark-mode;
-                active: false;
-                clicked => {
-                    root.clear-clipboard();
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                GhostButton {
+                    text: root.language == "en" ? "Clear Clips" : "清空剪贴板";
+                    dark-mode: root.dark-mode;
+                    active: false;
+                    clicked => {
+                        root.clear-clipboard();
+                    }
                 }
             }
         }

@@ -8,14 +8,19 @@ use anyhow::Result;
 use devtools_core::{AppEvent, AppRequest, AppRuntime, SearchResult};
 use devtools_plugin_api::{CommandDescriptor, CommandSource};
 use devtools_services::{
+    autostart::set_enabled as set_autostart_enabled,
     clipboard::{run_clipboard_watcher, set_clipboard_text, ClipboardEvent},
-    middle_click::{spawn_middle_click_listener, QuickActionEvent, ScreenPosition},
-    shortcut::{spawn_global_shortcut_listener, ShortcutEvent},
+    middle_click::{
+        spawn_middle_click_listener, MiddleClickController, QuickActionEvent, ScreenPosition,
+    },
+    shortcut::{
+        spawn_global_shortcut_listener, update_global_shortcut, GlobalShortcut, ShortcutEvent,
+    },
     tray::{spawn_tray_listener, TrayEvent, TrayPosition},
 };
 use devtools_storage::{ClipboardRecord, Storage};
 use devtools_ui::{ClipboardWindow, QuickActionWindow, SearchResultView, SearchWindow, ToolWindow};
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
 #[cfg(not(unix))]
 use time::{macros::format_description, OffsetDateTime};
 use tokio::{runtime::Runtime, sync::mpsc};
@@ -44,6 +49,19 @@ fn main() -> Result<()> {
     let hotkey = storage
         .get_setting("hotkey")?
         .unwrap_or_else(|| "Alt+Space".into());
+    let autostart = storage
+        .get_setting("autostart")?
+        .map(|value| value == "true" || value == "1")
+        .unwrap_or(false);
+    let middle_click_enabled = storage
+        .get_setting("middle_click_enabled")?
+        .map(|value| value == "true" || value == "1")
+        .unwrap_or(true);
+    if autostart {
+        if let Err(error) = set_autostart_enabled(true) {
+            warn!(?error, "failed to restore autostart configuration");
+        }
+    }
     let runtime = Runtime::new()?;
     let (request_tx, request_rx) = mpsc::unbounded_channel::<AppRequest>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -52,7 +70,7 @@ fn main() -> Result<()> {
 
     // 平台服务各自运行在后台，通过统一 AppRequest 进入核心运行时。
     start_clipboard_bridge(&runtime, request_tx.clone());
-    start_shortcut_bridge(&runtime, request_tx.clone(), hotkey);
+    let shortcut = start_shortcut_bridge(&runtime, request_tx.clone(), hotkey.clone());
 
     // 主窗口默认使用中文和深色主题，真正持久化设置会在 LoadTheme/SettingsLoaded 中覆盖。
     let app = SearchWindow::new()?;
@@ -64,7 +82,19 @@ fn main() -> Result<()> {
     app.set_dark_mode(true);
     app.set_language("zh-CN".into());
     app.set_settings_theme("dark".into());
-    app.set_settings_hotkey("Alt+Space".into());
+    app.set_settings_hotkey(hotkey.clone().into());
+    app.set_settings_autostart(autostart);
+    app.set_settings_middle_click_enabled(middle_click_enabled);
+    #[cfg(target_os = "macos")]
+    {
+        app.set_control_modifier("Ctrl".into());
+        app.set_meta_modifier("Cmd".into());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        app.set_control_modifier("Ctrl".into());
+        app.set_meta_modifier("Super".into());
+    }
     app.set_tools(command_model(devtools_tools::builtin_commands(), "zh-CN"));
     set_ids(
         &tool_ids,
@@ -73,22 +103,38 @@ fn main() -> Result<()> {
             .map(|cmd| cmd.id),
     );
 
+    let middle_click = start_middle_bridge(
+        &runtime,
+        app_weak.clone(),
+        storage.clone(),
+        middle_click_enabled,
+    );
     bind_ui_callbacks(
         &app,
         request_tx.clone(),
         storage.clone(),
         Arc::clone(&search_ids),
         Arc::clone(&tool_ids),
+        shortcut,
+        hotkey,
+        middle_click,
     );
     bind_runtime_events(app_weak.clone(), Arc::clone(&search_ids), event_rx);
     start_tray_bridge(&runtime, request_tx.clone(), app.as_weak(), storage.clone());
-    start_middle_bridge(&runtime, app_weak, storage);
+    let close_app = app.as_weak();
+    app.window().on_close_requested(move || {
+        if let Some(app) = close_app.upgrade() {
+            let _ = app.hide();
+        }
+        CloseRequestResponse::KeepWindowShown
+    });
 
     request_tx.send(AppRequest::Search {
         query: String::new(),
     })?;
     request_tx.send(AppRequest::LoadTheme)?;
-    app.run()?;
+    app.show()?;
+    slint::run_event_loop_until_quit()?;
     Ok(())
 }
 
@@ -118,23 +164,28 @@ fn start_shortcut_bridge(
     runtime: &Runtime,
     request_tx: mpsc::UnboundedSender<AppRequest>,
     hotkey: String,
-) {
+) -> Option<GlobalShortcut> {
     let (shortcut_tx, mut shortcut_rx) = mpsc::unbounded_channel::<ShortcutEvent>();
 
     match spawn_global_shortcut_listener(shortcut_tx, Some(&hotkey)) {
-        Ok(()) => info!(%hotkey, "global shortcut registered"),
-        Err(error) => warn!(?error, "global shortcut unavailable; window remains usable"),
-    }
-
-    runtime.spawn(async move {
-        while let Some(event) = shortcut_rx.recv().await {
-            match event {
-                ShortcutEvent::ToggleWindow => {
-                    let _ = request_tx.send(AppRequest::ToggleWindow);
+        Ok(shortcut) => {
+            info!(%hotkey, "global shortcut registered");
+            runtime.spawn(async move {
+                while let Some(event) = shortcut_rx.recv().await {
+                    match event {
+                        ShortcutEvent::ToggleWindow => {
+                            let _ = request_tx.send(AppRequest::ToggleWindow);
+                        }
+                    }
                 }
-            }
+            });
+            Some(shortcut)
         }
-    });
+        Err(error) => {
+            warn!(?error, "global shortcut unavailable; window remains usable");
+            None
+        }
+    }
 }
 
 /// 注册并桥接系统托盘事件。
@@ -182,9 +233,14 @@ fn start_tray_bridge(
 }
 
 /// 启动鼠标中键快捷动作桥接，事件最终回到 Slint UI 线程创建小窗口。
-fn start_middle_bridge(runtime: &Runtime, app_weak: slint::Weak<SearchWindow>, storage: Storage) {
+fn start_middle_bridge(
+    runtime: &Runtime,
+    app_weak: slint::Weak<SearchWindow>,
+    storage: Storage,
+    enabled: bool,
+) -> MiddleClickController {
     let (quick_tx, mut quick_rx) = mpsc::unbounded_channel::<QuickActionEvent>();
-    spawn_middle_click_listener(quick_tx);
+    let controller = spawn_middle_click_listener(quick_tx, enabled);
 
     runtime.spawn(async move {
         while let Some(event) = quick_rx.recv().await {
@@ -213,6 +269,8 @@ fn start_middle_bridge(runtime: &Runtime, app_weak: slint::Weak<SearchWindow>, s
             }
         }
     });
+
+    controller
 }
 
 /// 绑定 Slint 回调。UI 只发送请求或打开窗口，耗时逻辑放到运行时/服务层。
@@ -222,6 +280,9 @@ fn bind_ui_callbacks(
     storage: Storage,
     search_ids: Arc<Mutex<Vec<String>>>,
     tool_ids: Arc<Mutex<Vec<String>>>,
+    shortcut: Option<GlobalShortcut>,
+    hotkey: String,
+    middle_click: MiddleClickController,
 ) {
     let search_tx = request_tx.clone();
     // 搜索输入实时进入核心运行时，结果通过 AppEvent 异步回填。
@@ -322,10 +383,56 @@ fn bind_ui_callbacks(
     });
 
     let hotkey_tx = request_tx.clone();
+    let current_hotkey = Rc::new(RefCell::new(hotkey));
+    let shortcut = Rc::new(RefCell::new(shortcut));
+    let hotkey_app = app.as_weak();
     app.on_hotkey_changed(move |hotkey| {
-        let _ = hotkey_tx.send(AppRequest::SetHotkey {
-            hotkey: hotkey.to_string(),
-        });
+        let hotkey = hotkey.to_string();
+        let previous = current_hotkey.borrow().clone();
+        let update_result = shortcut
+            .borrow_mut()
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("global shortcut is unavailable"))
+            .and_then(|shortcut| update_global_shortcut(shortcut, &hotkey));
+        match update_result {
+            Ok(()) => {
+                *current_hotkey.borrow_mut() = hotkey.clone();
+                let _ = hotkey_tx.send(AppRequest::SetHotkey { hotkey });
+            }
+            Err(error) => {
+                if let Some(app) = hotkey_app.upgrade() {
+                    app.set_settings_hotkey(previous.into());
+                    app.set_status(format!("Shortcut unavailable: {error}").into());
+                }
+            }
+        }
+    });
+
+    let autostart_tx = request_tx.clone();
+    let autostart_app = app.as_weak();
+    app.on_autostart_changed(move |enabled| match set_autostart_enabled(enabled) {
+        Ok(()) => {
+            let _ = autostart_tx.send(AppRequest::SetAutostart { enabled });
+        }
+        Err(error) => {
+            if let Some(app) = autostart_app.upgrade() {
+                app.set_settings_autostart(!enabled);
+                app.set_status(format!("Autostart unavailable: {error}").into());
+            }
+        }
+    });
+
+    let middle_click_tx = request_tx.clone();
+    let middle_click_app = app.as_weak();
+    app.on_middle_click_enabled_changed(move |enabled| {
+        middle_click.set_enabled(enabled);
+        if let Err(error) = middle_click_tx.send(AppRequest::SetMiddleClickEnabled { enabled }) {
+            middle_click.set_enabled(!enabled);
+            if let Some(app) = middle_click_app.upgrade() {
+                app.set_settings_middle_click_enabled(!enabled);
+                app.set_status(format!("Middle-click unavailable: {error}").into());
+            }
+        }
     });
 
     app.on_clear_clipboard(move || {
@@ -376,10 +483,14 @@ fn apply_event(app: &SearchWindow, search_ids: &Arc<Mutex<Vec<String>>>, event: 
             theme,
             language,
             hotkey,
+            autostart,
+            middle_click_enabled,
         } => {
             apply_theme(app, &theme);
             app.set_language(language.into());
             app.set_settings_hotkey(hotkey.into());
+            app.set_settings_autostart(autostart);
+            app.set_settings_middle_click_enabled(middle_click_enabled);
             app.set_active_view(2);
             app.set_status("".into());
         }
@@ -393,10 +504,38 @@ fn apply_event(app: &SearchWindow, search_ids: &Arc<Mutex<Vec<String>>>, event: 
         }
         AppEvent::HotkeyChanged { hotkey } => {
             app.set_settings_hotkey(hotkey.into());
+            app.set_status(localized_status(app, "快捷键已保存", "Hotkey saved"));
+        }
+        AppEvent::AutostartChanged { enabled } => {
+            app.set_settings_autostart(enabled);
             app.set_status(localized_status(
                 app,
-                "快捷键已保存，重启后生效",
-                "Hotkey saved. Restart to apply.",
+                if enabled {
+                    "已开启开机自启动"
+                } else {
+                    "已关闭开机自启动"
+                },
+                if enabled {
+                    "Autostart enabled"
+                } else {
+                    "Autostart disabled"
+                },
+            ));
+        }
+        AppEvent::MiddleClickChanged { enabled } => {
+            app.set_settings_middle_click_enabled(enabled);
+            app.set_status(localized_status(
+                app,
+                if enabled {
+                    "已开启鼠标中键快捷弹窗"
+                } else {
+                    "已关闭鼠标中键快捷弹窗"
+                },
+                if enabled {
+                    "Middle-click actions enabled"
+                } else {
+                    "Middle-click actions disabled"
+                },
             ));
         }
         AppEvent::CommandExecuted { title, content }
