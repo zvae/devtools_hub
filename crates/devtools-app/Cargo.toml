@@ -14,6 +14,10 @@ devtools-storage = { path = "../devtools-storage" }
 devtools-tools = { path = "../devtools-tools" }
 devtools-ui = { path = "../devtools-ui" }
 slint.workspace = true
+time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

@@ -4,19 +4,70 @@ import { ResultList, SearchResultView } from "common.slint";
 // 剪贴板历史窗口：作为一个工具打开，支持搜索和点击复制。
 export component ClipboardWindow inherits Window {
     in property <[SearchResultView]> rows;
+    in property <string> item-count;
+    in-out property <bool> popup-mode;
+    in-out property <bool> pinned;
     in-out property <bool> dark-mode;
     in-out property <string> language;
 
     callback query-changed(string);
     callback activate-item(int);
+    callback convert-to-window;
+    callback toggle-pin;
 
-    title: root.language == "en" ? "Clipboard History" : "剪贴板历史";
-    preferred-width: 620px;
-    preferred-height: 560px;
-    min-width: 460px;
-    min-height: 360px;
+    title: root.language == "en" ? "Clipboard" : "剪贴板";
+    icon: @image-url("../../../assets/devtools-hub.png");
+    no-frame: root.popup-mode;
+    always-on-top: root.popup-mode || root.pinned;
+    preferred-width: 420px;
+    preferred-height: 620px;
+    min-width: 360px;
+    min-height: 420px;
     resize-border-width: 8px;
     background: root.dark-mode ? #0f141d : #f3f6fb;
+    forward-focus: keyboard-focus;
+
+    keyboard-focus := FocusScope {
+        key-pressed(event) => {
+            if ((event.modifiers.meta || event.modifiers.control) && event.text == "1") {
+                root.activate-item(0);
+                accept
+            }
+            if ((event.modifiers.meta || event.modifiers.control) && event.text == "2") {
+                root.activate-item(1);
+                accept
+            }
+            if ((event.modifiers.meta || event.modifiers.control) && event.text == "3") {
+                root.activate-item(2);
+                accept
+            }
+            if ((event.modifiers.meta || event.modifiers.control) && event.text == "4") {
+                root.activate-item(3);
+                accept
+            }
+            if ((event.modifiers.meta || event.modifiers.control) && event.text == "5") {
+                root.activate-item(4);
+                accept
+            }
+            if ((event.modifiers.meta || event.modifiers.control) && event.text == "6") {
+                root.activate-item(5);
+                accept
+            }
+            if ((event.modifiers.meta || event.modifiers.control) && event.text == "7") {
+                root.activate-item(6);
+                accept
+            }
+            if ((event.modifiers.meta || event.modifiers.control) && event.text == "8") {
+                root.activate-item(7);
+                accept
+            }
+            if ((event.modifiers.meta || event.modifiers.control) && event.text == "9") {
+                root.activate-item(8);
+                accept
+            }
+            reject
+        }
+    }
 
     // 顶部搜索框过滤本地剪贴板记录。
     VerticalLayout {
@@ -24,7 +75,66 @@ export component ClipboardWindow inherits Window {
         spacing: 12px;
 
         Rectangle {
-            height: 50px;
+            height: 34px;
+            background: transparent;
+
+            HorizontalLayout {
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+                }
+
+                if root.popup-mode: Rectangle {
+                    width: 98px;
+                    height: 30px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: root.dark-mode ? #303a4e : #d9e0ea;
+                    background: root.dark-mode ? #151c28 : #ffffff;
+
+                    Text {
+                        text: root.language == "en" ? "Window" : "转为窗口";
+                        color: root.dark-mode ? #d2d9e4 : #2d3748;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.convert-to-window();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 74px;
+                    height: 30px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: root.pinned ? #5ea1ff : (root.dark-mode ? #303a4e : #d9e0ea);
+                    background: root.pinned ? (root.dark-mode ? #203555 : #eaf2ff) : (root.dark-mode ? #151c28 : #ffffff);
+
+                    Text {
+                        text: root.pinned ? (root.language == "en" ? "Unpin" : "取消置顶") : (root.language == "en" ? "Pin" : "置顶");
+                        color: root.pinned ? (root.dark-mode ? #eaf3ff : #1c4e91) : (root.dark-mode ? #d2d9e4 : #2d3748);
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.toggle-pin();
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 44px;
             border-radius: 8px;
             border-width: 1px;
             border-color: root.dark-mode ? #263249 : #dfe6ef;
@@ -35,8 +145,8 @@ export component ClipboardWindow inherits Window {
                 padding-right: 14px;
 
                 LineEdit {
-                    placeholder-text: root.language == "en" ? "Search clipboard" : "搜索剪贴板";
-                    font-size: 16px;
+                    placeholder-text: root.language == "en" ? "Type to search..." : "输入开始搜索...";
+                    font-size: 15px;
                     edited(value) => {
                         root.query-changed(value);
                     }
@@ -48,12 +158,47 @@ export component ClipboardWindow inherits Window {
             }
         }
 
+        // 简体版默认只保留一个全部分类，保持剪贴板入口清晰紧凑。
+        Rectangle {
+            height: 34px;
+            background: transparent;
+
+            Rectangle {
+                width: 52px;
+                height: 30px;
+                border-radius: 8px;
+                background: #dbeaff;
+
+                Text {
+                    text: root.language == "en" ? "All" : "全部";
+                    color: #1c4e91;
+                    font-size: 13px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
         ResultList {
             rows: root.rows;
             dark-mode: root.dark-mode;
             vertical-stretch: 1;
             activate-row(index) => {
                 root.activate-item(index);
+            }
+        }
+
+        Rectangle {
+            height: 26px;
+            background: transparent;
+
+            Text {
+                text: root.item-count;
+                color: root.dark-mode ? #7f8da3 : #7b8492;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
         }
     }

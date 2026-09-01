@@ -6,6 +6,8 @@ export struct SearchResultView {
     title: string,
     subtitle: string,
     source: string,
+    meta: string,
+    shortcut: string,
 }
 
 // 小节标题组件，设置页和编辑器面板复用。
@@ -138,7 +140,7 @@ export component ResultList inherits Rectangle {
             text-pane := Rectangle {
                 x: 82px;
                 y: (item.height - self.height) / 2;
-                width: item.width - self.x - 18px;
+                width: item.width - self.x - 96px;
                 height: 46px;
                 background: transparent;
 
@@ -158,6 +160,36 @@ export component ResultList inherits Rectangle {
                         text: row.subtitle;
                         color: root.dark-mode ? #8f9aae : #637083;
                         font-size: 12px;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            right-pane := Rectangle {
+                x: item.width - self.width - 16px;
+                y: (item.height - self.height) / 2;
+                width: 68px;
+                height: 46px;
+                background: transparent;
+                visible: row.meta != "" || row.shortcut != "";
+
+                VerticalLayout {
+                    spacing: 3px;
+                    alignment: center;
+
+                    Text {
+                        text: row.meta;
+                        color: root.dark-mode ? #7f8da3 : #8b95a4;
+                        font-size: 11px;
+                        horizontal-alignment: right;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: row.shortcut;
+                        color: root.dark-mode ? #b4c0d1 : #4c596b;
+                        font-size: 12px;
+                        horizontal-alignment: right;
                         overflow: elide;
                     }
                 }

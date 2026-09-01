@@ -1,0 +1,156 @@
+name: Release Draft
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-draft-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    runs-on: macos-14
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find or create draft release
+        id: release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+
+            let release = releases.find((item) => item.draft);
+            const manifest = fs.readFileSync('Cargo.toml', 'utf8');
+            const version = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? '0.1.0';
+            const tagName = release?.tag_name ?? `v${version}`;
+            const latestPublished = releases.find((item) => !item.draft && !item.prerelease);
+
+            if (!release) {
+              const created = await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tagName,
+                target_commitish: context.sha,
+                name: `DevTools Hub ${tagName}`,
+                body: '正在提取更新内容并准备构建产物。',
+                draft: true,
+                prerelease: false,
+              });
+              release = created.data;
+              core.info(`Created draft release ${release.id} (${tagName})`);
+            } else {
+              core.info(`Using existing draft release ${release.id} (${tagName})`);
+            }
+
+            let commits;
+            if (latestPublished) {
+              const comparison = await github.rest.repos.compareCommits({
+                owner,
+                repo,
+                base: latestPublished.tag_name,
+                head: context.sha,
+              });
+              commits = comparison.data.commits;
+            } else {
+              commits = await github.paginate(github.rest.repos.listCommits, {
+                owner,
+                repo,
+                sha: context.sha,
+                per_page: 100,
+              });
+            }
+
+            const changeLines = commits
+              .slice(0, 100)
+              .map((commit) => {
+                const title = commit.commit.message.split('\n')[0].trim();
+                const shortSha = commit.sha.slice(0, 7);
+                return `- ${title} ([${shortSha}](${commit.html_url}))`;
+              });
+            const changes = changeLines.length > 0
+              ? changeLines.join('\n')
+              : '- 本次提交未发现可提取的变更记录。';
+            const body = [
+              '## 更新内容',
+              changes,
+              '',
+              '## 构建产物',
+              `- macOS arm64: \`DevTools-Hub-${tagName}-macos-arm64.zip\``,
+              `- Windows x64: \`DevTools-Hub-${tagName}-windows-x64.zip\``,
+            ].join('\n');
+
+            const updated = await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.id,
+              name: release.name || `DevTools Hub ${tagName}`,
+              body,
+              draft: true,
+            });
+
+            core.setOutput('release_id', String(updated.data.id));
+            core.setOutput('upload_url', updated.data.upload_url);
+            core.setOutput('tag_name', updated.data.tag_name);
+
+  build-macos-arm64:
+    needs: [prepare-release]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build macOS application
+        run: zsh packaging/macos/build-app.sh
+      - name: Archive macOS application
+        env:
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "target/release/DevTools Hub.app" \
+            "DevTools-Hub-${RELEASE_TAG}-macos-arm64.zip"
+      - name: Upload macOS asset to draft
+        uses: shogo82148/actions-upload-release-asset@v1.9.2
+        with:
+          upload_url: ${{ needs.prepare-release.outputs.upload_url }}
+          asset_path: DevTools-Hub-${{ needs.prepare-release.outputs.tag_name }}-macos-arm64.zip
+          overwrite: true
+
+  build-windows-x64:
+    needs: [prepare-release]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Windows application
+        run: cargo build --release -p devtools-app
+      - name: Archive Windows application
+        env:
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
+        shell: pwsh
+        run: |
+          Copy-Item target/release/devtools-app.exe DevToolsHub.exe
+          Compress-Archive -Path DevToolsHub.exe -DestinationPath "DevTools-Hub-$env:RELEASE_TAG-windows-x64.zip"
+      - name: Upload Windows asset to draft
+        uses: shogo82148/actions-upload-release-asset@v1.9.2
+        with:
+          upload_url: ${{ needs.prepare-release.outputs.upload_url }}
+          asset_path: DevTools-Hub-${{ needs.prepare-release.outputs.tag_name }}-windows-x64.zip
+          overwrite: true

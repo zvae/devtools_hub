@@ -22,6 +22,13 @@ DevTools Hub 是一个原生桌面开发者效率工具原型，使用 Rust、Sl
 cargo run -p devtools-app
 ```
 
+macOS 打包应用（dock 图标来自应用包）：
+
+```sh
+zsh packaging/macos/build-app.sh
+open "target/release/DevTools Hub.app"
+```
+
 ## 默认快捷键
 
 - Windows/Linux：`Alt + Space`

@@ -14,4 +14,10 @@ rdev.workspace = true
 tokio.workspace = true
 tray-icon.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 windows.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+core-graphics = "0.23"

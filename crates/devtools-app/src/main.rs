@@ -9,21 +9,28 @@ use devtools_core::{AppEvent, AppRequest, AppRuntime, SearchResult};
 use devtools_plugin_api::{CommandDescriptor, CommandSource};
 use devtools_services::{
     clipboard::{run_clipboard_watcher, set_clipboard_text, ClipboardEvent},
-    middle_click::{spawn_middle_click_listener, QuickActionEvent},
+    middle_click::{spawn_middle_click_listener, QuickActionEvent, ScreenPosition},
     shortcut::{spawn_global_shortcut_listener, ShortcutEvent},
-    tray::{spawn_tray_listener, TrayEvent},
+    tray::{spawn_tray_listener, TrayEvent, TrayPosition},
 };
 use devtools_storage::{ClipboardRecord, Storage};
 use devtools_ui::{ClipboardWindow, QuickActionWindow, SearchResultView, SearchWindow, ToolWindow};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+#[cfg(not(unix))]
+use time::{macros::format_description, OffsetDateTime};
 use tokio::{runtime::Runtime, sync::mpsc};
 use tracing::{error, info, warn};
 
 // Slint 窗口句柄需要保留强引用，否则窗口会被释放关闭。
 thread_local! {
     static TOOL_WINDOWS: RefCell<Vec<ToolWindow>> = const { RefCell::new(Vec::new()) };
-    static CLIPBOARD_WINDOWS: RefCell<Vec<ClipboardWindow>> = const { RefCell::new(Vec::new()) };
+    static CLIPBOARD_WINDOWS: RefCell<Vec<ClipboardWindowState>> = const { RefCell::new(Vec::new()) };
     static QUICK_WINDOWS: RefCell<Vec<QuickActionWindow>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ClipboardWindowState {
+    window: ClipboardWindow,
+    ids: Rc<RefCell<Vec<String>>>,
 }
 
 fn main() -> Result<()> {
@@ -46,7 +53,6 @@ fn main() -> Result<()> {
     // 平台服务各自运行在后台，通过统一 AppRequest 进入核心运行时。
     start_clipboard_bridge(&runtime, request_tx.clone());
     start_shortcut_bridge(&runtime, request_tx.clone(), hotkey);
-    start_tray_bridge(&runtime, request_tx.clone());
 
     // 主窗口默认使用中文和深色主题，真正持久化设置会在 LoadTheme/SettingsLoaded 中覆盖。
     let app = SearchWindow::new()?;
@@ -75,6 +81,7 @@ fn main() -> Result<()> {
         Arc::clone(&tool_ids),
     );
     bind_runtime_events(app_weak.clone(), Arc::clone(&search_ids), event_rx);
+    start_tray_bridge(&runtime, request_tx.clone(), app.as_weak(), storage.clone());
     start_middle_bridge(&runtime, app_weak, storage);
 
     request_tx.send(AppRequest::Search {
@@ -131,7 +138,12 @@ fn start_shortcut_bridge(
 }
 
 /// 注册并桥接系统托盘事件。
-fn start_tray_bridge(runtime: &Runtime, request_tx: mpsc::UnboundedSender<AppRequest>) {
+fn start_tray_bridge(
+    runtime: &Runtime,
+    request_tx: mpsc::UnboundedSender<AppRequest>,
+    app_weak: slint::Weak<SearchWindow>,
+    storage: Storage,
+) {
     let (tray_tx, mut tray_rx) = mpsc::unbounded_channel::<TrayEvent>();
 
     match spawn_tray_listener(tray_tx) {
@@ -144,6 +156,22 @@ fn start_tray_bridge(runtime: &Runtime, request_tx: mpsc::UnboundedSender<AppReq
             match event {
                 TrayEvent::ShowWindow => {
                     let _ = request_tx.send(AppRequest::ToggleWindow);
+                }
+                TrayEvent::ShowClipboard { position } => {
+                    let app_weak = app_weak.clone();
+                    let storage = storage.clone();
+                    if let Err(error) = slint::invoke_from_event_loop(move || {
+                        if let Some(app) = app_weak.upgrade() {
+                            open_clipboard_popup(
+                                storage,
+                                app.get_dark_mode(),
+                                app.get_language().to_string(),
+                                position,
+                            );
+                        }
+                    }) {
+                        error!(?error, "failed to open clipboard window from tray");
+                    }
                 }
                 TrayEvent::Exit => {
                     let _ = request_tx.send(AppRequest::Exit);
@@ -162,17 +190,25 @@ fn start_middle_bridge(runtime: &Runtime, app_weak: slint::Weak<SearchWindow>, s
         while let Some(event) = quick_rx.recv().await {
             let app_weak = app_weak.clone();
             let storage = storage.clone();
-            if let Err(error) = slint::invoke_from_event_loop(move || {
-                let dark_mode = app_weak
-                    .upgrade()
-                    .map(|app| app.get_dark_mode())
-                    .unwrap_or(true);
-                let language = app_weak
-                    .upgrade()
-                    .map(|app| app.get_language().to_string())
-                    .unwrap_or_else(|| "zh-CN".into());
-                open_quick_action_window(storage, event.selected_text, dark_mode, language);
-            }) {
+            let result = slint::invoke_from_event_loop(move || match event {
+                QuickActionEvent::Show {
+                    selected_text,
+                    position,
+                } => {
+                    let dark_mode = app_weak
+                        .upgrade()
+                        .map(|app| app.get_dark_mode())
+                        .unwrap_or(true);
+                    let language = app_weak
+                        .upgrade()
+                        .map(|app| app.get_language().to_string())
+                        .unwrap_or_else(|| "zh-CN".into());
+                    hide_clipboard_popups();
+                    open_quick_action_window(storage, selected_text, position, dark_mode, language);
+                }
+                QuickActionEvent::Dismiss => hide_transient_windows(),
+            });
+            if let Err(error) = result {
                 error!(?error, "failed to open quick action window");
             }
         }
@@ -486,8 +522,49 @@ fn open_tool_window(
 
 /// 打开剪贴板历史窗口，并维护 UI 行索引到数据库 ID 的映射。
 fn open_clipboard_window(storage: Storage, dark_mode: bool, language: String) {
+    open_clipboard_window_internal(storage, dark_mode, language, false, false, None);
+}
+
+/// 托盘左键打开的临时剪贴板弹窗：无标题栏、跟随托盘位置并自动置顶。
+fn open_clipboard_popup(
+    storage: Storage,
+    dark_mode: bool,
+    language: String,
+    position: TrayPosition,
+) {
+    open_clipboard_window_internal(storage, dark_mode, language, true, false, Some(position));
+}
+
+/// 打开一个保留原生标题栏且已置顶的剪贴板窗口。
+fn open_pinned_clipboard_window(storage: Storage, dark_mode: bool, language: String) {
+    open_clipboard_window_internal(storage, dark_mode, language, false, true, None);
+}
+
+fn open_clipboard_window_internal(
+    storage: Storage,
+    dark_mode: bool,
+    language: String,
+    popup_mode: bool,
+    pinned: bool,
+    position: Option<TrayPosition>,
+) {
+    if popup_mode {
+        if show_existing_clipboard_popup(
+            &storage,
+            dark_mode,
+            &language,
+            position.expect("clipboard popup position is required"),
+        ) {
+            return;
+        }
+    } else if show_existing_clipboard_window(&storage, dark_mode, &language, pinned) {
+        return;
+    }
+
     let window = ClipboardWindow::new().expect("failed to create clipboard window");
     let ids = Rc::new(RefCell::new(Vec::<String>::new()));
+    window.set_popup_mode(popup_mode);
+    window.set_pinned(pinned);
     window.set_dark_mode(dark_mode);
     window.set_language(language.clone().into());
     refresh_clipboard_window(&window, &storage, &ids, "", &language);
@@ -502,26 +579,143 @@ fn open_clipboard_window(storage: Storage, dark_mode: bool, language: String) {
         }
     });
 
-    let activate_storage = storage;
+    let activate_storage = storage.clone();
+    let activate_ids = Rc::clone(&ids);
+    let activate_window = window.as_weak();
     window.on_activate_item(move |index| {
-        let id = ids.borrow().get(index as usize).cloned();
+        let id = activate_ids.borrow().get(index as usize).cloned();
         if let Some(raw_id) = id.and_then(|id| id.strip_prefix("clipboard:").map(str::to_string)) {
             if let Ok(id) = raw_id.parse::<i64>() {
                 if let Ok(Some(record)) = activate_storage.clipboard_by_id(id) {
                     let _ = set_clipboard_text(&record.content);
+                    if let Some(window) = activate_window.upgrade() {
+                        if window.get_popup_mode() {
+                            let _ = window.hide();
+                        }
+                    }
                 }
             }
         }
     });
 
+    let convert_window = window.as_weak();
+    let convert_storage = storage.clone();
+    let convert_language = language.clone();
+    window.on_convert_to_window(move || {
+        if let Some(window) = convert_window.upgrade() {
+            window.hide().ok();
+            open_clipboard_window(convert_storage.clone(), dark_mode, convert_language.clone());
+        }
+    });
+
+    let pin_window = window.as_weak();
+    let pin_storage = storage.clone();
+    let pin_language = language.clone();
+    window.on_toggle_pin(move || {
+        if let Some(window) = pin_window.upgrade() {
+            if window.get_popup_mode() {
+                window.hide().ok();
+                open_pinned_clipboard_window(pin_storage.clone(), dark_mode, pin_language.clone());
+            } else {
+                window.set_pinned(!window.get_pinned());
+            }
+        }
+    });
+
     window.show().ok();
-    CLIPBOARD_WINDOWS.with(|windows| windows.borrow_mut().push(window));
+    if let Some(position) = position {
+        set_clipboard_popup_position(&window, position);
+    }
+    CLIPBOARD_WINDOWS.with(|windows| {
+        windows
+            .borrow_mut()
+            .push(ClipboardWindowState { window, ids });
+    });
+}
+
+/// 刷新并重新显示已有的剪贴板窗口，确保托盘重复点击不会创建窗口副本。
+fn show_existing_clipboard_window(
+    storage: &Storage,
+    dark_mode: bool,
+    language: &str,
+    pin: bool,
+) -> bool {
+    CLIPBOARD_WINDOWS.with(|windows| {
+        let windows = windows.borrow();
+        let Some(state) = windows
+            .iter()
+            .rev()
+            .find(|state| !state.window.get_popup_mode())
+        else {
+            return false;
+        };
+
+        if pin {
+            state.window.set_pinned(true);
+        }
+        state.window.set_dark_mode(dark_mode);
+        state.window.set_language(language.into());
+        refresh_clipboard_window(&state.window, storage, &state.ids, "", language);
+        // Re-showing after a hide asks the platform to activate and raise the window.
+        state.window.hide().ok();
+        state.window.show().ok();
+        true
+    })
+}
+
+/// 刷新并重新显示已有的托盘剪贴板弹窗，同时更新其位置。
+fn show_existing_clipboard_popup(
+    storage: &Storage,
+    dark_mode: bool,
+    language: &str,
+    position: TrayPosition,
+) -> bool {
+    CLIPBOARD_WINDOWS.with(|windows| {
+        let windows = windows.borrow();
+        let Some(state) = windows
+            .iter()
+            .rev()
+            .find(|state| state.window.get_popup_mode())
+        else {
+            return false;
+        };
+
+        state.window.set_dark_mode(dark_mode);
+        state.window.set_language(language.into());
+        refresh_clipboard_window(&state.window, storage, &state.ids, "", language);
+        set_clipboard_popup_position(&state.window, position);
+        state.window.hide().ok();
+        state.window.show().ok();
+        true
+    })
+}
+
+fn set_clipboard_popup_position(window: &ClipboardWindow, position: TrayPosition) {
+    let scale = window.window().scale_factor().max(1.0);
+    let width = (420.0 * scale).round() as i32;
+    #[cfg(not(target_os = "macos"))]
+    let height = (620.0 * scale).round() as i32;
+
+    #[cfg(target_os = "macos")]
+    let x = position.x.saturating_sub(width / 2);
+    #[cfg(not(target_os = "macos"))]
+    let x = position.x.saturating_sub(width).saturating_add(32);
+
+    #[cfg(target_os = "macos")]
+    let y = position.y.saturating_add(8);
+    #[cfg(not(target_os = "macos"))]
+    let y = position.y.saturating_sub(height).saturating_sub(8);
+
+    window
+        .window()
+        .set_position(slint::PhysicalPosition::new(x, y));
 }
 
 /// 打开中键快捷动作窗口，动作列表会根据选中文本内容做简单推荐。
 fn open_quick_action_window(
     storage: Storage,
     selected_text: Option<String>,
+    position: Option<ScreenPosition>,
     dark_mode: bool,
     language: String,
 ) {
@@ -539,6 +733,9 @@ fn open_quick_action_window(
     window.set_actions(results_to_model(actions, &language));
     window.set_dark_mode(dark_mode);
     window.set_language(language.clone().into());
+    if let Some(position) = position {
+        set_quick_action_position(&window, position);
+    }
 
     let activate_window = window.as_weak();
     let activate_language = language.clone();
@@ -566,6 +763,48 @@ fn open_quick_action_window(
     QUICK_WINDOWS.with(|windows| windows.borrow_mut().push(window));
 }
 
+/// 将快捷窗口放到中键位置右下方。Quartz 使用逻辑坐标，Windows/rdev 使用物理坐标。
+fn set_quick_action_position(window: &QuickActionWindow, position: ScreenPosition) {
+    #[cfg(target_os = "macos")]
+    window.window().set_position(slint::LogicalPosition::new(
+        position.x as f32 + 12.0,
+        position.y as f32 + 12.0,
+    ));
+
+    #[cfg(not(target_os = "macos"))]
+    window.window().set_position(slint::PhysicalPosition::new(
+        position.x.saturating_add(12),
+        position.y.saturating_add(12),
+    ));
+}
+
+/// 隐藏所有已经创建的快捷动作窗口，避免外部点击后仍有旧窗口留在最前面。
+fn hide_quick_action_windows() {
+    QUICK_WINDOWS.with(|windows| {
+        for window in windows.borrow().iter() {
+            if window.window().is_visible() {
+                let _ = window.hide();
+            }
+        }
+    });
+}
+
+/// 隐藏托盘打开的临时剪贴板弹窗，普通剪贴板窗口不受影响。
+fn hide_clipboard_popups() {
+    CLIPBOARD_WINDOWS.with(|windows| {
+        for state in windows.borrow().iter() {
+            if state.window.get_popup_mode() && state.window.window().is_visible() {
+                let _ = state.window.hide();
+            }
+        }
+    });
+}
+
+fn hide_transient_windows() {
+    hide_quick_action_windows();
+    hide_clipboard_popups();
+}
+
 /// 重新加载剪贴板窗口列表，并同步更新行 ID 映射。
 fn refresh_clipboard_window(
     window: &ClipboardWindow,
@@ -575,6 +814,7 @@ fn refresh_clipboard_window(
     language: &str,
 ) {
     let rows = storage.search_clipboard(query, 100).unwrap_or_default();
+    window.set_item_count(clipboard_count(rows.len(), language).into());
     *ids.borrow_mut() = rows
         .iter()
         .map(|record| format!("clipboard:{}", record.id))
@@ -657,6 +897,8 @@ fn command_model(commands: Vec<CommandDescriptor>, language: &str) -> ModelRc<Se
                 title: title.into(),
                 subtitle: subtitle.into(),
                 source: source_label_from_command(&command.source, language).into(),
+                meta: "".into(),
+                shortcut: "".into(),
             }
         })
         .collect::<Vec<_>>();
@@ -667,45 +909,76 @@ fn command_model(commands: Vec<CommandDescriptor>, language: &str) -> ModelRc<Se
 fn clipboard_model(records: Vec<ClipboardRecord>, language: &str) -> ModelRc<SearchResultView> {
     let rows = records
         .into_iter()
-        .map(|record| {
-            let title = if record.sensitive {
-                format!(
-                    "{}: {}...",
-                    if language == "en" {
-                        "Clipboard"
-                    } else {
-                        "剪贴板"
-                    },
-                    record.content.chars().take(12).collect::<String>()
-                )
-            } else {
-                format!(
-                    "{}: {}",
-                    if language == "en" {
-                        "Clipboard"
-                    } else {
-                        "剪贴板"
-                    },
-                    summarize(&record.content)
-                )
-            };
-            let subtitle = record.source_app.unwrap_or_else(|| {
+        .enumerate()
+        .map(|(index, record)| {
+            let source_app = record.source_app.unwrap_or_else(|| {
                 if language == "en" {
                     "Local clipboard".into()
                 } else {
                     "本地剪贴板".into()
                 }
             });
+            let title = if record.sensitive {
+                format!("{}...", record.content.chars().take(12).collect::<String>())
+            } else {
+                summarize(&record.content)
+            };
+            let source = source_app.chars().take(2).collect::<String>();
             SearchResultView {
                 id: format!("clipboard:{}", record.id).into(),
                 title: title.into(),
-                subtitle: subtitle.into(),
-                source: source_label(&devtools_core::search::SearchSource::Clipboard, language)
-                    .into(),
+                subtitle: source_app.into(),
+                source: source.into(),
+                meta: format_clipboard_time(record.created_at).into(),
+                shortcut: clipboard_shortcut(index).into(),
             }
         })
         .collect::<Vec<_>>();
     ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+fn clipboard_count(count: usize, language: &str) -> String {
+    if language == "en" {
+        format!("{count} items")
+    } else {
+        format!("共 {count} 项")
+    }
+}
+
+fn format_clipboard_time(timestamp: i64) -> String {
+    #[cfg(unix)]
+    {
+        let timestamp = timestamp as libc::time_t;
+        let mut local_time = std::mem::MaybeUninit::<libc::tm>::uninit();
+        let result = unsafe { libc::localtime_r(&timestamp, local_time.as_mut_ptr()) };
+        if result.is_null() {
+            return String::new();
+        }
+        let local_time = unsafe { local_time.assume_init() };
+        return format!("{:02}:{:02}", local_time.tm_hour, local_time.tm_min);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let Ok(utc_time) = OffsetDateTime::from_unix_timestamp(timestamp) else {
+            return String::new();
+        };
+        utc_time
+            .format(&format_description!("[hour]:[minute]"))
+            .unwrap_or_default()
+    }
+}
+
+fn clipboard_shortcut(index: usize) -> String {
+    if index >= 9 {
+        return String::new();
+    }
+    let modifier = if cfg!(target_os = "macos") {
+        "⌘"
+    } else {
+        "Ctrl"
+    };
+    format!("{modifier} {}", index + 1)
 }
 
 /// 将核心搜索结果转换成 Slint 列表模型。
@@ -720,6 +993,8 @@ fn results_to_model(results: Vec<SearchResult>, language: &str) -> ModelRc<Searc
                 title: title.into(),
                 subtitle: subtitle.into(),
                 source: source_label(&result.source, language).into(),
+                meta: "".into(),
+                shortcut: "".into(),
             }
         })
         .collect::<Vec<_>>();

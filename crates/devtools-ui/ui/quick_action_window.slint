@@ -10,6 +10,9 @@ export component QuickActionWindow inherits Window {
     callback activate-action(int);
 
     title: root.language == "en" ? "Quick Actions" : "快捷动作";
+    icon: @image-url("../../../assets/devtools-hub.png");
+    always-on-top: true;
+    no-frame: true;
     preferred-width: 420px;
     preferred-height: 360px;
     min-width: 360px;
