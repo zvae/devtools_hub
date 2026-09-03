@@ -25,6 +25,10 @@ export component SettingsPanel inherits Rectangle {
     ScrollView {
         VerticalLayout {
             width: root.width;
+            // Flickable 的 viewport-width 取决于子布局的 min-width，
+            // 而内部 width: parent.width 的输入框/触摸区会把 min-width 撑到超过可视宽度，
+            // 从而出现横向滚动条，这里显式归零。
+            min-width: 0px;
             spacing: 18px;
 
         // 外观设置：当前只提供深色/浅色两种主题。

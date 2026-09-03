@@ -121,6 +121,8 @@ fn main() -> Result<()> {
     );
     bind_runtime_events(app_weak.clone(), Arc::clone(&search_ids), event_rx);
     start_tray_bridge(&runtime, request_tx.clone(), app.as_weak(), storage.clone());
+    // 预创建托盘剪贴板弹窗，首次左键点击时直接复用，避免卡顿和位置跳动。
+    precreate_clipboard_popup(&storage);
     let close_app = app.as_weak();
     app.window().on_close_requested(move || {
         if let Some(app) = close_app.upgrade() {
@@ -679,6 +681,14 @@ fn open_pinned_clipboard_window(storage: Storage, dark_mode: bool, language: Str
     open_clipboard_window_internal(storage, dark_mode, language, false, true, None);
 }
 
+/// 启动时预创建托盘剪贴板弹窗（保持隐藏）。
+/// 窗口创建是首次托盘点击卡顿的主要来源，提前创建后点击时只需刷新数据并显示。
+/// 主题/语言在每次显示前都会按当前设置刷新，预创建时使用默认值即可。
+fn precreate_clipboard_popup(storage: &Storage) {
+    let state = build_clipboard_window(storage, true, "zh-CN", true, false);
+    CLIPBOARD_WINDOWS.with(|windows| windows.borrow_mut().push(state));
+}
+
 fn open_clipboard_window_internal(
     storage: Storage,
     dark_mode: bool,
@@ -700,18 +710,40 @@ fn open_clipboard_window_internal(
         return;
     }
 
+    let state = build_clipboard_window(&storage, dark_mode, &language, popup_mode, pinned);
+
+    // 先定位再显示，避免窗口先出现在系统默认位置再跳动到托盘附近。
+    if let Some(position) = position {
+        set_clipboard_popup_position(&state.window, position);
+    }
+    state.window.show().ok();
+    CLIPBOARD_WINDOWS.with(|windows| windows.borrow_mut().push(state));
+}
+
+/// 创建剪贴板窗口并绑定全部回调，但不负责显示。
+fn build_clipboard_window(
+    storage: &Storage,
+    dark_mode: bool,
+    language: &str,
+    popup_mode: bool,
+    pinned: bool,
+) -> ClipboardWindowState {
     let window = ClipboardWindow::new().expect("failed to create clipboard window");
     let ids = Rc::new(RefCell::new(Vec::<String>::new()));
     window.set_popup_mode(popup_mode);
     window.set_pinned(pinned);
     window.set_dark_mode(dark_mode);
-    window.set_language(language.clone().into());
-    refresh_clipboard_window(&window, &storage, &ids, "", &language);
+    window.set_language(language.into());
+    // 隐藏状态下创建/显示的窗口不会触发 Slint show 时的 preferred 尺寸应用
+    // (set_visible 走 Shown 路径被当作 recreating),会停在 min 尺寸 360x420,
+    // 这里显式设为首选尺寸,保证窗口大小与托盘定位计算一致。
+    window.window().set_size(slint::WindowSize::Logical(slint::LogicalSize::new(420.0, 620.0)));
+    refresh_clipboard_window(&window, storage, &ids, "", language);
 
     let query_window = window.as_weak();
     let query_storage = storage.clone();
     let query_ids = Rc::clone(&ids);
-    let query_language = language.clone();
+    let query_language = language.to_string();
     window.on_query_changed(move |query| {
         if let Some(window) = query_window.upgrade() {
             refresh_clipboard_window(&window, &query_storage, &query_ids, &query, &query_language);
@@ -739,37 +771,39 @@ fn open_clipboard_window_internal(
 
     let convert_window = window.as_weak();
     let convert_storage = storage.clone();
-    let convert_language = language.clone();
+    let convert_language = language.to_string();
+    let convert_dark_mode = dark_mode;
     window.on_convert_to_window(move || {
         if let Some(window) = convert_window.upgrade() {
             window.hide().ok();
-            open_clipboard_window(convert_storage.clone(), dark_mode, convert_language.clone());
+            open_clipboard_window(
+                convert_storage.clone(),
+                convert_dark_mode,
+                convert_language.clone(),
+            );
         }
     });
 
     let pin_window = window.as_weak();
     let pin_storage = storage.clone();
-    let pin_language = language.clone();
+    let pin_language = language.to_string();
+    let pin_dark_mode = dark_mode;
     window.on_toggle_pin(move || {
         if let Some(window) = pin_window.upgrade() {
             if window.get_popup_mode() {
                 window.hide().ok();
-                open_pinned_clipboard_window(pin_storage.clone(), dark_mode, pin_language.clone());
+                open_pinned_clipboard_window(
+                    pin_storage.clone(),
+                    pin_dark_mode,
+                    pin_language.clone(),
+                );
             } else {
                 window.set_pinned(!window.get_pinned());
             }
         }
     });
 
-    window.show().ok();
-    if let Some(position) = position {
-        set_clipboard_popup_position(&window, position);
-    }
-    CLIPBOARD_WINDOWS.with(|windows| {
-        windows
-            .borrow_mut()
-            .push(ClipboardWindowState { window, ids });
-    });
+    ClipboardWindowState { window, ids }
 }
 
 /// 刷新并重新显示已有的剪贴板窗口，确保托盘重复点击不会创建窗口副本。
@@ -830,6 +864,8 @@ fn show_existing_clipboard_popup(
 }
 
 fn set_clipboard_popup_position(window: &ClipboardWindow, position: TrayPosition) {
+    // 窗口尺寸已在创建时显式设为 420x620 逻辑像素,这里按逻辑尺寸×scale 计算。
+    // 注意不能用 window.size():隐藏窗口的尺寸缓存可能是旧值(见 build_clipboard_window)。
     let scale = window.window().scale_factor().max(1.0);
     let width = (420.0 * scale).round() as i32;
     #[cfg(not(target_os = "macos"))]

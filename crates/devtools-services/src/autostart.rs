@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
-use std::{env, fs, path::PathBuf};
+use std::env;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::{fs, path::PathBuf};
+
+#[cfg(target_os = "macos")]
 const APPLICATION_ID: &str = "com.devtoolshub.app";
 
 /// Enable or disable launching the current executable at user login.
@@ -108,7 +112,7 @@ fn set_windows(enabled: bool) -> Result<()> {
             return Ok(());
         }
         let result = unsafe { RegDeleteValueW(key, PCWSTR(value_name.as_ptr())) }.ok();
-        unsafe { RegCloseKey(key) };
+        let _ = unsafe { RegCloseKey(key) };
         return result.map_err(|error| anyhow::anyhow!(error.to_string()));
     }
 
@@ -126,7 +130,7 @@ fn set_windows(enabled: bool) -> Result<()> {
         RegSetValueExW(
             key,
             PCWSTR(value_name.as_ptr()),
-            0,
+            Some(0u32),
             REG_SZ,
             Some(std::slice::from_raw_parts(
                 value.as_ptr() as *const u8,
@@ -134,12 +138,13 @@ fn set_windows(enabled: bool) -> Result<()> {
             )),
         )
     };
-    unsafe { RegCloseKey(key) };
+    let _ = unsafe { RegCloseKey(key) };
     result
         .ok()
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn remove_if_exists(path: &PathBuf) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
