@@ -1,12 +1,18 @@
 use std::{
     cell::RefCell,
+    collections::HashMap,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 
 use anyhow::Result;
-use devtools_core::{AppEvent, AppRequest, AppRuntime, SearchResult};
-use devtools_plugin_api::{CommandDescriptor, CommandSource};
+use devtools_core::{AppEvent, AppRequest, AppRuntime, SearchResult, TimestampConversionMode};
+use devtools_plugin_api::{CommandDescriptor, CommandSource, PluginPermissions};
+use devtools_plugin_host::{PluginRegistry, WasmPluginHost};
 use devtools_services::{
     autostart::set_enabled as set_autostart_enabled,
     clipboard::{run_clipboard_watcher, set_clipboard_text, ClipboardEvent},
@@ -18,24 +24,47 @@ use devtools_services::{
     },
     tray::{spawn_tray_listener, TrayEvent, TrayPosition},
 };
-use devtools_storage::{ClipboardRecord, Storage};
-use devtools_ui::{ClipboardWindow, QuickActionWindow, SearchResultView, SearchWindow, ToolWindow};
-use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
-#[cfg(not(unix))]
-use time::{macros::format_description, OffsetDateTime};
+use devtools_storage::{ClipboardRecord, Storage, ToolHistoryRecord};
+use devtools_ui::{
+    ClipboardWindow, QuickActionWindow, SearchResultView, SearchWindow, TimestampWindow,
+    ToolHistoryView, ToolWindow,
+};
+use slint::{
+    CloseRequestResponse, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel,
+};
+use time::{macros::format_description, OffsetDateTime, UtcOffset};
 use tokio::{runtime::Runtime, sync::mpsc};
 use tracing::{error, info, warn};
 
 // Slint 窗口句柄需要保留强引用，否则窗口会被释放关闭。
 thread_local! {
-    static TOOL_WINDOWS: RefCell<Vec<ToolWindow>> = const { RefCell::new(Vec::new()) };
+    static TOOL_WINDOWS: RefCell<Vec<ToolWindowState>> = const { RefCell::new(Vec::new()) };
+    static TIMESTAMP_WINDOWS: RefCell<Vec<TimestampWindowState>> = const { RefCell::new(Vec::new()) };
     static CLIPBOARD_WINDOWS: RefCell<Vec<ClipboardWindowState>> = const { RefCell::new(Vec::new()) };
     static QUICK_WINDOWS: RefCell<Vec<QuickActionWindow>> = const { RefCell::new(Vec::new()) };
 }
 
+static SINGLE_TOOL_WINDOW: AtomicBool = AtomicBool::new(true);
+
 struct ClipboardWindowState {
     window: ClipboardWindow,
     ids: Rc<RefCell<Vec<String>>>,
+}
+
+struct ToolWindowState {
+    window: ToolWindow,
+    history: Rc<RefCell<Vec<ToolHistoryRecord>>>,
+}
+
+struct TimestampWindowState {
+    window: TimestampWindow,
+    _timer: Rc<Timer>,
+}
+
+#[derive(Default)]
+struct ToolUsage {
+    last_used: u64,
+    total: u32,
 }
 
 fn main() -> Result<()> {
@@ -46,6 +75,17 @@ fn main() -> Result<()> {
 
     // 存储和核心运行时先启动，UI 通过 channel 与其通信。
     let storage = Storage::open_default()?;
+    let registry = PluginRegistry::scan([
+        std::env::current_dir()?.join("plugins"),
+        devtools_storage::data_dir()?.join("plugins"),
+    ]);
+    for diagnostic in registry.diagnostics() {
+        warn!(%diagnostic, "plugin scan skipped an entry");
+    }
+    let plugin_host = Arc::new(WasmPluginHost::new(registry, PluginPermissions::default())?);
+    let mut commands = devtools_tools::builtin_commands();
+    commands.extend(plugin_host.registry().commands());
+    let commands = Arc::new(commands);
     let hotkey = storage
         .get_setting("hotkey")?
         .unwrap_or_else(|| "Alt+Space".into());
@@ -57,6 +97,11 @@ fn main() -> Result<()> {
         .get_setting("middle_click_enabled")?
         .map(|value| value == "true" || value == "1")
         .unwrap_or(true);
+    let single_tool_window = storage
+        .get_setting("single_tool_window")?
+        .map(|value| value == "true" || value == "1")
+        .unwrap_or(true);
+    SINGLE_TOOL_WINDOW.store(single_tool_window, Ordering::Relaxed);
     if autostart {
         if let Err(error) = set_autostart_enabled(true) {
             warn!(?error, "failed to restore autostart configuration");
@@ -66,7 +111,17 @@ fn main() -> Result<()> {
     let (request_tx, request_rx) = mpsc::unbounded_channel::<AppRequest>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    runtime.spawn(AppRuntime::new(storage.clone(), request_rx, event_tx).run());
+    runtime.spawn(
+        AppRuntime::new(
+            storage.clone(),
+            commands.as_ref().clone(),
+            plugin_host,
+            request_tx.clone(),
+            request_rx,
+            event_tx,
+        )
+        .run(),
+    );
 
     // 平台服务各自运行在后台，通过统一 AppRequest 进入核心运行时。
     start_clipboard_bridge(&runtime, request_tx.clone());
@@ -77,6 +132,7 @@ fn main() -> Result<()> {
     let app_weak = app.as_weak();
     let search_ids = Arc::new(Mutex::new(Vec::<String>::new()));
     let tool_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let tool_usage = Arc::new(Mutex::new(HashMap::<String, ToolUsage>::new()));
 
     app.set_active_view(0);
     app.set_dark_mode(true);
@@ -85,6 +141,8 @@ fn main() -> Result<()> {
     app.set_settings_hotkey(hotkey.clone().into());
     app.set_settings_autostart(autostart);
     app.set_settings_middle_click_enabled(middle_click_enabled);
+    app.set_settings_single_tool_window(single_tool_window);
+    app.set_settings_tool_history_limit("20".into());
     #[cfg(target_os = "macos")]
     {
         app.set_control_modifier("Ctrl".into());
@@ -95,11 +153,13 @@ fn main() -> Result<()> {
         app.set_control_modifier("Ctrl".into());
         app.set_meta_modifier("Super".into());
     }
-    app.set_tools(command_model(devtools_tools::builtin_commands(), "zh-CN"));
+    app.set_tools(command_model(commands.as_ref().clone(), "zh-CN"));
     set_ids(
         &tool_ids,
-        devtools_tools::builtin_commands()
-            .into_iter()
+        commands
+            .iter()
+            .filter(|command| command.id != "setting.theme")
+            .cloned()
             .map(|cmd| cmd.id),
     );
 
@@ -107,6 +167,7 @@ fn main() -> Result<()> {
         &runtime,
         app_weak.clone(),
         storage.clone(),
+        request_tx.clone(),
         middle_click_enabled,
     );
     bind_ui_callbacks(
@@ -115,11 +176,21 @@ fn main() -> Result<()> {
         storage.clone(),
         Arc::clone(&search_ids),
         Arc::clone(&tool_ids),
+        Arc::clone(&commands),
+        Arc::clone(&tool_usage),
         shortcut,
         hotkey,
         middle_click,
     );
-    bind_runtime_events(app_weak.clone(), Arc::clone(&search_ids), event_rx);
+    bind_runtime_events(
+        app_weak.clone(),
+        Arc::clone(&search_ids),
+        Arc::clone(&tool_ids),
+        Arc::clone(&commands),
+        Arc::clone(&tool_usage),
+        request_tx.clone(),
+        event_rx,
+    );
     start_tray_bridge(&runtime, request_tx.clone(), app.as_weak(), storage.clone());
     // 预创建托盘剪贴板弹窗，首次左键点击时直接复用，避免卡顿和位置跳动。
     precreate_clipboard_popup(&storage);
@@ -239,6 +310,7 @@ fn start_middle_bridge(
     runtime: &Runtime,
     app_weak: slint::Weak<SearchWindow>,
     storage: Storage,
+    request_tx: mpsc::UnboundedSender<AppRequest>,
     enabled: bool,
 ) -> MiddleClickController {
     let (quick_tx, mut quick_rx) = mpsc::unbounded_channel::<QuickActionEvent>();
@@ -248,6 +320,7 @@ fn start_middle_bridge(
         while let Some(event) = quick_rx.recv().await {
             let app_weak = app_weak.clone();
             let storage = storage.clone();
+            let request_tx = request_tx.clone();
             let result = slint::invoke_from_event_loop(move || match event {
                 QuickActionEvent::Show {
                     selected_text,
@@ -262,7 +335,14 @@ fn start_middle_bridge(
                         .map(|app| app.get_language().to_string())
                         .unwrap_or_else(|| "zh-CN".into());
                     hide_clipboard_popups();
-                    open_quick_action_window(storage, selected_text, position, dark_mode, language);
+                    open_quick_action_window(
+                        storage,
+                        selected_text,
+                        position,
+                        dark_mode,
+                        language,
+                        request_tx,
+                    );
                 }
                 QuickActionEvent::Dismiss => hide_transient_windows(),
             });
@@ -276,12 +356,15 @@ fn start_middle_bridge(
 }
 
 /// 绑定 Slint 回调。UI 只发送请求或打开窗口，耗时逻辑放到运行时/服务层。
+#[allow(clippy::too_many_arguments)]
 fn bind_ui_callbacks(
     app: &SearchWindow,
     request_tx: mpsc::UnboundedSender<AppRequest>,
     storage: Storage,
     search_ids: Arc<Mutex<Vec<String>>>,
     tool_ids: Arc<Mutex<Vec<String>>>,
+    commands: Arc<Vec<CommandDescriptor>>,
+    tool_usage: Arc<Mutex<HashMap<String, ToolUsage>>>,
     shortcut: Option<GlobalShortcut>,
     hotkey: String,
     middle_click: MiddleClickController,
@@ -338,14 +421,18 @@ fn bind_ui_callbacks(
     });
 
     let show_tools_app = app.as_weak();
+    let show_tools_commands = Arc::clone(&commands);
+    let show_tools_usage = Arc::clone(&tool_usage);
     // tools 页面只展示工具类命令，并按当前语言生成列表文案。
     app.on_show_tools(move || {
         if let Some(app) = show_tools_app.upgrade() {
             let language = app.get_language().to_string();
-            let commands = devtools_tools::builtin_commands()
-                .into_iter()
-                .filter(|command| command.id.starts_with("tool."))
+            let mut commands = show_tools_commands
+                .iter()
+                .filter(|command| command.id != "setting.theme")
+                .cloned()
                 .collect::<Vec<_>>();
+            sort_tool_commands(&mut commands, &show_tools_usage);
             set_ids(&tool_ids, commands.iter().map(|cmd| cmd.id.clone()));
             app.set_tools(command_model(commands, &language));
             app.set_active_view(1);
@@ -367,15 +454,19 @@ fn bind_ui_callbacks(
 
     let language_tx = request_tx.clone();
     let language_app = app.as_weak();
+    let language_commands = Arc::clone(&commands);
+    let language_usage = Arc::clone(&tool_usage);
     // 语言切换先立即更新 UI，再写入存储，减少界面反馈延迟。
     app.on_language_selected(move |language| {
         let language = language.to_string();
         if let Some(app) = language_app.upgrade() {
             app.set_language(language.clone().into());
-            let commands = devtools_tools::builtin_commands()
-                .into_iter()
-                .filter(|command| command.id.starts_with("tool."))
+            let mut commands = language_commands
+                .iter()
+                .filter(|command| command.id != "setting.theme")
+                .cloned()
                 .collect::<Vec<_>>();
+            sort_tool_commands(&mut commands, &language_usage);
             app.set_tools(command_model(commands, &language));
             let _ = language_tx.send(AppRequest::Search {
                 query: app.get_query().to_string(),
@@ -437,6 +528,29 @@ fn bind_ui_callbacks(
         }
     });
 
+    let single_window_tx = request_tx.clone();
+    app.on_single_tool_window_changed(move |enabled| {
+        SINGLE_TOOL_WINDOW.store(enabled, Ordering::Relaxed);
+        let _ = single_window_tx.send(AppRequest::SetSingleToolWindow { enabled });
+    });
+
+    let history_limit_tx = request_tx.clone();
+    let history_limit_app = app.as_weak();
+    app.on_tool_history_limit_changed(move |value| match value.parse::<usize>() {
+        Ok(limit) if limit <= 1_000 => {
+            let _ = history_limit_tx.send(AppRequest::SetToolHistoryLimit { limit });
+        }
+        _ => {
+            if let Some(app) = history_limit_app.upgrade() {
+                app.set_status(localized_status(
+                    &app,
+                    "历史条数需为 0 到 1000",
+                    "History limit must be 0 to 1000",
+                ));
+            }
+        }
+    });
+
     app.on_clear_clipboard(move || {
         let _ = request_tx.send(AppRequest::ClearClipboard);
     });
@@ -446,6 +560,10 @@ fn bind_ui_callbacks(
 fn bind_runtime_events(
     app_weak: slint::Weak<SearchWindow>,
     search_ids: Arc<Mutex<Vec<String>>>,
+    tool_ids: Arc<Mutex<Vec<String>>>,
+    commands: Arc<Vec<CommandDescriptor>>,
+    tool_usage: Arc<Mutex<HashMap<String, ToolUsage>>>,
+    request_tx: mpsc::UnboundedSender<AppRequest>,
     mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
 ) {
     std::thread::Builder::new()
@@ -456,9 +574,21 @@ fn bind_runtime_events(
                 while let Some(event) = event_rx.recv().await {
                     let app_weak = app_weak.clone();
                     let search_ids = Arc::clone(&search_ids);
+                    let tool_ids = Arc::clone(&tool_ids);
+                    let commands = Arc::clone(&commands);
+                    let tool_usage = Arc::clone(&tool_usage);
+                    let request_tx = request_tx.clone();
                     if let Err(error) = slint::invoke_from_event_loop(move || {
                         if let Some(app) = app_weak.upgrade() {
-                            apply_event(&app, &search_ids, event);
+                            apply_event(
+                                &app,
+                                &search_ids,
+                                &tool_ids,
+                                &commands,
+                                &tool_usage,
+                                request_tx,
+                                event,
+                            );
                         }
                     }) {
                         error!(?error, "failed to dispatch UI event");
@@ -471,7 +601,15 @@ fn bind_runtime_events(
 }
 
 /// 将核心事件应用到主窗口状态，所有 UI 属性更新集中在这里。
-fn apply_event(app: &SearchWindow, search_ids: &Arc<Mutex<Vec<String>>>, event: AppEvent) {
+fn apply_event(
+    app: &SearchWindow,
+    search_ids: &Arc<Mutex<Vec<String>>>,
+    tool_ids: &Arc<Mutex<Vec<String>>>,
+    commands: &Arc<Vec<CommandDescriptor>>,
+    tool_usage: &Arc<Mutex<HashMap<String, ToolUsage>>>,
+    request_tx: mpsc::UnboundedSender<AppRequest>,
+    event: AppEvent,
+) {
     match event {
         AppEvent::SearchCompleted(results) => {
             set_ids(search_ids, results.iter().map(|result| result.id.clone()));
@@ -487,12 +625,17 @@ fn apply_event(app: &SearchWindow, search_ids: &Arc<Mutex<Vec<String>>>, event: 
             hotkey,
             autostart,
             middle_click_enabled,
+            tool_history_limit,
+            single_tool_window,
         } => {
             apply_theme(app, &theme);
             app.set_language(language.into());
             app.set_settings_hotkey(hotkey.into());
             app.set_settings_autostart(autostart);
             app.set_settings_middle_click_enabled(middle_click_enabled);
+            app.set_settings_tool_history_limit(tool_history_limit.to_string().into());
+            app.set_settings_single_tool_window(single_tool_window);
+            SINGLE_TOOL_WINDOW.store(single_tool_window, Ordering::Relaxed);
             app.set_active_view(2);
             app.set_status("".into());
         }
@@ -540,24 +683,67 @@ fn apply_event(app: &SearchWindow, search_ids: &Arc<Mutex<Vec<String>>>, event: 
                 },
             ));
         }
-        AppEvent::CommandExecuted { title, content }
-        | AppEvent::ToolCompleted { title, content } => {
+        AppEvent::CommandExecuted {
+            command_id,
+            title,
+            content,
+        } => {
+            if let Some(command_id) = command_id {
+                record_tool_usage(tool_usage, &command_id);
+                refresh_tool_list(app, tool_ids, commands, tool_usage);
+            }
             app.set_status(format!("{title}: {content}").into());
+        }
+        AppEvent::ToolCompleted {
+            tool_id,
+            title,
+            content,
+        } => {
+            record_tool_usage(tool_usage, &tool_id);
+            TOOL_WINDOWS.with(|windows| {
+                for state in windows.borrow().iter() {
+                    if state.window.get_tool_id() == tool_id {
+                        state.window.set_output(content.clone().into());
+                    }
+                }
+            });
+            refresh_tool_list(app, tool_ids, commands, tool_usage);
+            app.set_status(format!("{title}: {content}").into());
+        }
+        AppEvent::ToolHistoryUpdated { tool_id, history } => {
+            TOOL_WINDOWS.with(|windows| {
+                for state in windows.borrow().iter() {
+                    if state.window.get_tool_id() == tool_id {
+                        state.window.set_history(tool_history_model(&history));
+                        *state.history.borrow_mut() = history.clone();
+                    }
+                }
+            });
         }
         AppEvent::CopyRequested { text } => {
             if let Err(error) = set_clipboard_text(&text) {
                 app.set_status(format!("Copy failed: {error}").into());
             }
         }
-        AppEvent::ToolOpened { tool_id, title } => {
+        AppEvent::ToolOpened {
+            tool_id,
+            title,
+            history,
+        } => {
             let language = app.get_language().to_string();
-            open_tool_window(
-                tool_id.clone(),
-                localized_title(&tool_id, &language, &title),
-                String::new(),
-                app.get_dark_mode(),
-                language,
-            );
+            if tool_id == "tool.timestamp.convert" {
+                open_timestamp_window(app.get_dark_mode(), request_tx);
+            } else {
+                open_tool_window(
+                    tool_id.clone(),
+                    localized_title(&tool_id, &language, &title),
+                    String::new(),
+                    app.get_dark_mode(),
+                    language,
+                    request_tx,
+                    history,
+                );
+            }
         }
         AppEvent::ToggleWindow => {
             app.window().show().ok();
@@ -569,16 +755,60 @@ fn apply_event(app: &SearchWindow, search_ids: &Arc<Mutex<Vec<String>>>, event: 
         AppEvent::Error(message) => {
             app.set_status(format!("Error: {message}").into());
         }
+        AppEvent::ToolHistoryLimitChanged { limit } => {
+            app.set_settings_tool_history_limit(limit.to_string().into());
+            app.set_status(localized_status(
+                app,
+                "工具历史设置已保存",
+                "Tool history setting saved",
+            ));
+        }
+        AppEvent::SingleToolWindowChanged { enabled } => {
+            SINGLE_TOOL_WINDOW.store(enabled, Ordering::Relaxed);
+            app.set_settings_single_tool_window(enabled);
+            app.set_status(localized_status(
+                app,
+                if enabled {
+                    "已启用工具单窗口"
+                } else {
+                    "已允许多个工具窗口"
+                },
+                if enabled {
+                    "Single tool window enabled"
+                } else {
+                    "Multiple tool windows enabled"
+                },
+            ));
+        }
+        AppEvent::TimestampConverted { mode, value } => {
+            TIMESTAMP_WINDOWS.with(|windows| {
+                for state in windows.borrow().iter() {
+                    match mode {
+                        TimestampConversionMode::UnixToDatetime => {
+                            state.window.set_datetime_output(value.clone().into());
+                        }
+                        TimestampConversionMode::DatetimeToUnix => {
+                            state
+                                .window
+                                .set_datetime_timestamp_output(value.clone().into());
+                        }
+                        TimestampConversionMode::PartsToUnix => {
+                            state.window.set_parts_output(value.clone().into());
+                        }
+                    }
+                }
+            });
+        }
     }
 }
 
-/// 根据结果 ID 执行动作：设置项打开设置，剪贴板打开历史窗口，其它工具打开工具窗口。
+/// 根据结果 ID 执行动作：设置和剪贴板由 UI 打开，其余命令统一交由 Core 执行。
 fn activate_item(
     app_weak: &slint::Weak<SearchWindow>,
     storage: Storage,
     request_tx: mpsc::UnboundedSender<AppRequest>,
     result_id: &str,
-    input: Option<String>,
+    _input: Option<String>,
 ) {
     let dark_mode = app_weak
         .upgrade()
@@ -596,23 +826,11 @@ fn activate_item(
         "tool.clipboard.history" => {
             open_clipboard_window(storage, dark_mode, language);
         }
-        "tool.uuid.v4" => {
-            let result = devtools_tools::execute(result_id, "");
-            let _ = set_clipboard_text(&result.content);
-            if let Some(app) = app_weak.upgrade() {
-                app.set_status(localized_status(&app, "UUID 已复制", "UUID copied"));
-            }
+        _ => {
+            let _ = request_tx.send(AppRequest::ActivateResult {
+                result_id: result_id.to_string(),
+            });
         }
-        id if id.starts_with("tool.") => {
-            open_tool_window(
-                id.to_string(),
-                devtools_tools::localized_title_for(id, &language),
-                input.unwrap_or_default(),
-                dark_mode,
-                language,
-            );
-        }
-        _ => {}
     }
 }
 
@@ -623,7 +841,28 @@ fn open_tool_window(
     input: String,
     dark_mode: bool,
     language: String,
+    request_tx: mpsc::UnboundedSender<AppRequest>,
+    history: Vec<ToolHistoryRecord>,
 ) {
+    if SINGLE_TOOL_WINDOW.load(Ordering::Relaxed) {
+        let has_existing = TOOL_WINDOWS.with(|windows| {
+            let windows = windows.borrow();
+            if let Some(state) = windows
+                .iter()
+                .find(|state| state.window.get_tool_id() == tool_id)
+            {
+                state.window.show().ok();
+                state.window.window().request_redraw();
+                true
+            } else {
+                false
+            }
+        });
+        if has_existing {
+            return;
+        }
+    }
+
     let window = ToolWindow::new().expect("failed to create tool window");
     window.set_tool_id(tool_id.clone().into());
     window.set_title_text(title.into());
@@ -632,14 +871,34 @@ fn open_tool_window(
     window.set_dark_mode(dark_mode);
     window.set_language(language.into());
     window.set_pinned(false);
+    window.set_history_visible(false);
+    window.set_history(tool_history_model(&history));
+    let history_records = Rc::new(RefCell::new(history));
 
-    // 工具运行直接在 UI 回调中执行，当前内置工具都是轻量文本处理。
-    let run_window = window.as_weak();
+    // UI 只发送意图，Core 决定执行内置工具或隔离的插件命令。
     let run_tool_id = tool_id.clone();
+    let run_tx = request_tx.clone();
     window.on_run(move |input| {
-        let result = devtools_tools::execute(&run_tool_id, &input);
-        if let Some(window) = run_window.upgrade() {
-            window.set_output(result.content.into());
+        let _ = run_tx.send(AppRequest::RunTool {
+            tool_id: run_tool_id.clone(),
+            input: input.to_string(),
+        });
+    });
+
+    let select_window = window.as_weak();
+    let select_history = Rc::clone(&history_records);
+    window.on_select_history(move |index| {
+        let record = select_history.borrow().get(index as usize).cloned();
+        if let (Some(window), Some(record)) = (select_window.upgrade(), record) {
+            window.set_input(record.input.into());
+            window.set_output(record.output.into());
+        }
+    });
+
+    let history_window = window.as_weak();
+    window.on_toggle_history(move || {
+        if let Some(window) = history_window.upgrade() {
+            window.set_history_visible(!window.get_history_visible());
         }
     });
 
@@ -658,7 +917,140 @@ fn open_tool_window(
     });
 
     window.show().ok();
-    TOOL_WINDOWS.with(|windows| windows.borrow_mut().push(window));
+    if !window.get_input().is_empty() {
+        let _ = request_tx.send(AppRequest::RunTool {
+            tool_id: tool_id.clone(),
+            input: window.get_input().to_string(),
+        });
+    }
+    TOOL_WINDOWS.with(|windows| {
+        windows.borrow_mut().push(ToolWindowState {
+            window,
+            history: history_records,
+        })
+    });
+}
+
+/// 打开截图风格的时间戳工具窗口。默认单窗口模式下重复激活只聚焦现有窗口。
+fn open_timestamp_window(dark_mode: bool, request_tx: mpsc::UnboundedSender<AppRequest>) {
+    if SINGLE_TOOL_WINDOW.load(Ordering::Relaxed) {
+        let has_existing = TIMESTAMP_WINDOWS.with(|windows| {
+            let windows = windows.borrow();
+            if let Some(state) = windows.first() {
+                state.window.show().ok();
+                state.window.window().request_redraw();
+                true
+            } else {
+                false
+            }
+        });
+        if has_existing {
+            return;
+        }
+    }
+
+    let window = TimestampWindow::new().expect("failed to create timestamp window");
+    let now = devtools_tools::timestamp_now_with_unit(true);
+    let datetime = devtools_tools::timestamp_now_datetime();
+    let parts = datetime_parts(&datetime);
+    window.set_dark_mode(dark_mode);
+    window.set_current_unit_index(1);
+    window.set_current_timestamp(now.clone().into());
+    window.set_timestamp_input(now.into());
+    window.set_datetime_output(datetime.clone().into());
+    window.set_datetime_input(datetime.into());
+    window.set_datetime_timestamp_output("".into());
+    window.set_datetime_unit_index(1);
+    window.set_year_input(parts[0].clone().into());
+    window.set_month_input(parts[1].clone().into());
+    window.set_day_input(parts[2].clone().into());
+    window.set_hour_input(parts[3].clone().into());
+    window.set_minute_input(parts[4].clone().into());
+    window.set_second_input(parts[5].clone().into());
+    window.set_parts_output("".into());
+    window.set_parts_unit_index(1);
+
+    let refresh_window = window.as_weak();
+    window.on_refresh_current(move || {
+        if let Some(window) = refresh_window.upgrade() {
+            window.set_current_timestamp(
+                devtools_tools::timestamp_now_with_unit(window.get_current_unit_index() == 1)
+                    .into(),
+            );
+        }
+    });
+
+    let unit_window = window.as_weak();
+    window.on_current_unit_changed(move |index| {
+        if let Some(window) = unit_window.upgrade() {
+            window
+                .set_current_timestamp(devtools_tools::timestamp_now_with_unit(index == 1).into());
+        }
+    });
+
+    let timer = Rc::new(Timer::default());
+    let clock_window = window.as_weak();
+    timer.start(TimerMode::Repeated, Duration::from_secs(1), move || {
+        if let Some(window) = clock_window.upgrade() {
+            window.set_current_timestamp(
+                devtools_tools::timestamp_now_with_unit(window.get_current_unit_index() == 1)
+                    .into(),
+            );
+        }
+    });
+    let start_timer = Rc::clone(&timer);
+    window.on_start_clock(move || {
+        start_timer.restart();
+    });
+    let stop_timer = Rc::clone(&timer);
+    window.on_stop_clock(move || {
+        stop_timer.stop();
+    });
+
+    let unix_tx = request_tx.clone();
+    window.on_convert_timestamp(move |input| {
+        let _ = unix_tx.send(AppRequest::TimestampConvertUnix {
+            input: input.to_string(),
+        });
+    });
+    let datetime_tx = request_tx.clone();
+    window.on_convert_datetime(move |input, unit_index| {
+        let _ = datetime_tx.send(AppRequest::TimestampConvertDatetime {
+            input: input.to_string(),
+            milliseconds: unit_index == 1,
+        });
+    });
+    window.on_convert_parts(move |year, month, day, hour, minute, second, unit_index| {
+        let _ = request_tx.send(AppRequest::TimestampConvertParts {
+            year: year.to_string(),
+            month: month.to_string(),
+            day: day.to_string(),
+            hour: hour.to_string(),
+            minute: minute.to_string(),
+            second: second.to_string(),
+            milliseconds: unit_index == 1,
+        });
+    });
+    window.on_copy_text(move |text| {
+        let _ = set_clipboard_text(&text);
+    });
+
+    window.show().ok();
+    TIMESTAMP_WINDOWS.with(|windows| {
+        windows.borrow_mut().push(TimestampWindowState {
+            window,
+            _timer: timer,
+        });
+    });
+}
+
+fn datetime_parts(datetime: &str) -> [String; 6] {
+    let values = datetime
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    std::array::from_fn(|index| values.get(index).cloned().unwrap_or_default())
 }
 
 /// 打开剪贴板历史窗口，并维护 UI 行索引到数据库 ID 的映射。
@@ -737,7 +1129,11 @@ fn build_clipboard_window(
     // 隐藏状态下创建/显示的窗口不会触发 Slint show 时的 preferred 尺寸应用
     // (set_visible 走 Shown 路径被当作 recreating),会停在 min 尺寸 360x420,
     // 这里显式设为首选尺寸,保证窗口大小与托盘定位计算一致。
-    window.window().set_size(slint::WindowSize::Logical(slint::LogicalSize::new(420.0, 620.0)));
+    window
+        .window()
+        .set_size(slint::WindowSize::Logical(slint::LogicalSize::new(
+            420.0, 620.0,
+        )));
     refresh_clipboard_window(&window, storage, &ids, "", language);
 
     let query_window = window.as_weak();
@@ -893,6 +1289,7 @@ fn open_quick_action_window(
     position: Option<ScreenPosition>,
     dark_mode: bool,
     language: String,
+    request_tx: mpsc::UnboundedSender<AppRequest>,
 ) {
     let text = selected_text.unwrap_or_default();
     let actions = quick_actions_for(&text, &language);
@@ -914,6 +1311,7 @@ fn open_quick_action_window(
 
     let activate_window = window.as_weak();
     let activate_language = language.clone();
+    let activate_tx = request_tx.clone();
     window.on_activate_action(move |index| {
         let action_id = action_ids.borrow().get(index as usize).cloned();
         if let Some(action_id) = action_id {
@@ -926,6 +1324,8 @@ fn open_quick_action_window(
                     text.clone(),
                     dark_mode,
                     activate_language.clone(),
+                    activate_tx.clone(),
+                    Vec::new(),
                 );
             }
             if let Some(window) = activate_window.upgrade() {
@@ -1061,6 +1461,70 @@ fn set_ids(ids: &Arc<Mutex<Vec<String>>>, values: impl Iterator<Item = String>) 
     }
 }
 
+/// 本次启动内用过的工具优先；最近一次使用优先，再按累计使用次数排序。
+fn sort_tool_commands(
+    commands: &mut [CommandDescriptor],
+    usage: &Arc<Mutex<HashMap<String, ToolUsage>>>,
+) {
+    let Ok(usage) = usage.lock() else {
+        return;
+    };
+    commands.sort_by(
+        |left, right| match (usage.get(&left.id), usage.get(&right.id)) {
+            (Some(left_usage), Some(right_usage)) => right_usage
+                .last_used
+                .cmp(&left_usage.last_used)
+                .then_with(|| right_usage.total.cmp(&left_usage.total))
+                .then_with(|| left.title.cmp(&right.title)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.title.cmp(&right.title),
+        },
+    );
+}
+
+fn record_tool_usage(usage: &Arc<Mutex<HashMap<String, ToolUsage>>>, tool_id: &str) {
+    if let Ok(mut usage) = usage.lock() {
+        let next_sequence = usage
+            .values()
+            .map(|entry| entry.last_used)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let entry = usage.entry(tool_id.to_string()).or_default();
+        entry.last_used = next_sequence;
+        entry.total += 1;
+    }
+}
+
+fn refresh_tool_list(
+    app: &SearchWindow,
+    tool_ids: &Arc<Mutex<Vec<String>>>,
+    commands: &Arc<Vec<CommandDescriptor>>,
+    usage: &Arc<Mutex<HashMap<String, ToolUsage>>>,
+) {
+    let mut commands = commands
+        .iter()
+        .filter(|command| command.id != "setting.theme")
+        .cloned()
+        .collect::<Vec<_>>();
+    sort_tool_commands(&mut commands, usage);
+    set_ids(tool_ids, commands.iter().map(|command| command.id.clone()));
+    let language = app.get_language().to_string();
+    app.set_tools(command_model(commands, &language));
+}
+
+fn tool_history_model(records: &[ToolHistoryRecord]) -> ModelRc<ToolHistoryView> {
+    let rows = records
+        .iter()
+        .map(|record| ToolHistoryView {
+            summary: summarize(&record.input).into(),
+            created_at: format_clipboard_time(record.created_at).into(),
+        })
+        .collect::<Vec<_>>();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
 /// 将命令描述符转换成 Slint 列表模型。
 fn command_model(commands: Vec<CommandDescriptor>, language: &str) -> ModelRc<SearchResultView> {
     let rows = commands
@@ -1071,7 +1535,7 @@ fn command_model(commands: Vec<CommandDescriptor>, language: &str) -> ModelRc<Se
                 id: command.id.into(),
                 title: title.into(),
                 subtitle: subtitle.into(),
-                source: source_label_from_command(&command.source, language).into(),
+                source: source_label_from_command(&command.source, language),
                 meta: "".into(),
                 shortcut: "".into(),
             }
@@ -1121,27 +1585,14 @@ fn clipboard_count(count: usize, language: &str) -> String {
 }
 
 fn format_clipboard_time(timestamp: i64) -> String {
-    #[cfg(unix)]
-    {
-        let timestamp = timestamp as libc::time_t;
-        let mut local_time = std::mem::MaybeUninit::<libc::tm>::uninit();
-        let result = unsafe { libc::localtime_r(&timestamp, local_time.as_mut_ptr()) };
-        if result.is_null() {
-            return String::new();
-        }
-        let local_time = unsafe { local_time.assume_init() };
-        return format!("{:02}:{:02}", local_time.tm_hour, local_time.tm_min);
-    }
-
-    #[cfg(not(unix))]
-    {
-        let Ok(utc_time) = OffsetDateTime::from_unix_timestamp(timestamp) else {
-            return String::new();
-        };
-        utc_time
-            .format(&format_description!("[hour]:[minute]"))
-            .unwrap_or_default()
-    }
+    let Ok(utc_time) = OffsetDateTime::from_unix_timestamp(timestamp) else {
+        return String::new();
+    };
+    let east8 = UtcOffset::from_hms(8, 0, 0).expect("+08:00 must be valid");
+    utc_time
+        .to_offset(east8)
+        .format(&format_description!("[hour]:[minute]"))
+        .unwrap_or_default()
 }
 
 fn clipboard_shortcut(index: usize) -> String {
@@ -1167,7 +1618,7 @@ fn results_to_model(results: Vec<SearchResult>, language: &str) -> ModelRc<Searc
                 id: result.id.into(),
                 title: title.into(),
                 subtitle: subtitle.into(),
-                source: source_label(&result.source, language).into(),
+                source: source_label(&result.source, language),
                 meta: "".into(),
                 shortcut: "".into(),
             }

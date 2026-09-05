@@ -9,6 +9,7 @@ version.workspace = true
 anyhow.workspace = true
 devtools-core = { path = "../devtools-core" }
 devtools-plugin-api = { path = "../devtools-plugin-api" }
+devtools-plugin-host = { path = "../devtools-plugin-host" }
 devtools-services = { path = "../devtools-services" }
 devtools-storage = { path = "../devtools-storage" }
 devtools-tools = { path = "../devtools-tools" }

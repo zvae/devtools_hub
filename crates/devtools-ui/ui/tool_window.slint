@@ -1,5 +1,6 @@
-import { Button } from "std-widgets.slint";
+import { Button, ListView } from "std-widgets.slint";
 import { EditorPane } from "editor_pane.slint";
+import { ToolHistoryView } from "common.slint";
 
 // 独立工具窗口：使用系统原生窗口按钮，内部只保留置顶控制。
 export component ToolWindow inherits Window {
@@ -10,8 +11,12 @@ export component ToolWindow inherits Window {
     in-out property <bool> dark-mode;
     in-out property <bool> pinned;
     in-out property <string> language;
+    in property <[ToolHistoryView]> history;
+    in-out property <bool> history-visible;
 
     callback run(string);
+    callback select-history(int);
+    callback toggle-history;
     callback copy-output;
     callback toggle-pin;
 
@@ -84,6 +89,9 @@ export component ToolWindow inherits Window {
                 dark-mode: root.dark-mode;
                 text <=> root.input;
                 read-only: false;
+                edited(value) => {
+                    root.run(value);
+                }
                 horizontal-stretch: 1;
             }
 
@@ -96,7 +104,64 @@ export component ToolWindow inherits Window {
             }
         }
 
-        // 底部操作栏：运行工具并复制输出。
+        if root.history-visible: Rectangle {
+            height: 132px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.dark-mode ? #2f3a4f : #d9e0ea;
+            background: root.dark-mode ? #121926 : #ffffff;
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+
+                Text {
+                    text: root.language == "en" ? "History" : "历史记录";
+                    color: root.dark-mode ? #8f9aae : #637083;
+                    font-size: 12px;
+                    font-weight: 700;
+                    height: 20px;
+                }
+
+                ListView {
+                    for item[index] in root.history: Rectangle {
+                        height: 32px;
+                        background: history-touch.has-hover ? (root.dark-mode ? #202b3e : #eef4fc) : transparent;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+
+                            Text {
+                                text: item.summary;
+                                color: root.dark-mode ? #dce4f0 : #263448;
+                                font-size: 12px;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: item.created-at;
+                                color: root.dark-mode ? #7f8da3 : #7a8697;
+                                font-size: 11px;
+                                width: 48px;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        history-touch := TouchArea {
+                            clicked => {
+                                root.select-history(index);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 底部操作栏：自动计算结果，保留历史展开与复制操作。
         Rectangle {
             height: 42px;
             background: transparent;
@@ -110,9 +175,9 @@ export component ToolWindow inherits Window {
                 }
 
                 Button {
-                    text: root.language == "en" ? "Run" : "运行";
+                    text: root.language == "en" ? "History" : "历史";
                     clicked => {
-                        root.run(root.input);
+                        root.toggle-history();
                     }
                 }
 

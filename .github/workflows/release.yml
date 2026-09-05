@@ -19,6 +19,7 @@ jobs:
       release_id: ${{ steps.release.outputs.release_id }}
       upload_url: ${{ steps.release.outputs.upload_url }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,6 +43,7 @@ jobs:
             const manifest = fs.readFileSync('Cargo.toml', 'utf8');
             const version = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? '0.1.0';
             const tagName = release?.tag_name ?? `v${version}`;
+            const artifactVersion = tagName.replace(/^v/, '');
             const latestPublished = releases.find((item) => !item.draft && !item.prerelease);
 
             if (!release) {
@@ -94,8 +96,8 @@ jobs:
               changes,
               '',
               '## 构建产物',
-              `- macOS arm64: \`DevTools-Hub-${tagName}-macos-arm64.dmg\``,
-              `- Windows x64: \`DevTools-Hub-${tagName}-windows-x64.exe\``,
+              `- macOS arm64: \`DevTools-Hub-${artifactVersion}-macos-arm64.dmg\``,
+              `- Windows x64: \`DevTools-Hub-${artifactVersion}-windows-x64.exe\``,
             ].join('\n');
 
             const updated = await github.rest.repos.updateRelease({
@@ -110,6 +112,7 @@ jobs:
             core.setOutput('release_id', String(updated.data.id));
             core.setOutput('upload_url', updated.data.upload_url);
             core.setOutput('tag_name', updated.data.tag_name);
+            core.setOutput('version', artifactVersion);
 
   build-macos-arm64:
     needs: [prepare-release]
@@ -121,7 +124,7 @@ jobs:
         run: zsh packaging/macos/build-app.sh
       - name: Archive macOS application
         env:
-          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
         run: |
           staging_dir="$(mktemp -d)"
           trap 'rm -rf "$staging_dir"' EXIT
@@ -132,12 +135,12 @@ jobs:
             -srcfolder "$staging_dir" \
             -ov \
             -format UDZO \
-            "DevTools-Hub-${RELEASE_TAG}-macos-arm64.dmg"
+            "DevTools-Hub-${RELEASE_VERSION}-macos-arm64.dmg"
       - name: Upload macOS asset to draft
         uses: shogo82148/actions-upload-release-asset@v1.9.2
         with:
           upload_url: ${{ needs.prepare-release.outputs.upload_url }}
-          asset_path: DevTools-Hub-${{ needs.prepare-release.outputs.tag_name }}-macos-arm64.dmg
+          asset_path: DevTools-Hub-${{ needs.prepare-release.outputs.version }}-macos-arm64.dmg
           overwrite: true
 
   build-windows-x64:
@@ -150,13 +153,13 @@ jobs:
         run: cargo build --release -p devtools-app
       - name: Archive Windows application
         env:
-          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
         shell: pwsh
         run: |
-          Copy-Item target/release/devtools-app.exe "DevTools-Hub-$env:RELEASE_TAG-windows-x64.exe"
+          Copy-Item target/release/devtools-app.exe "DevTools-Hub-$env:RELEASE_VERSION-windows-x64.exe"
       - name: Upload Windows asset to draft
         uses: shogo82148/actions-upload-release-asset@v1.9.2
         with:
           upload_url: ${{ needs.prepare-release.outputs.upload_url }}
-          asset_path: DevTools-Hub-${{ needs.prepare-release.outputs.tag_name }}-windows-x64.exe
+          asset_path: DevTools-Hub-${{ needs.prepare-release.outputs.version }}-windows-x64.exe
           overwrite: true

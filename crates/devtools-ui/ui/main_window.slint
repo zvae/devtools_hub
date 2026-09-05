@@ -15,6 +15,8 @@ export component SearchWindow inherits Window {
     in-out property <string> settings-hotkey;
     in-out property <bool> settings-autostart;
     in-out property <bool> settings-middle-click-enabled;
+    in-out property <bool> settings-single-tool-window;
+    in-out property <string> settings-tool-history-limit;
     in-out property <string> status;
 
     callback query-changed(string);
@@ -28,6 +30,8 @@ export component SearchWindow inherits Window {
     callback hotkey-changed(string);
     callback autostart-changed(bool);
     callback middle-click-enabled-changed(bool);
+    callback single-tool-window-changed(bool);
+    callback tool-history-limit-changed(string);
     callback clear-clipboard;
 
     title: "DevTools Hub";
@@ -241,6 +245,8 @@ export component SearchWindow inherits Window {
                             settings-hotkey <=> root.settings-hotkey;
                             settings-autostart <=> root.settings-autostart;
                             settings-middle-click-enabled <=> root.settings-middle-click-enabled;
+                            settings-single-tool-window <=> root.settings-single-tool-window;
+                            settings-tool-history-limit <=> root.settings-tool-history-limit;
                             control-modifier: root.control-modifier;
                             meta-modifier: root.meta-modifier;
                             theme-selected(value) => {
@@ -257,6 +263,12 @@ export component SearchWindow inherits Window {
                             }
                             middle-click-enabled-changed(value) => {
                                 root.middle-click-enabled-changed(value);
+                            }
+                            single-tool-window-changed(value) => {
+                                root.single-tool-window-changed(value);
+                            }
+                            tool-history-limit-changed(value) => {
+                                root.tool-history-limit-changed(value);
                             }
                             clear-clipboard => {
                                 root.clear-clipboard();

@@ -9,6 +9,8 @@ export component SettingsPanel inherits Rectangle {
     in-out property <string> settings-hotkey;
     in-out property <bool> settings-autostart;
     in-out property <bool> settings-middle-click-enabled;
+    in-out property <bool> settings-single-tool-window;
+    in-out property <string> settings-tool-history-limit;
     in property <string> control-modifier: "Ctrl";
     in property <string> meta-modifier: "Super";
 
@@ -17,6 +19,8 @@ export component SettingsPanel inherits Rectangle {
     callback hotkey-changed(string);
     callback autostart-changed(bool);
     callback middle-click-enabled-changed(bool);
+    callback single-tool-window-changed(bool);
+    callback tool-history-limit-changed(string);
     callback clear-clipboard;
 
     background: transparent;
@@ -165,6 +169,73 @@ export component SettingsPanel inherits Rectangle {
             }
         }
 
+        HorizontalLayout {
+            height: 40px;
+            spacing: 10px;
+
+            CheckBox {
+                width: 20px;
+                text: "";
+                checked <=> root.settings-single-tool-window;
+                toggled => {
+                    root.single-tool-window-changed(root.settings-single-tool-window);
+                }
+            }
+
+            Text {
+                text: root.language == "en" ? "Keep one window per tool" : "每个工具只保留一个窗口";
+                color: root.dark-mode ? #d2d9e4 : #2d3748;
+                font-size: 14px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+
+                single-window-touch := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.settings-single-tool-window = !root.settings-single-tool-window;
+                        root.single-tool-window-changed(root.settings-single-tool-window);
+                    }
+                }
+            }
+        }
+
+        SectionLabel {
+            text: root.language == "en" ? "Tool History" : "工具历史";
+            dark-mode: root.dark-mode;
+        }
+
+        Text {
+            text: root.language == "en" ? "Keep entries per tool (0 to disable)" : "每个工具保留条数（0 表示不保留）";
+            color: root.dark-mode ? #d2d9e4 : #2d3748;
+            font-size: 13px;
+            height: 22px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            width: 120px;
+            height: 42px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.dark-mode ? #303a4e : #d9e0ea;
+            background: root.dark-mode ? #151c28 : #ffffff;
+
+            TextInput {
+                text <=> root.settings-tool-history-limit;
+                color: root.dark-mode ? #f3f6fb : #172033;
+                selection-foreground-color: root.dark-mode ? #0f141d : #ffffff;
+                selection-background-color: #5ea1ff;
+                font-size: 14px;
+                width: parent.width;
+                height: parent.height;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                edited => {
+                    root.tool-history-limit-changed(self.text);
+                }
+            }
+        }
         SectionLabel {
             text: root.language == "en" ? "Mouse" : "鼠标行为";
             dark-mode: root.dark-mode;

@@ -7,6 +7,7 @@ export component EditorPane inherits Rectangle {
     in property <bool> dark-mode;
     in-out property <string> text;
     in property <bool> read-only;
+    callback edited(string);
 
     border-radius: 8px;
     border-width: 1px;
@@ -23,12 +24,12 @@ export component EditorPane inherits Rectangle {
         }
 
         TextEdit {
-            text: root.text;
+            text <=> root.text;
             read-only: root.read-only;
             font-size: 14px;
             edited(value) => {
                 if (!root.read-only) {
-                    root.text = value;
+                    root.edited(value);
                 }
             }
         }

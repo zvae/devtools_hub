@@ -8,6 +8,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 devtools-plugin-api = { path = "../devtools-plugin-api" }
+devtools-plugin-host = { path = "../devtools-plugin-host" }
 devtools-storage = { path = "../devtools-storage" }
 devtools-tools = { path = "../devtools-tools" }
 serde.workspace = true

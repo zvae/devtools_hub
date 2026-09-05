@@ -9,4 +9,5 @@ version.workspace = true
 base64.workspace = true
 devtools-plugin-api = { path = "../devtools-plugin-api" }
 serde_json.workspace = true
+time.workspace = true
 uuid.workspace = true

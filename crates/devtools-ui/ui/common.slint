@@ -10,6 +10,12 @@ export struct SearchResultView {
     shortcut: string,
 }
 
+// 工具窗口历史列表行。摘要用于列表展示，完整输入输出由 Rust 侧在选中后恢复。
+export struct ToolHistoryView {
+    summary: string,
+    created-at: string,
+}
+
 // 小节标题组件，设置页和编辑器面板复用。
 export component SectionLabel inherits Rectangle {
     in property <string> text;
