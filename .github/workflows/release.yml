@@ -41,9 +41,10 @@ jobs:
 
             let release = releases.find((item) => item.draft);
             const manifest = fs.readFileSync('Cargo.toml', 'utf8');
+            // 版本号始终以 Cargo.toml 为准，不能用草稿的 tag_name 推导：
+            // 网页端手动创建的草稿会带 GitHub 自动生成的 `untagged-xxxx` 占位标签名。
             const version = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? '0.1.0';
-            const tagName = release?.tag_name ?? `v${version}`;
-            const artifactVersion = tagName.replace(/^v/, '');
+            const tagName = `v${version}`;
             const latestPublished = releases.find((item) => !item.draft && !item.prerelease);
 
             if (!release) {
@@ -60,7 +61,7 @@ jobs:
               release = created.data;
               core.info(`Created draft release ${release.id} (${tagName})`);
             } else {
-              core.info(`Using existing draft release ${release.id} (${tagName})`);
+              core.info(`Using existing draft release ${release.id} (tag: ${release.tag_name})`);
             }
 
             let commits;
@@ -96,23 +97,42 @@ jobs:
               changes,
               '',
               '## 构建产物',
-              `- macOS arm64: \`DevTools-Hub-${artifactVersion}-macos-arm64.dmg\``,
-              `- Windows x64: \`DevTools-Hub-${artifactVersion}-windows-x64.exe\``,
+              `- macOS arm64: \`DevTools-Hub-${version}-macos-arm64.dmg\``,
+              `- Windows x64: \`DevTools-Hub-${version}-windows-x64.exe\``,
             ].join('\n');
 
             const updated = await github.rest.repos.updateRelease({
               owner,
               repo,
               release_id: release.id,
-              name: release.name || `DevTools Hub ${tagName}`,
+              // 草稿状态下可改写标签名，把 `untagged-xxxx` 占位草稿修正为当前版本标签。
+              tag_name: tagName,
+              target_commitish: context.sha,
+              name: (!release.name || release.tag_name.startsWith('untagged'))
+                ? `DevTools Hub ${tagName}`
+                : release.name,
               body,
               draft: true,
             });
 
             core.setOutput('release_id', String(updated.data.id));
             core.setOutput('upload_url', updated.data.upload_url);
-            core.setOutput('tag_name', updated.data.tag_name);
-            core.setOutput('version', artifactVersion);
+            core.setOutput('tag_name', tagName);
+            core.setOutput('version', version);
+
+            // 清理修复前残留的 untagged-* 产物，避免发布时混入错误命名的资产。
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner,
+              repo,
+              release_id: updated.data.id,
+              per_page: 100,
+            });
+            for (const asset of assets) {
+              if (asset.name.includes('untagged')) {
+                await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: asset.id });
+                core.info(`Deleted stale asset ${asset.name}`);
+              }
+            }
 
   build-macos-arm64:
     needs: [prepare-release]
