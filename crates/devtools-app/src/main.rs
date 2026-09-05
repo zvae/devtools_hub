@@ -851,8 +851,7 @@ fn open_tool_window(
                 .iter()
                 .find(|state| state.window.get_tool_id() == tool_id)
             {
-                state.window.show().ok();
-                state.window.window().request_redraw();
+                show_window_in_foreground(&state.window.window());
                 true
             } else {
                 false
@@ -937,8 +936,7 @@ fn open_timestamp_window(dark_mode: bool, request_tx: mpsc::UnboundedSender<AppR
         let has_existing = TIMESTAMP_WINDOWS.with(|windows| {
             let windows = windows.borrow();
             if let Some(state) = windows.first() {
-                state.window.show().ok();
-                state.window.window().request_redraw();
+                show_window_in_foreground(&state.window.window());
                 true
             } else {
                 false
@@ -1058,7 +1056,9 @@ fn open_timestamp_window(dark_mode: bool, request_tx: mpsc::UnboundedSender<AppR
             if text.is_empty() {
                 continue;
             }
-            let ok = text.chars().all(|character: char| character.is_ascii_digit())
+            let ok = text
+                .chars()
+                .all(|character: char| character.is_ascii_digit())
                 && text
                     .parse::<i64>()
                     .map_or(false, |value| (*min..=*max).contains(&value));
@@ -1218,32 +1218,24 @@ fn build_clipboard_window(
 
     let convert_window = window.as_weak();
     let convert_storage = storage.clone();
-    let convert_language = language.to_string();
-    let convert_dark_mode = dark_mode;
     window.on_convert_to_window(move || {
         if let Some(window) = convert_window.upgrade() {
+            let dark_mode = window.get_dark_mode();
+            let language = window.get_language().to_string();
             window.hide().ok();
-            open_clipboard_window(
-                convert_storage.clone(),
-                convert_dark_mode,
-                convert_language.clone(),
-            );
+            open_clipboard_window(convert_storage.clone(), dark_mode, language);
         }
     });
 
     let pin_window = window.as_weak();
     let pin_storage = storage.clone();
-    let pin_language = language.to_string();
-    let pin_dark_mode = dark_mode;
     window.on_toggle_pin(move || {
         if let Some(window) = pin_window.upgrade() {
             if window.get_popup_mode() {
+                let dark_mode = window.get_dark_mode();
+                let language = window.get_language().to_string();
                 window.hide().ok();
-                open_pinned_clipboard_window(
-                    pin_storage.clone(),
-                    pin_dark_mode,
-                    pin_language.clone(),
-                );
+                open_pinned_clipboard_window(pin_storage.clone(), dark_mode, language);
             } else {
                 window.set_pinned(!window.get_pinned());
             }
@@ -1276,9 +1268,7 @@ fn show_existing_clipboard_window(
         state.window.set_dark_mode(dark_mode);
         state.window.set_language(language.into());
         refresh_clipboard_window(&state.window, storage, &state.ids, "", language);
-        // Re-showing after a hide asks the platform to activate and raise the window.
-        state.window.hide().ok();
-        state.window.show().ok();
+        show_window_in_foreground(&state.window.window());
         true
     })
 }
@@ -1304,8 +1294,7 @@ fn show_existing_clipboard_popup(
         state.window.set_language(language.into());
         refresh_clipboard_window(&state.window, storage, &state.ids, "", language);
         set_clipboard_popup_position(&state.window, position);
-        state.window.hide().ok();
-        state.window.show().ok();
+        show_window_in_foreground(&state.window.window());
         true
     })
 }
@@ -1342,6 +1331,9 @@ fn open_quick_action_window(
     language: String,
     request_tx: mpsc::UnboundedSender<AppRequest>,
 ) {
+    // 快捷动作弹窗独立于工具窗口设置，任何时刻只能显示一个实例。
+    hide_quick_action_windows();
+
     let text = selected_text.unwrap_or_default();
     let actions = quick_actions_for(&text, &language);
     let action_ids = Rc::new(RefCell::new(
@@ -1407,12 +1399,63 @@ fn set_quick_action_position(window: &QuickActionWindow, position: ScreenPositio
 /// 隐藏所有已经创建的快捷动作窗口，避免外部点击后仍有旧窗口留在最前面。
 fn hide_quick_action_windows() {
     QUICK_WINDOWS.with(|windows| {
-        for window in windows.borrow().iter() {
+        let mut windows = windows.borrow_mut();
+        for window in windows.iter() {
             if window.window().is_visible() {
                 let _ = window.hide();
             }
         }
+        windows.clear();
     });
+}
+
+/// 显示已有窗口，并在支持的平台上恢复、激活并置于最前面。
+fn show_window_in_foreground(window: &slint::Window) {
+    let was_visible = window.is_visible();
+    if !was_visible {
+        window.show().ok();
+    }
+
+    #[cfg(target_os = "windows")]
+    bring_window_to_front(window);
+
+    #[cfg(not(target_os = "windows"))]
+    if was_visible {
+        // Slint 目前没有跨平台公开的窗口激活 API；重新显示可请求窗口管理器激活。
+        window.hide().ok();
+        window.show().ok();
+    }
+
+    window.request_redraw();
+}
+
+#[cfg(target_os = "windows")]
+fn bring_window_to_front(window: &slint::Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{
+            BringWindowToTop, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        },
+    };
+
+    let window_handle = window.window_handle();
+    let Ok(handle) = window_handle.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(handle.hwnd.get() as *mut _);
+
+    // 当前操作由用户在本应用内触发，Windows 允许恢复并激活该窗口。
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+    }
 }
 
 /// 隐藏托盘打开的临时剪贴板弹窗，普通剪贴板窗口不受影响。

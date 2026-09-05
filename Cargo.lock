@@ -1405,11 +1405,13 @@ dependencies = [
  "devtools-tools",
  "devtools-ui",
  "libc",
+ "raw-window-handle",
  "slint",
  "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows",
 ]
 
 [[package]]
@@ -5694,6 +5696,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",
