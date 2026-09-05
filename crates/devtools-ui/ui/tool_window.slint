@@ -29,6 +29,7 @@ export component ToolWindow inherits Window {
     resize-border-width: 8px;
     always-on-top: root.pinned;
     background: root.dark-mode ? #0f141d : #f3f6fb;
+    forward-focus: input-pane;
 
     // 输入/输出区域使用弹性布局，窗口最大化或拖拽缩放时自动拉伸。
     VerticalLayout {
@@ -84,7 +85,7 @@ export component ToolWindow inherits Window {
             spacing: 12px;
             vertical-stretch: 1;
 
-            EditorPane {
+            input-pane := EditorPane {
                 label: root.language == "en" ? "Input" : "输入";
                 dark-mode: root.dark-mode;
                 text <=> root.input;

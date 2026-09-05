@@ -13,6 +13,7 @@ export component EditorPane inherits Rectangle {
     border-width: 1px;
     border-color: root.dark-mode ? #2f3a4f : #d9e0ea;
     background: root.dark-mode ? #121926 : #ffffff;
+    forward-focus: editor;
 
     VerticalLayout {
         padding: 12px;
@@ -23,7 +24,7 @@ export component EditorPane inherits Rectangle {
             dark-mode: root.dark-mode;
         }
 
-        TextEdit {
+        editor := TextEdit {
             text <=> root.text;
             read-only: root.read-only;
             font-size: 14px;
