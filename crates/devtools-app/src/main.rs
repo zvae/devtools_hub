@@ -168,6 +168,8 @@ fn main() -> Result<()> {
         app_weak.clone(),
         storage.clone(),
         request_tx.clone(),
+        Arc::clone(&commands),
+        Arc::clone(&tool_usage),
         middle_click_enabled,
     );
     bind_ui_callbacks(
@@ -194,6 +196,7 @@ fn main() -> Result<()> {
     start_tray_bridge(&runtime, request_tx.clone(), app.as_weak(), storage.clone());
     // 预创建托盘剪贴板弹窗，首次左键点击时直接复用，避免卡顿和位置跳动。
     precreate_clipboard_popup(&storage);
+    precreate_quick_action_window();
     let close_app = app.as_weak();
     app.window().on_close_requested(move || {
         if let Some(app) = close_app.upgrade() {
@@ -311,6 +314,8 @@ fn start_middle_bridge(
     app_weak: slint::Weak<SearchWindow>,
     storage: Storage,
     request_tx: mpsc::UnboundedSender<AppRequest>,
+    commands: Arc<Vec<CommandDescriptor>>,
+    tool_usage: Arc<Mutex<HashMap<String, ToolUsage>>>,
     enabled: bool,
 ) -> MiddleClickController {
     let (quick_tx, mut quick_rx) = mpsc::unbounded_channel::<QuickActionEvent>();
@@ -321,6 +326,8 @@ fn start_middle_bridge(
             let app_weak = app_weak.clone();
             let storage = storage.clone();
             let request_tx = request_tx.clone();
+            let commands = Arc::clone(&commands);
+            let tool_usage = Arc::clone(&tool_usage);
             let result = slint::invoke_from_event_loop(move || match event {
                 QuickActionEvent::Show {
                     selected_text,
@@ -342,6 +349,8 @@ fn start_middle_bridge(
                         dark_mode,
                         language,
                         request_tx,
+                        commands,
+                        tool_usage,
                     );
                 }
                 QuickActionEvent::Dismiss => hide_transient_windows(),
@@ -1330,12 +1339,14 @@ fn open_quick_action_window(
     dark_mode: bool,
     language: String,
     request_tx: mpsc::UnboundedSender<AppRequest>,
+    commands: Arc<Vec<CommandDescriptor>>,
+    tool_usage: Arc<Mutex<HashMap<String, ToolUsage>>>,
 ) {
     // 快捷动作弹窗独立于工具窗口设置，任何时刻只能显示一个实例。
     hide_quick_action_windows();
 
     let text = selected_text.unwrap_or_default();
-    let actions = quick_actions_for(&text, &language);
+    let actions = quick_actions_for(&text, commands.as_ref(), &tool_usage, &language);
     let action_ids = Rc::new(RefCell::new(
         actions
             .iter()
@@ -1343,7 +1354,7 @@ fn open_quick_action_window(
             .collect::<Vec<_>>(),
     ));
 
-    let window = QuickActionWindow::new().expect("failed to create quick action window");
+    let window = take_quick_action_window();
     window.set_selected_text(text.clone().into());
     window.set_actions(results_to_model(actions, &language));
     window.set_dark_mode(dark_mode);
@@ -1381,6 +1392,28 @@ fn open_quick_action_window(
     QUICK_WINDOWS.with(|windows| windows.borrow_mut().push(window));
 }
 
+/// 提前构造唯一的中键快捷窗口，减少首次显示时的组件创建开销。
+fn precreate_quick_action_window() {
+    QUICK_WINDOWS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        if windows.is_empty() {
+            windows.push(QuickActionWindow::new().expect("failed to create quick action window"));
+        }
+    });
+}
+
+/// 取出唯一的中键快捷窗口，防止同一时刻存在多个快捷动作弹窗。
+fn take_quick_action_window() -> QuickActionWindow {
+    QUICK_WINDOWS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        let window = windows.pop().unwrap_or_else(|| {
+            QuickActionWindow::new().expect("failed to create quick action window")
+        });
+        windows.clear();
+        window
+    })
+}
+
 /// 将快捷窗口放到中键位置右下方。Quartz 使用逻辑坐标，Windows/rdev 使用物理坐标。
 fn set_quick_action_position(window: &QuickActionWindow, position: ScreenPosition) {
     #[cfg(target_os = "macos")]
@@ -1396,16 +1429,14 @@ fn set_quick_action_position(window: &QuickActionWindow, position: ScreenPositio
     ));
 }
 
-/// 隐藏所有已经创建的快捷动作窗口，避免外部点击后仍有旧窗口留在最前面。
+/// 隐藏唯一的快捷动作窗口，保留实例以加快下一次中键显示。
 fn hide_quick_action_windows() {
     QUICK_WINDOWS.with(|windows| {
-        let mut windows = windows.borrow_mut();
-        for window in windows.iter() {
+        for window in windows.borrow().iter() {
             if window.window().is_visible() {
                 let _ = window.hide();
             }
         }
-        windows.clear();
     });
 }
 
@@ -1491,8 +1522,13 @@ fn refresh_clipboard_window(
     window.set_rows(clipboard_model(rows, language));
 }
 
-/// 根据选中文本生成快捷动作。JSON 外形的文本优先推荐 JSON 工具。
-fn quick_actions_for(selected_text: &str, language: &str) -> Vec<SearchResult> {
+/// 根据选中文本生成快捷动作。优先推荐保留在列表顶部，其余工具与主窗口保持一致。
+fn quick_actions_for(
+    selected_text: &str,
+    commands: &[CommandDescriptor],
+    usage: &Arc<Mutex<HashMap<String, ToolUsage>>>,
+    language: &str,
+) -> Vec<SearchResult> {
     let mut ids = Vec::new();
     if selected_text.trim_start().starts_with('{') || selected_text.trim_start().starts_with('[') {
         ids.push("tool.json.format");
@@ -1503,27 +1539,74 @@ fn quick_actions_for(selected_text: &str, language: &str) -> Vec<SearchResult> {
     ids.push("tool.base64.decode");
     ids.push("tool.clipboard.history");
 
-    ids.into_iter()
-        .map(|id| SearchResult {
-            id: id.into(),
-            title: devtools_tools::localized_title_for(id, language),
-            subtitle: if selected_text.is_empty() {
-                if language == "en" {
-                    "Open tool".into()
-                } else {
-                    "打开工具".into()
-                }
-            } else {
-                if language == "en" {
-                    "Use selected text".into()
-                } else {
-                    "使用选中文本".into()
-                }
-            },
-            source: devtools_core::search::SearchSource::BuiltInTool,
-            score: 1.0,
+    let mut remaining = commands
+        .iter()
+        .filter(|command| command.id != "setting.theme")
+        .cloned()
+        .collect::<Vec<_>>();
+    sort_tool_commands(&mut remaining, usage);
+
+    let mut ordered = Vec::with_capacity(remaining.len());
+    for id in ids {
+        if let Some(index) = remaining.iter().position(|command| command.id == id) {
+            ordered.push(remaining.remove(index));
+        }
+    }
+    ordered.extend(remaining);
+
+    ordered
+        .into_iter()
+        .map(|command| {
+            let (title, subtitle) = devtools_tools::localized_command_text(&command, language);
+            SearchResult {
+                id: command.id,
+                title,
+                subtitle,
+                source: search_source_from_command(&command.source),
+                score: 1.0,
+            }
         })
         .collect()
+}
+
+fn search_source_from_command(source: &CommandSource) -> devtools_core::search::SearchSource {
+    match source {
+        CommandSource::BuiltInTool => devtools_core::search::SearchSource::BuiltInTool,
+        CommandSource::Plugin => devtools_core::search::SearchSource::Plugin,
+        CommandSource::Clipboard => devtools_core::search::SearchSource::Clipboard,
+        CommandSource::History => devtools_core::search::SearchSource::History,
+        CommandSource::Setting => devtools_core::search::SearchSource::Setting,
+    }
+}
+
+#[cfg(test)]
+mod quick_action_tests {
+    use super::*;
+
+    #[test]
+    fn quick_actions_include_the_main_tool_list_after_recommendations() {
+        let commands = devtools_tools::builtin_commands();
+        let usage = Arc::new(Mutex::new(HashMap::new()));
+        let actions = quick_actions_for("{\"key\": true}", &commands, &usage, "zh-CN");
+        let ids = actions
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            &ids[..3],
+            ["tool.json.format", "tool.json.minify", "tool.json.validate"]
+        );
+        assert_eq!(
+            ids.len(),
+            commands
+                .iter()
+                .filter(|command| command.id != "setting.theme")
+                .count()
+        );
+        assert!(ids.contains(&"tool.sql.format"));
+        assert!(ids.contains(&"tool.clipboard.history"));
+    }
 }
 
 /// 应用主题到主窗口状态。

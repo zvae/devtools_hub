@@ -15,6 +15,9 @@ use rdev::{simulate, EventType, Key, SimulateError};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+const CLIPBOARD_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const CLIPBOARD_CAPTURE_POLL_ATTEMPTS: usize = 6;
+
 /// 鼠标中键快捷窗口的显示/隐藏事件。
 #[derive(Clone, Debug)]
 pub enum QuickActionEvent {
@@ -270,21 +273,26 @@ fn capture_selected_text() -> Option<String> {
     let previous = clipboard.get_text().ok();
 
     send_copy_shortcut().ok()?;
-    thread::sleep(Duration::from_millis(90));
+    // 大多数应用会在复制快捷键返回后立刻更新剪贴板；轮询可以避免每次都等待固定时长。
+    let mut selected = None;
+    for attempt in 0..CLIPBOARD_CAPTURE_POLL_ATTEMPTS {
+        let candidate = clipboard
+            .get_text()
+            .ok()
+            .map(|text| text.trim_matches('\0').trim().to_string())
+            .filter(|text| !text.is_empty());
 
-    let selected = clipboard
-        .get_text()
-        .ok()
-        .map(|text| text.trim_matches('\0').trim().to_string())
-        .filter(|text| !text.is_empty());
+        if candidate.is_some() && candidate.as_deref() != previous.as_deref() {
+            selected = candidate;
+            break;
+        }
+        if attempt + 1 < CLIPBOARD_CAPTURE_POLL_ATTEMPTS {
+            thread::sleep(CLIPBOARD_CAPTURE_POLL_INTERVAL);
+        }
+    }
 
     // Command/Ctrl+C does not change the clipboard when there is no selection. Avoid treating the
     // previous clipboard value as selected text in that case.
-    let selected = match (previous.as_deref(), selected) {
-        (Some(previous), Some(selected)) if previous == selected => None,
-        (_, selected) => selected,
-    };
-
     if let Some(previous) = previous {
         let _ = clipboard.set_text(previous);
     }
