@@ -62,7 +62,7 @@ export component ToolWindow inherits Window {
                     background: root.pinned ? (root.dark-mode ? #203555 : #eaf2ff) : (root.dark-mode ? #151c28 : #ffffff);
 
                     Text {
-                        text: root.language == "en" ? "Top" : "置顶";
+                        text: root.pinned ? (root.language == "en" ? "Unpin" : "取消置顶") : (root.language == "en" ? "Pin" : "置顶");
                         color: root.pinned ? (root.dark-mode ? #eaf3ff : #1c4e91) : (root.dark-mode ? #d2d9e4 : #2d3748);
                         font-size: 13px;
                         font-weight: 700;

@@ -950,6 +950,7 @@ fn open_timestamp_window(dark_mode: bool, request_tx: mpsc::UnboundedSender<AppR
     }
 
     let window = TimestampWindow::new().expect("failed to create timestamp window");
+    window.set_pinned(false);
     let now = devtools_tools::timestamp_now_with_unit(true);
     let datetime = devtools_tools::timestamp_now_datetime();
     let parts = datetime_parts(&datetime);
@@ -1031,8 +1032,58 @@ fn open_timestamp_window(dark_mode: bool, request_tx: mpsc::UnboundedSender<AppR
             milliseconds: unit_index == 1,
         });
     });
+
+    let validate_window = window.as_weak();
+    window.on_validate_parts_inputs(move || {
+        let Some(window) = validate_window.upgrade() else {
+            return;
+        };
+        let year = window.get_year_input().trim().to_string();
+        let month = window.get_month_input().trim().to_string();
+        let day = window.get_day_input().trim().to_string();
+        let hour = window.get_hour_input().trim().to_string();
+        let minute = window.get_minute_input().trim().to_string();
+        let second = window.get_second_input().trim().to_string();
+        let checks: [(&str, i64, i64, &str); 6] = [
+            (year.as_str(), 0, 9999, "年份应为 0-9999 的数字"),
+            (month.as_str(), 1, 12, "月份应为 1-12"),
+            (day.as_str(), 1, 31, "日期应为 1-31"),
+            (hour.as_str(), 0, 23, "小时应为 0-23"),
+            (minute.as_str(), 0, 59, "分钟应为 0-59"),
+            (second.as_str(), 0, 59, "秒应为 0-59"),
+        ];
+        let mut valid = [true; 6];
+        let mut error = "";
+        for (index, (text, min, max, message)) in checks.iter().enumerate() {
+            if text.is_empty() {
+                continue;
+            }
+            let ok = text.chars().all(|character: char| character.is_ascii_digit())
+                && text
+                    .parse::<i64>()
+                    .map_or(false, |value| (*min..=*max).contains(&value));
+            valid[index] = ok;
+            if !ok && error.is_empty() {
+                error = message;
+            }
+        }
+        window.set_parts_year_valid(valid[0]);
+        window.set_parts_month_valid(valid[1]);
+        window.set_parts_day_valid(valid[2]);
+        window.set_parts_hour_valid(valid[3]);
+        window.set_parts_minute_valid(valid[4]);
+        window.set_parts_second_valid(valid[5]);
+        window.set_parts_error(error.into());
+    });
     window.on_copy_text(move |text| {
         let _ = set_clipboard_text(&text);
+    });
+
+    let pin_window = window.as_weak();
+    window.on_toggle_pin(move || {
+        if let Some(window) = pin_window.upgrade() {
+            window.set_pinned(!window.get_pinned());
+        }
     });
 
     window.show().ok();

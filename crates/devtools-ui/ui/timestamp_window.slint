@@ -1,14 +1,51 @@
-import { Button, ComboBox } from "std-widgets.slint";
+import { ComboBox } from "std-widgets.slint";
+
+// 自绘动作按钮：原生 Button 在 Windows 原生后端下是突兀的白块，缺少悬停/按压反馈。
+component ActionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> dark-mode;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    min-width: 68px;
+    min-height: 36px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: !root.enabled ? (root.dark-mode ? #232c3d : #e2e8f0) : (root.dark-mode ? #303a4e : #d9e0ea);
+    background: !root.enabled
+        ? (root.dark-mode ? #121926 : #f0f3f8)
+        : touch.pressed
+            ? (root.dark-mode ? #0e1624 : #dce7f5)
+            : touch.has-hover
+                ? (root.dark-mode ? #1c2740 : #f0f5fd)
+                : (root.dark-mode ? #151c28 : #ffffff);
+
+    Text {
+        text: root.label;
+        color: !root.enabled ? (root.dark-mode ? #4a5568 : #a8b3c2) : (root.dark-mode ? #d2d9e4 : #2d3748);
+        font-size: 14px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
 
 component CopyField inherits Rectangle {
     in property <string> text;
     in property <bool> dark-mode;
     callback copy(string);
 
-    height: 42px;
-    border-radius: 6px;
+    min-width: 120px;
+    min-height: 36px;
+    border-radius: 7px;
     border-width: 1px;
-    border-color: root.dark-mode ? #303a4e : #dbe3ed;
+    border-color: touch.has-hover ? #5ea1ff : (root.dark-mode ? #303a4e : #dbe3ed);
     background: root.dark-mode ? #151c28 : #ffffff;
 
     Text {
@@ -20,25 +57,37 @@ component CopyField inherits Rectangle {
         vertical-alignment: center;
     }
 
-    TouchArea {
+    touch := TouchArea {
+        mouse-cursor: pointer;
         clicked => { root.copy(root.text); }
     }
 }
 
-component TimestampInput inherits TextInput {
+component TimestampInput inherits Rectangle {
     in property <bool> dark-mode;
-    height: 42px;
-    color: root.dark-mode ? #f3f6fb : #172033;
-    selection-foreground-color: root.dark-mode ? #0f141d : #ffffff;
-    selection-background-color: #5ea1ff;
-    font-size: 17px;
-    horizontal-alignment: center;
-    vertical-alignment: center;
+    in property <bool> invalid: false;
+    in-out property <string> text <=> input.text;
+    callback edited <=> input.edited;
+
+    min-height: 36px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.invalid ? #e5484d : (root.dark-mode ? #303a4e : #dbe3ed);
+    background: root.dark-mode ? #151c28 : #ffffff;
+
+    input := TextInput {
+        color: root.dark-mode ? #f3f6fb : #172033;
+        selection-foreground-color: root.dark-mode ? #0f141d : #ffffff;
+        selection-background-color: #5ea1ff;
+        font-size: 17px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
 }
 
-// 专用时间戳表单采用稳定的行布局，避免网格列宽在原生后端被拉伸。
 export component TimestampWindow inherits Window {
     in-out property <bool> dark-mode;
+    in-out property <bool> pinned;
     in-out property <string> current-timestamp;
     in-out property <int> current-unit-index: 1;
     in-out property <string> timestamp-input;
@@ -54,6 +103,14 @@ export component TimestampWindow inherits Window {
     in-out property <string> second-input;
     in-out property <string> parts-output;
     in-out property <int> parts-unit-index: 1;
+    // 分段日期输入的校验状态：字段为空视为未填写（不标红），超范围或非数字时标红并阻止转换。
+    in-out property <bool> parts-year-valid: true;
+    in-out property <bool> parts-month-valid: true;
+    in-out property <bool> parts-day-valid: true;
+    in-out property <bool> parts-hour-valid: true;
+    in-out property <bool> parts-minute-valid: true;
+    in-out property <bool> parts-second-valid: true;
+    in-out property <string> parts-error;
 
     callback refresh-current;
     callback start-clock;
@@ -63,77 +120,114 @@ export component TimestampWindow inherits Window {
     callback convert-datetime(string, int);
     callback convert-parts(string, string, string, string, string, string, int);
     callback copy-text(string);
+    callback toggle-pin;
+    callback validate-parts-inputs;
 
     title: "Timestamp Convert";
     icon: @image-url("../../../assets/devtools-hub.png");
-    // 日期分项转换行需要保持输入框、单位和结果在同一行，不能让原生后端压缩后重排。
+    // 不限制最小/最大尺寸，窗口可任意缩放；行内控件通过 stretch 弹性分配宽度。
     preferred-width: 1020px;
     preferred-height: 500px;
-    min-width: 960px;
-    min-height: 450px;
     resize-border-width: 8px;
+    always-on-top: root.pinned;
     background: root.dark-mode ? #0f141d : #f5f8fc;
 
     VerticalLayout {
         padding: 22px;
         spacing: 16px;
 
-        Text {
-            text: "结果框点击即可复制到剪贴板";
-            color: root.dark-mode ? #8f9aae : #708096;
-            font-size: 13px;
-            horizontal-alignment: right;
-            height: 20px;
-        }
-
         Rectangle {
-            height: 64px;
+            height: 34px;
             background: transparent;
 
             HorizontalLayout {
                 spacing: 12px;
-                alignment: center;
 
-                Text { text: "当前时间戳"; color: root.dark-mode ? #dce4f0 : #526176; font-size: 21px; vertical-alignment: center; }
-                CopyField { width: 216px; text: root.current-timestamp; dark-mode: root.dark-mode; copy(value) => { root.copy-text(value); } }
+                Text {
+                    text: "结果框点击即可复制到剪贴板";
+                    color: root.dark-mode ? #8f9aae : #708096;
+                    font-size: 13px;
+                    horizontal-alignment: right;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+
+                // 置顶按钮放在内容区右上角，保持与工具窗口一致的使用习惯。
+                Rectangle {
+                    min-width: 84px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: root.pinned ? #5ea1ff : (root.dark-mode ? #303a4e : #d9e0ea);
+                    background: pin-touch.pressed
+                        ? (root.dark-mode ? #182a45 : #dbe9fb)
+                        : pin-touch.has-hover
+                            ? (root.dark-mode ? #203555 : #eaf2ff)
+                            : (root.dark-mode ? #151c28 : #ffffff);
+
+                    Text {
+                        text: root.pinned ? "取消置顶" : "置顶";
+                        color: root.pinned ? (root.dark-mode ? #eaf3ff : #1c4e91) : (root.dark-mode ? #d2d9e4 : #2d3748);
+                        font-size: 13px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    pin-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.toggle-pin(); }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            min-height: 48px;
+            background: transparent;
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                Text { min-width: 96px; text: "当前时间戳"; color: root.dark-mode ? #dce4f0 : #526176; font-size: 21px; vertical-alignment: center; }
+                CopyField { horizontal-stretch: 2; text: root.current-timestamp; dark-mode: root.dark-mode; copy(value) => { root.copy-text(value); } }
                 ComboBox {
-                    width: 82px;
+                    min-width: 82px;
                     model: ["秒", "毫秒"];
                     current-index <=> root.current-unit-index;
                     selected => { root.current-unit-changed(root.current-unit-index); }
                 }
-                Button { text: "开始"; clicked => { root.start-clock(); } }
-                Button { text: "停止"; clicked => { root.stop-clock(); } }
-                Button { text: "刷新"; clicked => { root.refresh-current(); } }
+                ActionButton { label: "开始"; dark-mode: root.dark-mode; clicked => { root.start-clock(); } }
+                ActionButton { label: "停止"; dark-mode: root.dark-mode; clicked => { root.stop-clock(); } }
+                ActionButton { label: "刷新"; dark-mode: root.dark-mode; clicked => { root.refresh-current(); } }
             }
         }
 
         Rectangle { height: 1px; background: root.dark-mode ? #293449 : #e1e8f0; }
 
         Rectangle {
-            height: 54px;
+            min-height: 48px;
             background: transparent;
             HorizontalLayout {
                 spacing: 12px;
-                Text { width: 118px; text: "时间戳"; color: root.dark-mode ? #dce4f0 : #526176; font-size: 18px; vertical-alignment: center; }
-                TimestampInput { width: 230px; text <=> root.timestamp-input; dark-mode: root.dark-mode; }
-                Button { width: 84px; text: "转换"; clicked => { root.convert-timestamp(root.timestamp-input); } }
-                CopyField { horizontal-stretch: 1; text: root.datetime-output; dark-mode: root.dark-mode; copy(value) => { root.copy-text(value); } }
-                Text { width: 56px; text: "+08:00"; color: root.dark-mode ? #8f9aae : #708096; font-size: 14px; vertical-alignment: center; }
+                Text { min-width: 96px; text: "时间戳"; color: root.dark-mode ? #dce4f0 : #526176; font-size: 18px; vertical-alignment: center; }
+                TimestampInput { min-width: 160px; horizontal-stretch: 2; text <=> root.timestamp-input; dark-mode: root.dark-mode; }
+                ActionButton { min-width: 84px; label: "转换"; dark-mode: root.dark-mode; clicked => { root.convert-timestamp(root.timestamp-input); } }
+                CopyField { horizontal-stretch: 3; text: root.datetime-output; dark-mode: root.dark-mode; copy(value) => { root.copy-text(value); } }
+                Text { min-width: 56px; text: "+08:00"; color: root.dark-mode ? #8f9aae : #708096; font-size: 14px; vertical-alignment: center; }
             }
         }
 
         Rectangle {
-            height: 54px;
+            min-height: 48px;
             background: transparent;
             HorizontalLayout {
                 spacing: 12px;
-                Text { width: 118px; text: "时间"; color: root.dark-mode ? #dce4f0 : #526176; font-size: 18px; vertical-alignment: center; }
-                TimestampInput { width: 230px; text <=> root.datetime-input; dark-mode: root.dark-mode; }
-                Button { width: 132px; text: "转时间戳"; clicked => { root.convert-datetime(root.datetime-input, root.datetime-unit-index); } }
-                CopyField { horizontal-stretch: 1; text: root.datetime-timestamp-output; dark-mode: root.dark-mode; copy(value) => { root.copy-text(value); } }
+                Text { min-width: 96px; text: "时间"; color: root.dark-mode ? #dce4f0 : #526176; font-size: 18px; vertical-alignment: center; }
+                TimestampInput { min-width: 160px; horizontal-stretch: 2; text <=> root.datetime-input; dark-mode: root.dark-mode; }
+                ActionButton { min-width: 100px; label: "转时间戳"; dark-mode: root.dark-mode; clicked => { root.convert-datetime(root.datetime-input, root.datetime-unit-index); } }
+                CopyField { horizontal-stretch: 3; text: root.datetime-timestamp-output; dark-mode: root.dark-mode; copy(value) => { root.copy-text(value); } }
                 ComboBox {
-                    width: 82px;
+                    min-width: 82px;
                     model: ["秒", "毫秒"];
                     current-index <=> root.datetime-unit-index;
                     selected => { root.convert-datetime(root.datetime-input, root.datetime-unit-index); }
@@ -144,31 +238,98 @@ export component TimestampWindow inherits Window {
         Rectangle { height: 1px; background: root.dark-mode ? #293449 : #e1e8f0; }
 
         Rectangle {
-            height: 76px;
+            min-height: 48px;
             background: transparent;
             HorizontalLayout {
-                spacing: 7px;
-                Text { width: 54px; text: "时间"; color: root.dark-mode ? #dce4f0 : #526176; font-size: 18px; vertical-alignment: center; }
-                TimestampInput { width: 70px; text <=> root.year-input; dark-mode: root.dark-mode; }
-                Text { width: 18px; text: "年"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
-                TimestampInput { width: 48px; text <=> root.month-input; dark-mode: root.dark-mode; }
-                Text { width: 18px; text: "月"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
-                TimestampInput { width: 48px; text <=> root.day-input; dark-mode: root.dark-mode; }
-                Text { width: 18px; text: "日"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
-                TimestampInput { width: 48px; text <=> root.hour-input; dark-mode: root.dark-mode; }
-                Text { width: 18px; text: "时"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
-                TimestampInput { width: 48px; text <=> root.minute-input; dark-mode: root.dark-mode; }
-                Text { width: 18px; text: "分"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
-                TimestampInput { width: 48px; text <=> root.second-input; dark-mode: root.dark-mode; }
-                Text { width: 18px; text: "秒"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
-                Button { width: 126px; text: "转时间戳"; clicked => { root.convert-parts(root.year-input, root.month-input, root.day-input, root.hour-input, root.minute-input, root.second-input, root.parts-unit-index); } }
-                CopyField { width: 150px; text: root.parts-output; dark-mode: root.dark-mode; copy(value) => { root.copy-text(value); } }
+                spacing: 8px;
+                Text { min-width: 48px; text: "时间"; color: root.dark-mode ? #dce4f0 : #526176; font-size: 18px; vertical-alignment: center; }
+                TimestampInput {
+                    min-width: 52px;
+                    horizontal-stretch: 2;
+                    text <=> root.year-input;
+                    dark-mode: root.dark-mode;
+                    invalid: !root.parts-year-valid;
+                    edited => { root.validate-parts-inputs(); }
+                }
+                Text { min-width: 18px; text: "年"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
+                TimestampInput {
+                    min-width: 40px;
+                    horizontal-stretch: 1;
+                    text <=> root.month-input;
+                    dark-mode: root.dark-mode;
+                    invalid: !root.parts-month-valid;
+                    edited => { root.validate-parts-inputs(); }
+                }
+                Text { min-width: 18px; text: "月"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
+                TimestampInput {
+                    min-width: 40px;
+                    horizontal-stretch: 1;
+                    text <=> root.day-input;
+                    dark-mode: root.dark-mode;
+                    invalid: !root.parts-day-valid;
+                    edited => { root.validate-parts-inputs(); }
+                }
+                Text { min-width: 18px; text: "日"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
+                TimestampInput {
+                    min-width: 40px;
+                    horizontal-stretch: 1;
+                    text <=> root.hour-input;
+                    dark-mode: root.dark-mode;
+                    invalid: !root.parts-hour-valid;
+                    edited => { root.validate-parts-inputs(); }
+                }
+                Text { min-width: 18px; text: "时"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
+                TimestampInput {
+                    min-width: 40px;
+                    horizontal-stretch: 1;
+                    text <=> root.minute-input;
+                    dark-mode: root.dark-mode;
+                    invalid: !root.parts-minute-valid;
+                    edited => { root.validate-parts-inputs(); }
+                }
+                Text { min-width: 18px; text: "分"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
+                TimestampInput {
+                    min-width: 40px;
+                    horizontal-stretch: 1;
+                    text <=> root.second-input;
+                    dark-mode: root.dark-mode;
+                    invalid: !root.parts-second-valid;
+                    edited => { root.validate-parts-inputs(); }
+                }
+                Text { min-width: 18px; text: "秒"; color: root.dark-mode ? #dce4f0 : #526176; vertical-alignment: center; }
+                ActionButton {
+                    min-width: 96px;
+                    label: "转时间戳";
+                    dark-mode: root.dark-mode;
+                    enabled: root.parts-error == "";
+                    clicked => { root.convert-parts(root.year-input, root.month-input, root.day-input, root.hour-input, root.minute-input, root.second-input, root.parts-unit-index); }
+                }
+                CopyField { min-width: 130px; horizontal-stretch: 2; text: root.parts-output; dark-mode: root.dark-mode; copy(value) => { root.copy-text(value); } }
                 ComboBox {
-                    width: 82px;
+                    min-width: 82px;
                     model: ["秒", "毫秒"];
                     current-index <=> root.parts-unit-index;
-                    selected => { root.convert-parts(root.year-input, root.month-input, root.day-input, root.hour-input, root.minute-input, root.second-input, root.parts-unit-index); }
+                    selected => {
+                        if (root.parts-error == "") {
+                            root.convert-parts(root.year-input, root.month-input, root.day-input, root.hour-input, root.minute-input, root.second-input, root.parts-unit-index);
+                        }
+                    }
                 }
+            }
+        }
+
+        // 常驻占位的错误提示行：固定高度避免出现/消失时挤压上方布局。
+        Rectangle {
+            height: 20px;
+            background: transparent;
+
+            Text {
+                text: root.parts-error;
+                color: #e5484d;
+                font-size: 13px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                visible: root.parts-error != "";
             }
         }
     }
