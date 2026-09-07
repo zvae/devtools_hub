@@ -28,7 +28,7 @@ use devtools_services::{
 };
 use devtools_storage::{ClipboardRecord, Storage, ToolHistoryRecord};
 use devtools_ui::{
-    ClipboardWindow, QuickActionWindow, SearchResultView, SearchWindow, TimestampWindow,
+    ClipboardWindow, Palette, QuickActionWindow, SearchResultView, SearchWindow, TimestampWindow,
     ToolHistoryView, ToolWindow,
 };
 use slint::{
@@ -218,6 +218,8 @@ pub fn run() -> Result<()> {
         event_rx,
     );
     start_tray_bridge(&runtime, request_tx.clone(), app.as_weak(), storage.clone());
+    // macOS 下监听应用失活与窗口失焦事件，点击浮窗外任意位置时立即隐藏剪贴板与快捷动作弹窗。
+    install_macos_focus_listener();
     // 预创建托盘剪贴板弹窗，首次左键点击时直接复用，避免卡顿和位置跳动。
     precreate_clipboard_popup(&storage);
     precreate_quick_action_window();

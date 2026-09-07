@@ -1,9 +1,28 @@
 use super::*;
 
 /// 应用主题到主窗口状态。
+/// 同时更新 Palette.color-scheme，使标准组件（如 TextEdit）的内置背景跟随应用主题。
 pub(super) fn apply_theme(app: &SearchWindow, theme: &str) {
     app.set_settings_theme(theme.into());
-    app.set_dark_mode(theme != "light");
+    let dark_mode = theme != "light";
+    app.set_dark_mode(dark_mode);
+    // Palette 是每个窗口独立的 global 实例，需要在每个窗口上单独设置。
+    app.global::<Palette>().set_color_scheme(if dark_mode {
+        slint::private_unstable_api::re_exports::ColorScheme::Dark
+    } else {
+        slint::private_unstable_api::re_exports::ColorScheme::Light
+    });
+}
+
+/// 将主题应用到工具窗口，同步 dark-mode 属性和 Palette.color-scheme。
+pub(super) fn apply_theme_to_tool_window(window: &ToolWindow, dark_mode: bool) {
+    window.set_dark_mode(dark_mode);
+    // Palette 是每个窗口独立的 global 实例，需要在每个窗口上单独设置。
+    window.global::<Palette>().set_color_scheme(if dark_mode {
+        slint::private_unstable_api::re_exports::ColorScheme::Dark
+    } else {
+        slint::private_unstable_api::re_exports::ColorScheme::Light
+    });
 }
 
 /// 根据当前语言选择状态提示文本。

@@ -40,7 +40,8 @@ pub(super) fn open_tool_window(
     window.set_title_text(title.into());
     window.set_input(input.into());
     window.set_output("".into());
-    window.set_dark_mode(dark_mode);
+    // 同步 dark-mode 属性和 Palette.color-scheme，使 TextEdit 等标准组件的内置背景跟随应用主题。
+    apply_theme_to_tool_window(&window, dark_mode);
     window.set_language(language.into());
     window.set_pinned(false);
     window.set_history_visible(false);
@@ -136,7 +137,13 @@ pub(super) fn update_tool_output(
     json: &RefCell<Option<json_output::JsonDocument>>,
     output: String,
 ) {
-    let document = json_output::JsonDocument::parse(&output);
+    // 仅 JSON 格化工具使用 JsonOutput（带行号/折叠）展示；压缩等其它工具用普通文本框。
+    let use_json_output = window.get_tool_id() == "tool.json.format";
+    let document = if use_json_output {
+        json_output::JsonDocument::parse(&output)
+    } else {
+        None
+    };
     window.set_json_output(document.is_some());
     if let Some(document) = &document {
         document.update_window(window);

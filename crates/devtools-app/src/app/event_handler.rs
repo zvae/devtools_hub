@@ -85,6 +85,13 @@ pub(super) fn apply_event(
         }
         AppEvent::ThemeChanged { theme } => {
             apply_theme(app, &theme);
+            // 主题变更需同步到已打开的工具窗口，否则 EditorPane 和 JsonOutput 颜色不会跟随更新。
+            let dark_mode = app.get_dark_mode();
+            TOOL_WINDOWS.with(|windows| {
+                for state in windows.borrow().iter() {
+                    apply_theme_to_tool_window(&state.window, dark_mode);
+                }
+            });
             app.set_status(localized_status(app, "主题已更新", "Theme updated"));
         }
         AppEvent::LanguageChanged { language } => {
