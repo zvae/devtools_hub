@@ -56,6 +56,7 @@ struct ClipboardWindowState {
 struct ToolWindowState {
     window: ToolWindow,
     history: Rc<RefCell<Vec<ToolHistoryRecord>>>,
+    json: Rc<RefCell<Option<json_output::JsonDocument>>>,
 }
 
 struct TimestampWindowState {
@@ -74,6 +75,7 @@ mod callbacks;
 mod clipboard_window;
 mod event_handler;
 mod item_actions;
+mod json_output;
 mod presentation;
 mod quick_actions;
 mod timestamp_window;

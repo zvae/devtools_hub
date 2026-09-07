@@ -1,6 +1,8 @@
 import { Button, ListView } from "std-widgets.slint";
 import { EditorPane } from "editor_pane.slint";
 import { ToolHistoryView } from "common.slint";
+import { IconButton } from "icon_button.slint";
+import { JsonOutput, JsonLineView } from "json_output.slint";
 
 // 独立工具窗口：使用系统原生窗口按钮，内部只保留置顶控制。
 export component ToolWindow inherits Window {
@@ -13,12 +15,18 @@ export component ToolWindow inherits Window {
     in-out property <string> language;
     in property <[ToolHistoryView]> history;
     in-out property <bool> history-visible;
+    in-out property <bool> input-collapsed;
+    in property <bool> json-output;
+    in property <[JsonLineView]> json-lines;
+    in property <string> json-display-text;
 
     callback run(string);
     callback select-history(int);
     callback toggle-history;
     callback copy-output;
     callback toggle-pin;
+    callback toggle-json-fold(int);
+    callback fold-all-json(bool);
 
     title: root.title-text;
     icon: @image-url("../../../assets/devtools-hub.png");
@@ -42,6 +50,16 @@ export component ToolWindow inherits Window {
 
             HorizontalLayout {
                 spacing: 12px;
+
+                IconButton {
+                    dark-mode: root.dark-mode;
+                    icon: root.input-collapsed ? @image-url("../../../assets/icons/panel-left-open.svg") : @image-url("../../../assets/icons/panel-left-close.svg");
+                    description: root.input-collapsed ? (root.language == "en" ? "Expand input" : "展开输入区") : (root.language == "en" ? "Collapse input" : "收起输入区");
+                    clicked => {
+                        root.input-collapsed = !root.input-collapsed;
+                        if !root.input-collapsed { input-pane.focus(); }
+                    }
+                }
 
                 Text {
                     text: root.title-text;
@@ -82,10 +100,14 @@ export component ToolWindow inherits Window {
 
         // 工具输入和输出并排展示，后续可按工具类型替换成专用 UI。
         HorizontalLayout {
-            spacing: 12px;
+            spacing: root.input-collapsed ? 0px : 12px;
             vertical-stretch: 1;
 
             input-pane := EditorPane {
+                visible: !root.input-collapsed;
+                min-width: 0px;
+                max-width: root.input-collapsed ? 0px : 100000px;
+                horizontal-stretch: root.input-collapsed ? 0 : 1;
                 label: root.language == "en" ? "Input" : "输入";
                 dark-mode: root.dark-mode;
                 text <=> root.input;
@@ -93,15 +115,23 @@ export component ToolWindow inherits Window {
                 edited(value) => {
                     root.run(value);
                 }
-                horizontal-stretch: 1;
             }
 
-            EditorPane {
+            if !root.json-output: EditorPane {
                 label: root.language == "en" ? "Output" : "输出";
                 dark-mode: root.dark-mode;
                 text <=> root.output;
                 read-only: true;
                 horizontal-stretch: 1;
+            }
+            if root.json-output: JsonOutput {
+                lines: root.json-lines;
+                display-text: root.json-display-text;
+                dark-mode: root.dark-mode;
+                language: root.language;
+                horizontal-stretch: 1;
+                toggle-fold(line) => { root.toggle-json-fold(line); }
+                fold-all(collapsed) => { root.fold-all-json(collapsed); }
             }
         }
 

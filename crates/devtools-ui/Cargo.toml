@@ -10,3 +10,6 @@ slint.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
+
+[dev-dependencies]
+png = "0.18"

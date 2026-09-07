@@ -17,6 +17,13 @@ pub(super) fn open_tool_window(
                 .iter()
                 .find(|state| state.window.get_tool_id() == tool_id)
             {
+                if !input.is_empty() {
+                    state.window.set_input(input.clone().into());
+                    let _ = request_tx.send(AppRequest::RunTool {
+                        tool_id: tool_id.clone(),
+                        input: input.clone(),
+                    });
+                }
                 show_window_in_foreground(&state.window.window());
                 true
             } else {
@@ -39,6 +46,7 @@ pub(super) fn open_tool_window(
     window.set_history_visible(false);
     window.set_history(tool_history_model(&history));
     let history_records = Rc::new(RefCell::new(history));
+    let json = Rc::new(RefCell::new(None));
 
     // UI 只发送意图，Core 决定执行内置工具或隔离的插件命令。
     let run_tool_id = tool_id.clone();
@@ -52,11 +60,33 @@ pub(super) fn open_tool_window(
 
     let select_window = window.as_weak();
     let select_history = Rc::clone(&history_records);
+    let select_json = Rc::clone(&json);
     window.on_select_history(move |index| {
         let record = select_history.borrow().get(index as usize).cloned();
         if let (Some(window), Some(record)) = (select_window.upgrade(), record) {
             window.set_input(record.input.into());
-            window.set_output(record.output.into());
+            update_tool_output(&window, &select_json, record.output);
+        }
+    });
+
+    let fold_window = window.as_weak();
+    let fold_json = Rc::clone(&json);
+    window.on_toggle_json_fold(move |line| {
+        if let (Some(window), Some(doc)) = (fold_window.upgrade(), fold_json.borrow_mut().as_mut())
+        {
+            if let Ok(line) = usize::try_from(line) {
+                doc.toggle(line);
+                doc.update_window(&window);
+            }
+        }
+    });
+    let fold_window = window.as_weak();
+    let fold_json = Rc::clone(&json);
+    window.on_fold_all_json(move |collapsed| {
+        if let (Some(window), Some(doc)) = (fold_window.upgrade(), fold_json.borrow_mut().as_mut())
+        {
+            doc.set_all_collapsed(collapsed);
+            doc.update_window(&window);
         }
     });
 
@@ -96,6 +126,24 @@ pub(super) fn open_tool_window(
         windows.borrow_mut().push(ToolWindowState {
             window,
             history: history_records,
+            json,
         })
     });
+}
+
+pub(super) fn update_tool_output(
+    window: &ToolWindow,
+    json: &RefCell<Option<json_output::JsonDocument>>,
+    output: String,
+) {
+    let document = json_output::JsonDocument::parse(&output);
+    window.set_json_output(document.is_some());
+    if let Some(document) = &document {
+        document.update_window(window);
+    } else {
+        window.set_json_lines(ModelRc::default());
+        window.set_json_display_text("".into());
+    }
+    *json.borrow_mut() = document;
+    window.set_output(output.into());
 }

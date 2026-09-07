@@ -147,7 +147,7 @@ pub(super) fn apply_event(
             TOOL_WINDOWS.with(|windows| {
                 for state in windows.borrow().iter() {
                     if state.window.get_tool_id() == tool_id {
-                        state.window.set_output(content.clone().into());
+                        update_tool_output(&state.window, &state.json, content.clone());
                     }
                 }
             });

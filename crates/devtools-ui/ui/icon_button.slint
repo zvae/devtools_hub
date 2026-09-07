@@ -1,0 +1,40 @@
+export component IconButton inherits Rectangle {
+    in property <string> description;
+    in property <image> icon;
+    in property <bool> dark-mode;
+    callback clicked;
+    width: 30px;
+    height: 30px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 4px;
+    border-width: focus.has-focus ? 1px : 0px;
+    border-color: #5ea1ff;
+    background: touch.pressed ? (root.dark-mode ? #30405a : #dbe5f3) : (touch.has-hover ? (root.dark-mode ? #253147 : #e9eff7) : transparent);
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: root.description;
+    accessible-action-default => { root.clicked(); }
+    Image {
+        width: 16px;
+        height: 16px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        colorize: root.dark-mode ? #b9c6d9 : #41526b;
+    }
+    touch := TouchArea {
+        clicked => { focus.focus(); root.clicked(); }
+    }
+    focus := FocusScope {
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    Tooltip { text: @markdown("\{root.description}"); }
+}

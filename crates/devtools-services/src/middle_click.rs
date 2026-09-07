@@ -8,15 +8,19 @@ use std::{
 };
 
 use arboard::Clipboard;
+#[cfg(target_os = "macos")]
+use rdev::SimulateError;
 #[cfg(not(target_os = "macos"))]
 use rdev::{listen, simulate, Button, Event, EventType, Key, SimulateError};
-#[cfg(target_os = "macos")]
-use rdev::{simulate, EventType, Key, SimulateError};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 const CLIPBOARD_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const CLIPBOARD_CAPTURE_POLL_ATTEMPTS: usize = 6;
+const CLIPBOARD_CAPTURE_POLL_ATTEMPTS: usize = 41;
+
+#[cfg(target_os = "macos")]
+#[path = "middle_click_macos.rs"]
+mod macos;
 
 #[cfg(target_os = "macos")]
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -327,59 +331,208 @@ fn schedule_external_dismiss(tx: mpsc::UnboundedSender<QuickActionEvent>) {
 
 /// 尝试读取当前选中文本：发送复制快捷键，读取剪贴板，然后恢复旧内容。
 fn capture_selected_text() -> Option<String> {
-    let mut clipboard = Clipboard::new().ok()?;
-    let previous = clipboard.get_text().ok();
+    #[cfg(target_os = "macos")]
+    {
+        match macos::selected_text() {
+            macos::Selection::Text(text) => {
+                if let Some(text) = nonempty_selection(text) {
+                    return Some(text);
+                }
+            }
+            macos::Selection::Protected => return None,
+            macos::Selection::Unavailable => {}
+        }
+        objc::rc::autoreleasepool(capture_via_clipboard)
+    }
+    #[cfg(not(target_os = "macos"))]
+    capture_via_clipboard()
+}
 
-    send_copy_shortcut().ok()?;
-    // 大多数应用会在复制快捷键返回后立刻更新剪贴板；轮询可以避免每次都等待固定时长。
-    let mut selected = None;
+fn nonempty_selection(text: String) -> Option<String> {
+    // Preserve indentation and trailing newlines from code selections.
+    let text = text.trim_matches('\0');
+    (!text.trim().is_empty()).then(|| text.to_owned())
+}
+
+fn clipboard_sequence() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(macos::clipboard_sequence())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Some(unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() } as u64)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}
+
+fn poll_copied_text(
+    previous_sequence: Option<u64>,
+    previous: Option<&str>,
+    mut read: impl FnMut() -> (Option<u64>, Option<String>),
+    mut pause: impl FnMut(),
+) -> Option<(String, Option<u64>)> {
     for attempt in 0..CLIPBOARD_CAPTURE_POLL_ATTEMPTS {
-        let candidate = clipboard
-            .get_text()
-            .ok()
-            .map(|text| text.trim_matches('\0').trim().to_string())
-            .filter(|text| !text.is_empty());
-
-        if candidate.is_some() && candidate.as_deref() != previous.as_deref() {
-            selected = candidate;
-            break;
+        let (sequence, text) = read();
+        let changed = match (previous_sequence, sequence) {
+            (Some(before), Some(after)) => before != after,
+            _ => text.as_deref() != previous,
+        };
+        if changed {
+            if let Some(text) = text.and_then(nonempty_selection) {
+                return Some((text, sequence));
+            }
         }
         if attempt + 1 < CLIPBOARD_CAPTURE_POLL_ATTEMPTS {
-            thread::sleep(CLIPBOARD_CAPTURE_POLL_INTERVAL);
+            pause();
         }
     }
+    None
+}
 
-    // Command/Ctrl+C does not change the clipboard when there is no selection. Avoid treating the
-    // previous clipboard value as selected text in that case.
-    if let Some(previous) = previous {
-        let _ = clipboard.set_text(previous);
+fn capture_via_clipboard() -> Option<String> {
+    let mut clipboard = Clipboard::new().ok()?;
+    let previous = clipboard.get_text().ok();
+    let previous_sequence = clipboard_sequence();
+    #[cfg(target_os = "macos")]
+    let snapshot = macos::ClipboardSnapshot::capture()?;
+    if clipboard_sequence() != previous_sequence {
+        return None;
     }
 
-    selected
+    send_copy_shortcut().ok()?;
+    let selected = poll_copied_text(
+        previous_sequence,
+        previous.as_deref(),
+        || (clipboard_sequence(), clipboard.get_text().ok()),
+        || thread::sleep(CLIPBOARD_CAPTURE_POLL_INTERVAL),
+    );
+    if let Some((text, sequence)) = &selected {
+        if clipboard_sequence() == *sequence && clipboard.get_text().ok().as_deref() == Some(text) {
+            #[cfg(target_os = "macos")]
+            if let Some(sequence) = sequence {
+                snapshot.restore(*sequence);
+            }
+            #[cfg(not(target_os = "macos"))]
+            if let Some(previous) = previous {
+                let _ = clipboard.set_text(previous);
+            } else {
+                let _ = clipboard.clear();
+            }
+        }
+    }
+    selected.map(|(text, _)| text)
 }
 
 /// macOS 使用 Command+C 复制选中文本。
 #[cfg(target_os = "macos")]
 fn send_copy_shortcut() -> Result<(), SimulateError> {
-    simulate(&EventType::KeyPress(Key::MetaLeft))?;
+    use core_graphics::{
+        event::{CGEvent, CGEventFlags, CGEventTapLocation},
+        event_source::{CGEventSource, CGEventSourceStateID},
+    };
+
+    // Explicit flags avoid inheriting held Shift/Option keys or racing a synthetic Cmd press.
+    let source = CGEventSource::new(CGEventSourceStateID::Private).map_err(|_| SimulateError)?;
+    let down = CGEvent::new_keyboard_event(source.clone(), 8, true).map_err(|_| SimulateError)?;
+    let up = CGEvent::new_keyboard_event(source, 8, false).map_err(|_| SimulateError)?;
+    down.set_flags(CGEventFlags::CGEventFlagCommand);
+    up.set_flags(CGEventFlags::CGEventFlagCommand);
+    down.post(CGEventTapLocation::HID);
     thread::sleep(Duration::from_millis(20));
-    simulate(&EventType::KeyPress(Key::KeyC))?;
-    thread::sleep(Duration::from_millis(20));
-    simulate(&EventType::KeyRelease(Key::KeyC))?;
-    thread::sleep(Duration::from_millis(20));
-    simulate(&EventType::KeyRelease(Key::MetaLeft))?;
+    up.post(CGEventTapLocation::HID);
     Ok(())
 }
 
 /// Windows/Linux 使用 Ctrl+C 复制选中文本。
 #[cfg(not(target_os = "macos"))]
 fn send_copy_shortcut() -> Result<(), SimulateError> {
-    simulate(&EventType::KeyPress(Key::ControlLeft))?;
+    send_copy_with_modifier(Key::ControlLeft)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn send_copy_with_modifier(modifier: Key) -> Result<(), SimulateError> {
+    let pressed = (|| {
+        simulate(&EventType::KeyPress(modifier))?;
+        thread::sleep(Duration::from_millis(20));
+        simulate(&EventType::KeyPress(Key::KeyC))?;
+        thread::sleep(Duration::from_millis(20));
+        Ok(())
+    })();
+    // Release both keys even if an earlier event failed.
+    let released_c = simulate(&EventType::KeyRelease(Key::KeyC));
     thread::sleep(Duration::from_millis(20));
-    simulate(&EventType::KeyPress(Key::KeyC))?;
-    thread::sleep(Duration::from_millis(20));
-    simulate(&EventType::KeyRelease(Key::KeyC))?;
-    thread::sleep(Duration::from_millis(20));
-    simulate(&EventType::KeyRelease(Key::ControlLeft))?;
-    Ok(())
+    let released_modifier = simulate(&EventType::KeyRelease(modifier));
+    pressed.and(released_c).and(released_modifier)
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_copy_of_identical_text_is_a_selection() {
+        let result = poll_copied_text(
+            Some(5),
+            Some("same"),
+            || (Some(6), Some("same".into())),
+            || {},
+        );
+        assert_eq!(result, Some(("same".into(), Some(6))));
+    }
+
+    #[test]
+    fn unchanged_clipboard_is_not_a_selection() {
+        assert!(poll_copied_text(
+            Some(5),
+            Some("old"),
+            || (Some(5), Some("old".into())),
+            || {}
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn delayed_copy_and_temporarily_unavailable_text_are_retried() {
+        let mut reads = 0;
+        let result = poll_copied_text(
+            Some(5),
+            Some("old"),
+            || {
+                reads += 1;
+                if reads < 20 {
+                    (Some(5), Some("old".into()))
+                } else if reads < 25 {
+                    (Some(6), None)
+                } else {
+                    (Some(6), Some("  selected\n".into()))
+                }
+            },
+            || {},
+        );
+        assert_eq!(result, Some(("  selected\n".into(), Some(6))));
+    }
+
+    #[test]
+    fn platforms_without_sequence_numbers_require_changed_text() {
+        assert!(
+            poll_copied_text(None, Some("old"), || (None, Some("old".into())), || {}).is_none()
+        );
+        assert_eq!(
+            poll_copied_text(None, Some("old"), || (None, Some("new".into())), || {}),
+            Some(("new".into(), None))
+        );
+    }
+
+    #[test]
+    fn selection_preserves_code_whitespace() {
+        assert_eq!(
+            nonempty_selection("\0  code\n\0".into()),
+            Some("  code\n".into())
+        );
+        assert!(nonempty_selection("\n \0".into()).is_none());
+    }
 }

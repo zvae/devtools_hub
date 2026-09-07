@@ -1408,6 +1408,7 @@ dependencies = [
  "libc",
  "objc",
  "raw-window-handle",
+ "serde_json",
  "slint",
  "time",
  "tokio",
@@ -1456,10 +1457,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "cocoa",
  "core-foundation 0.9.4",
  "core-graphics 0.23.2",
  "crossbeam-channel",
  "global-hotkey",
+ "objc",
  "rdev",
  "tokio",
  "tracing",
@@ -1494,6 +1497,7 @@ dependencies = [
 name = "devtools-ui"
 version = "0.1.0"
 dependencies = [
+ "png",
  "slint",
  "slint-build",
 ]

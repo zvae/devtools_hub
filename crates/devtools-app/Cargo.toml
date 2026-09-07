@@ -15,6 +15,7 @@ devtools-storage = { path = "../devtools-storage" }
 devtools-tools = { path = "../devtools-tools" }
 devtools-ui = { path = "../devtools-ui" }
 slint.workspace = true
+serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
