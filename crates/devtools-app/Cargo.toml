@@ -26,3 +26,8 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 windows.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.22"
+objc = "0.2"
+raw-window-handle = "0.6"

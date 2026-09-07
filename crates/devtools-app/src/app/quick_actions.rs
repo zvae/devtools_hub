@@ -38,9 +38,23 @@ pub(super) fn open_quick_action_window(
     window.on_activate_action(move |index| {
         let action_id = action_ids.borrow().get(index as usize).cloned();
         if let Some(action_id) = action_id {
+            // Hiding this always-on-top window after a tool window becomes key gives focus back
+            // to the main window on macOS. Hide it first, then open the selected tool.
+            if let Some(window) = activate_window.upgrade() {
+                window.hide().ok();
+            }
             if action_id == "tool.clipboard.history" {
                 open_clipboard_window(storage.clone(), dark_mode, activate_language.clone());
             } else {
+                let history_limit = storage
+                    .get_setting("tool_history_limit")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(20);
+                let history = storage
+                    .tool_history(&action_id, history_limit)
+                    .unwrap_or_default();
                 open_tool_window(
                     action_id.clone(),
                     devtools_tools::localized_title_for(&action_id, &activate_language),
@@ -48,16 +62,15 @@ pub(super) fn open_quick_action_window(
                     dark_mode,
                     activate_language.clone(),
                     activate_tx.clone(),
-                    Vec::new(),
+                    history,
                 );
-            }
-            if let Some(window) = activate_window.upgrade() {
-                window.hide().ok();
             }
         }
     });
 
-    window.show().ok();
+    // Showing a window does not activate an inactive macOS application. Activate the popup
+    // itself so the first click reaches its action instead of only restoring application focus.
+    show_window_in_foreground(window.window());
     QUICK_WINDOWS.with(|windows| windows.borrow_mut().push(window));
 }
 
@@ -113,13 +126,20 @@ pub(super) fn hide_quick_action_windows() {
 pub(super) fn show_window_in_foreground(window: &slint::Window) {
     let was_visible = window.is_visible();
     if !was_visible {
-        window.show().ok();
+        if let Err(error) = window.show() {
+            error!(?error, "failed to show window in foreground");
+            return;
+        }
     }
+    window.set_minimized(false);
 
     #[cfg(target_os = "windows")]
     bring_window_to_front(window);
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    bring_window_to_front(window);
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     if was_visible {
         // Slint 目前没有跨平台公开的窗口激活 API；重新显示可请求窗口管理器激活。
         window.hide().ok();
@@ -127,6 +147,40 @@ pub(super) fn show_window_in_foreground(window: &slint::Window) {
     }
 
     window.request_redraw();
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn bring_window_to_front(window: &slint::Window) {
+    use cocoa::{
+        appkit::{NSApplication, NSWindow},
+        base::{id, nil},
+    };
+    use objc::{runtime::Sel, Message};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let window_handle = window.window_handle();
+    let Ok(handle) = window_handle.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+
+    let ns_view = handle.ns_view.as_ptr() as id;
+    let Ok(ns_window) =
+        (unsafe { (&*ns_view).send_message::<(), id>(Sel::register("window"), ()) })
+    else {
+        return;
+    };
+    if ns_window == nil {
+        return;
+    }
+
+    unsafe {
+        let app = NSApplication::sharedApplication(nil);
+        app.activateIgnoringOtherApps_(true);
+        ns_window.makeKeyAndOrderFront_(nil);
+    }
 }
 
 #[cfg(target_os = "windows")]

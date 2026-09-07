@@ -18,6 +18,16 @@ use tracing::{debug, warn};
 const CLIPBOARD_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CLIPBOARD_CAPTURE_POLL_ATTEMPTS: usize = 6;
 
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGRequestListenEventAccess() -> bool;
+    fn CGPreflightPostEventAccess() -> bool;
+    fn CGRequestPostEventAccess() -> bool;
+    fn CGEventTapEnable(tap: core_foundation::mach_port::CFMachPortRef, enable: bool);
+}
+
 /// 鼠标中键快捷窗口的显示/隐藏事件。
 #[derive(Clone, Debug)]
 pub enum QuickActionEvent {
@@ -156,21 +166,31 @@ fn spawn_macos_middle_click_listener(
     dismiss_tx: mpsc::UnboundedSender<QuickActionEvent>,
     enabled: Arc<AtomicBool>,
 ) {
+    request_macos_event_access();
+
     thread::Builder::new()
         .name("middle-click-listener".into())
         .spawn(move || {
-            use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+            use core_foundation::{
+                base::TCFType,
+                mach_port::CFMachPort,
+                runloop::{kCFRunLoopCommonModes, CFRunLoop},
+            };
             use core_graphics::event::{
                 CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
                 CGEventType, EventField,
             };
-            use std::process;
+            use std::{cell::RefCell, process, rc::Rc};
+
+            let tap_port = Rc::new(RefCell::new(None::<CFMachPort>));
+            let tap_port_for_callback = Rc::clone(&tap_port);
 
             let tap = match CGEventTap::new(
-                // The annotated session layer provides the process that will receive the event.
-                CGEventTapLocation::AnnotatedSession,
+                // HID is the same global event layer used by rdev on macOS. AnnotatedSession can
+                // omit mouse events for other applications on some system configurations.
+                CGEventTapLocation::HID,
                 CGEventTapPlacement::HeadInsertEventTap,
-                CGEventTapOptions::ListenOnly,
+                CGEventTapOptions::Default,
                 vec![
                     CGEventType::LeftMouseDown,
                     CGEventType::RightMouseDown,
@@ -178,13 +198,26 @@ fn spawn_macos_middle_click_listener(
                     CGEventType::OtherMouseUp,
                 ],
                 move |_proxy, event_type, event| {
-                    let button =
-                        event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
+                    if matches!(
+                        event_type,
+                        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+                    ) {
+                        if let Some(tap) = tap_port_for_callback.borrow().as_ref() {
+                            unsafe { CGEventTapEnable(tap.as_concrete_TypeRef(), true) };
+                            warn!(?event_type, "macOS middle-click event tap was disabled; re-enabled it");
+                        }
+                        return None;
+                    }
+
+                    let button = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
                     if matches!(event_type, CGEventType::OtherMouseUp) && button == 2 {
                         if !enabled.load(Ordering::Relaxed) {
                             return None;
                         }
                         let location = event.location();
+                        // A global middle-click action owns this gesture. Suppress the matching
+                        // mouse-up event so terminals do not also paste the current selection.
+                        event.set_type(CGEventType::Null);
                         let position = Some(ScreenPosition {
                             x: location.x.round() as i32,
                             y: location.y.round() as i32,
@@ -192,6 +225,12 @@ fn spawn_macos_middle_click_listener(
                         if capture_tx.send(position).is_err() {
                             debug!("middle-click listener stopped because capture worker exited");
                         }
+                    } else if matches!(event_type, CGEventType::OtherMouseDown)
+                        && button == 2
+                        && enabled.load(Ordering::Relaxed)
+                    {
+                        // Terminals paste on mouse-down, so suppress both halves of the click.
+                        event.set_type(CGEventType::Null);
                     } else if matches!(
                         event_type,
                         CGEventType::LeftMouseDown
@@ -214,10 +253,14 @@ fn spawn_macos_middle_click_listener(
             ) {
                 Ok(tap) => tap,
                 Err(()) => {
-                    warn!("macOS middle-click event tap could not be created");
+                    warn!(
+                        "macOS middle-click event tap could not be created; allow DevTools Hub in System Settings > Privacy & Security > Input Monitoring, then restart the app"
+                    );
                     return;
                 }
             };
+
+            *tap_port.borrow_mut() = Some(tap.mach_port.clone());
 
             let run_loop = CFRunLoop::get_current();
             let source = match tap.mach_port.create_runloop_source(0) {
@@ -233,6 +276,21 @@ fn spawn_macos_middle_click_listener(
             CFRunLoop::run_current();
         })
         .expect("failed to spawn middle-click listener");
+}
+
+#[cfg(target_os = "macos")]
+fn request_macos_event_access() {
+    if !unsafe { CGPreflightListenEventAccess() } && !unsafe { CGRequestListenEventAccess() } {
+        warn!(
+            "macOS middle-click listener needs Input Monitoring permission; allow DevTools Hub in System Settings > Privacy & Security > Input Monitoring, then restart the app"
+        );
+    }
+
+    if !unsafe { CGPreflightPostEventAccess() } && !unsafe { CGRequestPostEventAccess() } {
+        warn!(
+            "macOS selected-text capture needs Accessibility permission; allow DevTools Hub in System Settings > Privacy & Security > Accessibility, then restart the app"
+        );
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), target_os = "windows"))]

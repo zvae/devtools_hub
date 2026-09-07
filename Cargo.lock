@@ -1397,6 +1397,7 @@ name = "devtools-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cocoa",
  "devtools-core",
  "devtools-plugin-api",
  "devtools-plugin-host",
@@ -1405,6 +1406,7 @@ dependencies = [
  "devtools-tools",
  "devtools-ui",
  "libc",
+ "objc",
  "raw-window-handle",
  "slint",
  "time",

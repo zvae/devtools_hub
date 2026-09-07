@@ -81,7 +81,11 @@ pub(super) fn open_tool_window(
         }
     });
 
-    window.show().ok();
+    if let Err(error) = window.show() {
+        error!(?error, %tool_id, "failed to show tool window");
+        return;
+    }
+    show_window_in_foreground(window.window());
     if !window.get_input().is_empty() {
         let _ = request_tx.send(AppRequest::RunTool {
             tool_id: tool_id.clone(),
