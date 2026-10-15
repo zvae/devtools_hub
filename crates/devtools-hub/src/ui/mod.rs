@@ -287,7 +287,13 @@ impl HubApp {
     }
 
     fn handle_focus(&mut self) {
-        let focused = self.ctx.input(|i| i.viewport().focused).unwrap_or(false);
+        // Windows 上 winit 的焦点状态在托盘弹出路径下不可靠：面板已经是前台窗口，
+        // 但 AttachThreadInput 的 detach 会撤销键盘焦点，has_focus() 恒为 false。
+        let focused = if cfg!(windows) {
+            native_panel::is_active()
+        } else {
+            self.ctx.input(|i| i.viewport().focused).unwrap_or(false)
+        };
         let lost_focus = self.was_focused && !focused;
         self.was_focused = focused;
         if lost_focus
@@ -348,6 +354,11 @@ impl eframe::App for HubApp {
             }
         }
         self.handle_focus();
+        // 面板显示期间定时刷新：失焦不一定产生 repaint 事件（winit 的焦点状态可能已经不一致），
+        // 需要轮询才能发现焦点变化。隐藏时不排重绘，保持空闲。
+        if self.page == Page::Panel && native_panel::is_visible() {
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
         self.draw(ui);
     }
 

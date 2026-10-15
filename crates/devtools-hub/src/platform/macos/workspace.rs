@@ -45,3 +45,7 @@ pub fn reveal_path(path: &str) {
 pub fn open_path(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
 }
+
+/// macOS 不需要持续记录前台应用：面板弹出时前台仍是用户所在的程序
+/// （`panel::show` 直接用 `frontmost_other_app`），这里只为共用代码提供空实现。
+pub fn remember_foreground() {}

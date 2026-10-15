@@ -27,7 +27,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::workspace;
-pub use crate::platform::{Anchor, Placement, TrayRect};
+pub use crate::platform::{Anchor, Placement};
 
 /// egui 背景画成直角，圆角由 DWM 处理（Windows 11 上为系统圆角，Windows 10 为直角）。
 pub const CORNER_RADIUS: f64 = 0.0;
@@ -112,9 +112,16 @@ pub fn show(anchor: Anchor) -> bool {
     // SAFETY: hwnd 是已绑定的面板窗口。
     unsafe {
         if IsWindowVisible(hwnd) == 0 {
+            // 从托盘弹出时前台是任务栏（或我们自己的托盘窗口），它不能作为粘贴目标；
+            // 这种情况回退到监听线程最近记录的真实前台程序。
             let foreground = GetForegroundWindow();
-            if !foreground.is_null() && foreground != hwnd {
-                PREVIOUS.with(|previous| previous.set(foreground));
+            let previous = if workspace::is_other_app(foreground) {
+                foreground
+            } else {
+                workspace::last_other_foreground()
+            };
+            if !previous.is_null() && IsWindow(previous) != 0 {
+                PREVIOUS.with(|cell| cell.set(previous));
             }
             position(hwnd, anchor);
         }

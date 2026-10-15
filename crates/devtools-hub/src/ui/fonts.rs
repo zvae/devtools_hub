@@ -40,6 +40,8 @@ impl FaceSpec {
         self
     }
 
+    /// 可变字体的轴坐标只有 macOS 的候选列表用得到，Windows 上不需要。
+    #[cfg(target_os = "macos")]
     fn coords(mut self, coords: Coords) -> Self {
         self.coords = coords;
         self

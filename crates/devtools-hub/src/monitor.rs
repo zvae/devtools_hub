@@ -40,6 +40,9 @@ fn run(shared: &Shared, mut store: Store, pasteboard_name: Option<&str>) {
     );
 
     while !shared.stop.load(Ordering::Relaxed) {
+        // 记录用户当前所在的程序：从托盘弹出面板时前台是任务栏，用它作为粘贴目标。
+        workspace::remember_foreground();
+
         if last_prune.is_none_or(|at| at.elapsed() >= PRUNE_INTERVAL) {
             prune(shared, &mut store);
             last_prune = Some(Instant::now());

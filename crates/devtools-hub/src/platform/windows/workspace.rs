@@ -6,6 +6,7 @@
 use std::ffi::c_void;
 use std::path::Path;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use devtools_clipboard::SourceApp;
 use windows_sys::Win32::Foundation::{CloseHandle, HWND};
@@ -18,7 +19,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowThreadProcessId, SW_SHOWNORMAL,
+    GetForegroundWindow, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId,
+    IsWindowVisible, GWL_EXSTYLE, SW_SHOWNORMAL, WS_EX_TOOLWINDOW,
 };
 
 use super::wide;
@@ -152,4 +154,49 @@ pub fn reveal_path(path: &str) {
 
 pub fn open_path(path: &Path) {
     shell_open(&path.to_string_lossy(), None);
+}
+
+/// 最近一次处于前台的“其他程序”窗口（本进程与 shell 窗口除外）。
+///
+/// 从托盘弹出面板时前台是任务栏或我们自己的托盘窗口，不能作为粘贴目标；
+/// 剪贴板监听线程周期性调用 [`remember_foreground`] 记录，弹出面板时用它兜底。
+static LAST_OTHER: AtomicIsize = AtomicIsize::new(0);
+
+/// 记录当前前台窗口；由剪贴板监听线程周期性调用。
+pub fn remember_foreground() {
+    // SAFETY: 只读查询。
+    let hwnd = unsafe { GetForegroundWindow() };
+    if is_other_app(hwnd) {
+        LAST_OTHER.store(hwnd as isize, Ordering::Relaxed);
+    }
+}
+
+/// 最近记录的“其他程序”前台窗口；从未记录过时为空。
+pub fn last_other_foreground() -> HWND {
+    LAST_OTHER.load(Ordering::Relaxed) as HWND
+}
+
+/// 该窗口是否属于别的程序：排除空窗口、本进程、不可见窗口、工具窗口，
+/// 以及没有标题的 shell 窗口（任务栏、桌面）。
+pub fn is_other_app(hwnd: HWND) -> bool {
+    if hwnd.is_null() {
+        return false;
+    }
+    let mut pid = 0u32;
+    // SAFETY: pid 指向有效的栈变量。
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if pid == std::process::id() {
+        return false;
+    }
+    // SAFETY: 都是只读查询；标题缓冲区只用来判断标题是否为空。
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 {
+            return false;
+        }
+        if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW != 0 {
+            return false;
+        }
+        let mut title = [0u16; 2];
+        GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) > 0
+    }
 }
