@@ -239,10 +239,8 @@ impl HubApp {
                 return;
             }
         };
-        let shared = self.shared.clone();
-        self.pasteboard().write(&snapshot, |next| {
-            shared.ignore_change_count.store(next, Ordering::Relaxed);
-        });
+        let pasteboard = self.pasteboard();
+        self.shared.write_pasteboard(|| pasteboard.write(&snapshot));
         if let Err(err) = self
             .store
             .mark_pasted(id, self.settings.move_to_top_after_paste)
@@ -258,6 +256,7 @@ impl HubApp {
         self.accessibility_ok = keyboard::accessibility_trusted(false);
         if !self.accessibility_ok {
             self.show_toast("已复制到剪贴板。自动粘贴需要“辅助功能”权限");
+            // 只有 macOS 会走到这里：Windows 模拟按键不需要授权。
             return;
         }
         let keycode = keyboard::paste_keycode();
@@ -298,6 +297,7 @@ impl HubApp {
             && native_panel::is_visible()
         {
             // 用户点击了别的应用：只隐藏，不抢回焦点。
+            controller::note_auto_hide();
             self.hide_panel(false);
         }
     }
@@ -351,9 +351,15 @@ impl eframe::App for HubApp {
         self.draw(ui);
     }
 
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        // 窗口透明，圆角背景由 CentralPanel 的 Frame 绘制。
-        [0.0; 4]
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.translucent {
+            // 窗口透明（macOS 毛玻璃），圆角背景由 CentralPanel 的 Frame 绘制。
+            [0.0; 4]
+        } else {
+            Palette::new(visuals.dark_mode, false)
+                .background
+                .to_normalized_gamma_f32()
+        }
     }
 }
 

@@ -5,11 +5,23 @@ use serde::{Deserialize, Serialize};
 use crate::model::{ContentKind, Snapshot, SourceApp};
 use crate::uti::{self, Analysis};
 
+/// 排除的应用。macOS 上 `bundle_id` 是 Bundle ID；Windows 上是程序路径或文件名（如 `KeePass.exe`）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExcludedApp {
     pub bundle_id: String,
     #[serde(default)]
     pub name: String,
+}
+
+impl ExcludedApp {
+    /// 不区分大小写；Windows 上只写文件名时，匹配任意目录下的同名程序。
+    pub fn matches(&self, source_id: &str) -> bool {
+        source_id.eq_ignore_ascii_case(&self.bundle_id)
+            || source_id
+                .rsplit(['\\', '/'])
+                .next()
+                .is_some_and(|file_name| file_name.eq_ignore_ascii_case(&self.bundle_id))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,11 +56,19 @@ impl Default for CaptureRules {
             ignore_remote: false,
             ignore_blank_text: true,
             max_size_mb: 64,
+            #[cfg(not(windows))]
             excluded_apps: vec![
                 app("com.apple.keychainaccess", "钥匙串访问"),
                 app("com.apple.Passwords", "密码"),
                 app("com.1password.1password", "1Password"),
                 app("com.bitwarden.desktop", "Bitwarden"),
+            ],
+            #[cfg(windows)]
+            excluded_apps: vec![
+                app("KeePass.exe", "KeePass"),
+                app("KeePassXC.exe", "KeePassXC"),
+                app("1Password.exe", "1Password"),
+                app("Bitwarden.exe", "Bitwarden"),
             ],
         }
     }
@@ -105,11 +125,7 @@ impl CaptureRules {
             return Err(SkipReason::Remote);
         }
         if let Some(bundle_id) = source.bundle_id.as_deref() {
-            if self
-                .excluded_apps
-                .iter()
-                .any(|app| app.bundle_id == bundle_id)
-            {
+            if self.excluded_apps.iter().any(|app| app.matches(bundle_id)) {
                 return Err(SkipReason::ExcludedApp(bundle_id.to_string()));
             }
         }
@@ -189,7 +205,13 @@ mod tests {
 
     #[test]
     fn rejects_excluded_app() {
-        let rules = CaptureRules::default();
+        let rules = CaptureRules {
+            excluded_apps: vec![ExcludedApp {
+                bundle_id: "com.1password.1password".into(),
+                name: String::new(),
+            }],
+            ..CaptureRules::default()
+        };
         assert!(matches!(
             check(
                 &rules,
@@ -198,6 +220,23 @@ mod tests {
             ),
             Err(SkipReason::ExcludedApp(_))
         ));
+    }
+
+    #[test]
+    fn excluded_app_matches_windows_file_names() {
+        let app = ExcludedApp {
+            bundle_id: "KeePass.exe".into(),
+            name: String::new(),
+        };
+        assert!(app.matches(r"C:\Program Files\KeePass Password Safe 2\KeePass.exe"));
+        assert!(app.matches("keepass.exe"));
+        assert!(!app.matches(r"C:\Tools\NotKeePass.exe"));
+        let mac = ExcludedApp {
+            bundle_id: "com.apple.Passwords".into(),
+            name: String::new(),
+        };
+        assert!(mac.matches("com.apple.Passwords"));
+        assert!(!mac.matches("com.apple.PasswordsHelper"));
     }
 
     #[test]

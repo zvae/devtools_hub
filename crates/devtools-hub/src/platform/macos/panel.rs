@@ -10,6 +10,8 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::workspace;
+pub use crate::platform::{Anchor, Placement};
 use anyhow::{bail, Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -22,9 +24,6 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSPoint, NSRect};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use serde::{Deserialize, Serialize};
-
-use super::workspace;
 
 thread_local! {
     static PANEL: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
@@ -35,40 +34,6 @@ thread_local! {
 pub const CORNER_RADIUS: f64 = 12.0;
 
 static VIBRANCY: AtomicBool = AtomicBool::new(false);
-
-/// 面板从哪里弹出。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Anchor {
-    /// 按设置中的位置（快捷键唤起）。
-    Placement(Placement),
-    /// 菜单栏图标正下方（点击菜单栏图标）。
-    StatusItem,
-}
-
-/// 面板出现的位置（对应 PasteNow 的 “Appear near Cursor / Appear at Last Position”）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Placement {
-    #[default]
-    NearCursor,
-    ScreenCenter,
-    LastPosition,
-}
-
-impl Placement {
-    pub const ALL: [Placement; 3] = [
-        Placement::NearCursor,
-        Placement::ScreenCenter,
-        Placement::LastPosition,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Placement::NearCursor => "鼠标附近",
-            Placement::ScreenCenter => "屏幕中央",
-            Placement::LastPosition => "上次的位置",
-        }
-    }
-}
 
 /// 绑定 eframe 创建的窗口，并设置成浮动面板的行为。必须在主线程调用。
 ///
@@ -177,7 +142,7 @@ pub fn show(anchor: Anchor) -> bool {
             }
             match anchor {
                 Anchor::Placement(placement) => position(mtm, window, placement),
-                Anchor::StatusItem => position_below_status_item(mtm, window),
+                Anchor::StatusItem(_) => position_below_status_item(mtm, window),
             }
         }
         window.setAlphaValue(1.0);

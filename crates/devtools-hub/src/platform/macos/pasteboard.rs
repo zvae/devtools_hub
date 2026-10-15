@@ -102,11 +102,8 @@ impl Pasteboard {
         })
     }
 
-    /// 写入快照，返回写入后的 changeCount。
-    ///
-    /// `before_clear` 在清空剪贴板前被调用，参数是预期的新 changeCount，
-    /// 监听线程据此跳过这次由我们自己触发的变化。
-    pub fn write(&self, snapshot: &Snapshot, before_clear: impl FnOnce(isize)) -> isize {
+    /// 写入快照，返回写入后的 changeCount（调用方据此让监听线程跳过这次自己的写入）。
+    pub fn write(&self, snapshot: &Snapshot) -> isize {
         autoreleasepool(|_| {
             let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = snapshot
                 .items
@@ -120,7 +117,6 @@ impl Pasteboard {
                     ProtocolObject::from_retained(item)
                 })
                 .collect();
-            before_clear(self.inner.changeCount() + 1);
             let count = self.inner.clearContents();
             self.inner
                 .writeObjects(&NSArray::from_retained_slice(&items));
@@ -159,9 +155,7 @@ mod tests {
                 )],
             ],
         };
-        let mut expected = 0;
-        let count = pb.write(&snapshot, |next| expected = next);
-        assert_eq!(count, expected);
+        let count = pb.write(&snapshot);
         assert_eq!(pb.change_count(), count);
         assert_eq!(pb.read(), snapshot);
         assert!(pb.types().contains(&uti::HTML.to_string()));

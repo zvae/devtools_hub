@@ -1,4 +1,4 @@
-//! 剪贴板监听线程。
+//! 剪贴板监听线程（macOS 与 Windows 共用，平台差异封装在 `platform::pasteboard` 中）。
 //!
 //! 流程与 PasteNow 日志中看到的一致：
 //! 定时器触发 → 比较 changeCount（“On auto check pasteboard: count change from … to …”）→
@@ -46,7 +46,9 @@ fn run(shared: &Shared, mut store: Store, pasteboard_name: Option<&str>) {
         }
 
         let count = pasteboard.change_count();
-        if last_count != Some(count) {
+        if shared.writing.load(Ordering::SeqCst) {
+            // 本应用正在写剪贴板，等写完再看。
+        } else if last_count != Some(count) {
             last_count = Some(count);
             let ours = count == shared.ignore_change_count.load(Ordering::Relaxed);
             if !ours && !shared.paused.load(Ordering::Relaxed) {
@@ -119,7 +121,8 @@ fn prune(shared: &Shared, store: &mut Store) {
     }
 }
 
-#[cfg(test)]
+// 端到端测试依赖 macOS 的私有命名剪贴板（不影响系统剪贴板）；Windows 没有对应机制。
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use crate::settings::Settings;
@@ -152,13 +155,13 @@ mod tests {
         let items = || store.items(&ItemQuery::default()).unwrap();
         let revision = || shared.revision.load(Ordering::Relaxed);
 
-        pasteboard.write(&Snapshot::from_text("first copy"), |_| {});
+        pasteboard.write(&Snapshot::from_text("first copy"));
         assert!(wait_for(|| items().len() == 1), "应记录第一条");
 
         let mut secret = Snapshot::from_text("p@ssw0rd");
         secret.items[0].push(Representation::new(uti::CONCEALED, Vec::new()));
-        pasteboard.write(&secret, |_| {});
-        pasteboard.write(&Snapshot::from_text("first copy"), |_| {});
+        pasteboard.write(&secret);
+        pasteboard.write(&Snapshot::from_text("first copy"));
         assert!(
             wait_for(|| items().first().is_some_and(|item| item.copy_count == 2)),
             "重复内容应只更新次数"
@@ -167,15 +170,13 @@ mod tests {
 
         // 模拟粘贴时由本应用写入剪贴板：监听线程应跳过。
         let before = revision();
-        pasteboard.write(&Snapshot::from_text("written by us"), |next| {
-            shared.ignore_change_count.store(next, Ordering::Relaxed)
-        });
+        shared.write_pasteboard(|| pasteboard.write(&Snapshot::from_text("written by us")));
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(revision(), before);
         assert_eq!(items().len(), 1);
 
         shared.paused.store(true, Ordering::Relaxed);
-        pasteboard.write(&Snapshot::from_text("while paused"), |_| {});
+        pasteboard.write(&Snapshot::from_text("while paused"));
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(items().len(), 1, "暂停时不记录");
 

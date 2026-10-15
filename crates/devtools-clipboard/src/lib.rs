@@ -6,6 +6,7 @@ pub mod rules;
 pub mod store;
 pub mod thumbnail;
 pub mod uti;
+pub mod windows_formats;
 
 pub use model::{Capture, ClipItem, ClipList, ContentKind, Representation, Snapshot, SourceApp};
 pub use rules::{CaptureRules, ExcludedApp, SkipReason};

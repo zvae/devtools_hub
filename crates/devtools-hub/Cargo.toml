@@ -10,6 +10,11 @@ version.workspace = true
 name = "devtools-hub"
 path = "src/main.rs"
 
+[features]
+# 在非 Windows 平台上对 Windows 实现做类型检查（只检查、不链接）：
+# cargo check -p devtools-hub --features windows-typecheck
+windows-typecheck = ["dep:windows-sys"]
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
@@ -25,6 +30,7 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tray-icon.workspace = true
+windows-sys = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
@@ -32,6 +38,9 @@ objc2-app-kit.workspace = true
 objc2-core-graphics.workspace = true
 objc2-foundation.workspace = true
 winit.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }

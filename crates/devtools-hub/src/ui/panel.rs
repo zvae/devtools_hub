@@ -17,8 +17,8 @@ use super::fonts;
 use super::icons::{self, Icon};
 use super::style::{self, kind_color, kind_icon, Palette};
 use super::{HubApp, PasteMode};
-use crate::hotkey;
 use crate::platform::{keyboard, panel as native_panel, workspace};
+use crate::{hotkey, keys, platform};
 
 const CARD_HEIGHT: f32 = 74.0;
 const FAVORITE_COLOR: Color32 = Color32::from_rgb(0xf5, 0xa6, 0x23);
@@ -394,7 +394,7 @@ impl HubApp {
             let search_width = ui.available_width() - 34.0;
             self.search_field(ui, search_width, palette);
             if icon_button(ui, Icon::Gear, false, palette)
-                .on_hover_text("设置  ⌘,")
+                .on_hover_text(format!("设置  {}", keys::shortcut(&[keys::COMMAND, ","])))
                 .clicked()
             {
                 actions.push(Action::OpenSettings);
@@ -530,16 +530,16 @@ impl HubApp {
         };
         let hotkey = hotkey::display_parts(&self.settings.hotkey);
         let rows: [(Vec<&str>, &str); 11] = [
-            (vec!["↩"], paste.as_str()),
-            (vec!["⇧", "↩"], "以纯文本粘贴"),
-            (vec!["⌘", "↩"], "仅复制"),
-            (vec!["⌘", "1–9"], "快速粘贴第 N 条"),
-            (vec!["空格"], "预览（搜索框为空时）"),
-            (vec!["⌘", "D"], "收藏 / 取消收藏"),
-            (vec!["⌘", "⌫"], "删除"),
-            (vec!["⇥"], "切换分类"),
-            (vec!["⌘", ","], "设置"),
-            (vec!["esc"], "清空搜索 / 关闭"),
+            (vec![keys::RETURN], paste.as_str()),
+            (vec![keys::SHIFT, keys::RETURN], "以纯文本粘贴"),
+            (vec![keys::COMMAND, keys::RETURN], "仅复制"),
+            (vec![keys::COMMAND, "1–9"], "快速粘贴第 N 条"),
+            (vec![keys::SPACE], "预览（搜索框为空时）"),
+            (vec![keys::COMMAND, "D"], "收藏 / 取消收藏"),
+            (vec![keys::COMMAND, keys::DELETE], "删除"),
+            (vec![keys::TAB], "切换分类"),
+            (vec![keys::COMMAND, ","], "设置"),
+            (vec![keys::ESCAPE], "清空搜索 / 关闭"),
             (
                 hotkey.iter().map(String::as_str).collect(),
                 "在任意应用中唤起",
@@ -680,7 +680,7 @@ impl HubApp {
             painter.text(
                 egui::pos2(right, rect.bottom() - 10.0),
                 Align2::RIGHT_BOTTOM,
-                format!("⌘{}", index + 1),
+                keys::shortcut(&[keys::COMMAND, &(index + 1).to_string()]),
                 FontId::proportional(11.5),
                 palette.weak,
             );
@@ -820,7 +820,10 @@ impl HubApp {
                 .flatten()
                 .and_then(|text| text.lines().next().map(str::to_string));
             if let Some(path) = first_path {
-                if ui.button("在访达中显示").clicked() {
+                if ui
+                    .button(format!("在{}中显示", platform::FILE_MANAGER))
+                    .clicked()
+                {
                     actions.push(Action::Reveal(path));
                 }
             }
@@ -895,8 +898,10 @@ impl HubApp {
                         } else {
                             Icon::Star
                         };
-                        let star =
-                            icon_button(ui, icon, favorite, palette).on_hover_text("收藏  ⌘D");
+                        let star = icon_button(ui, icon, favorite, palette).on_hover_text(format!(
+                            "收藏  {}",
+                            keys::shortcut(&[keys::COMMAND, "D"])
+                        ));
                         if star.clicked() {
                             actions.push(Action::SetInList {
                                 item: item.id,
@@ -943,12 +948,13 @@ impl HubApp {
                                 egui::Button::new(RichText::new("粘贴").color(Color32::WHITE))
                                     .fill(palette.accent)
                                     .min_size(Vec2::new(columns[0].available_width(), 28.0));
-                            if columns[0].add(paste).on_hover_text("↩").clicked() {
+                            if columns[0].add(paste).on_hover_text(keys::RETURN).clicked() {
                                 actions.push(Action::Paste(item.id, PasteMode::Original));
                             }
                             let plain = egui::Button::new("以纯文本粘贴")
                                 .min_size(Vec2::new(columns[1].available_width(), 28.0));
-                            if columns[1].add(plain).on_hover_text("⇧↩").clicked() {
+                            let plain_keys = keys::shortcut(&[keys::SHIFT, keys::RETURN]);
+                            if columns[1].add(plain).on_hover_text(plain_keys).clicked() {
                                 actions.push(Action::Paste(item.id, PasteMode::PlainText));
                             }
                         });
@@ -1248,7 +1254,7 @@ fn files_preview(ui: &mut Ui, text: &str, palette: &Palette, actions: &mut Vec<A
                     let label = egui::Label::new(RichText::new(path).monospace().size(12.0))
                         .sense(Sense::click());
                     let hint = if exists {
-                        "点击在访达中显示"
+                        "点击在文件管理器中显示"
                     } else {
                         "文件已不存在"
                     };

@@ -205,28 +205,60 @@ fn is_single_url(text: &str) -> bool {
         && !text.chars().any(char::is_whitespace)
 }
 
-/// `file:///Users/a/b%20c.txt` → `/Users/a/b c.txt`
+/// file URL → 本地路径：
+/// - `file:///Users/a/b%20c.txt` → `/Users/a/b c.txt`
+/// - `file:///C:/a/b.txt` → `C:\a\b.txt`（Windows 盘符路径）
+/// - `file://server/share/x` → `\\server\share\x`（Windows UNC 路径）
 pub fn file_url_to_path(data: &[u8]) -> Option<String> {
     let url = std::str::from_utf8(data)
         .ok()?
         .trim_end_matches('\0')
         .trim();
     let rest = url.strip_prefix("file://")?;
-    let path = rest.strip_prefix("localhost").unwrap_or(rest);
-    let decoded = percent_decode(path);
-    let decoded = if decoded.len() > 1 {
-        decoded.trim_end_matches('/').to_string()
-    } else {
-        decoded
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let decoded = percent_decode(rest);
+    let path = match decoded.strip_prefix('/') {
+        Some(after) if is_drive_path(after) => {
+            let windows = after.replace('/', "\\");
+            if windows.len() > 3 {
+                windows.trim_end_matches('\\').to_string()
+            } else {
+                windows
+            }
+        }
+        Some(_) if decoded.len() > 1 => decoded.trim_end_matches('/').to_string(),
+        Some(_) => decoded,
+        None if decoded.is_empty() => decoded,
+        None => format!("\\\\{}", decoded.replace('/', "\\").trim_end_matches('\\')),
     };
-    (!decoded.is_empty()).then_some(decoded)
+    (!path.is_empty()).then_some(path)
 }
 
+/// 本地路径 → file URL，支持 macOS 路径以及 Windows 的盘符路径和 UNC 路径。
 pub fn path_to_file_url(path: &str) -> String {
-    let mut out = String::from("file://");
+    if let Some(unc) = path.strip_prefix("\\\\") {
+        return format!("file://{}", percent_encode_path(&unc.replace('\\', "/")));
+    }
+    if is_drive_path(path) {
+        return format!("file:///{}", percent_encode_path(&path.replace('\\', "/")));
+    }
+    format!("file://{}", percent_encode_path(path))
+}
+
+/// `C:`、`C:\…`、`C:/…`
+fn is_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || bytes[2] == b'/' || bytes[2] == b'\\')
+}
+
+fn percent_encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' | b':' => {
                 out.push(byte as char)
             }
             _ => out.push_str(&format!("%{byte:02X}")),
@@ -397,6 +429,31 @@ mod tests {
         let path = "/Users/me/文档/a b#1.txt";
         let url = path_to_file_url(path);
         assert_eq!(file_url_to_path(url.as_bytes()).as_deref(), Some(path));
+    }
+
+    #[test]
+    fn windows_paths_round_trip() {
+        for (path, expected_url) in [
+            (
+                r"C:\Users\我\a b.txt",
+                "file:///C:/Users/%E6%88%91/a%20b.txt",
+            ),
+            (r"D:\", "file:///D:/"),
+            (r"\\server\share\x.zip", "file://server/share/x.zip"),
+        ] {
+            let url = path_to_file_url(path);
+            assert_eq!(url, expected_url);
+            assert_eq!(file_url_to_path(url.as_bytes()).as_deref(), Some(path));
+        }
+        // 其他程序常见的写法也能识别。
+        assert_eq!(
+            file_url_to_path(b"file:///c:/tmp/").as_deref(),
+            Some(r"c:\tmp")
+        );
+        assert_eq!(
+            file_url_to_path(b"file://localhost/C:/x").as_deref(),
+            Some(r"C:\x")
+        );
     }
 
     #[test]

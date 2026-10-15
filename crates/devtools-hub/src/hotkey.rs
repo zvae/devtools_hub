@@ -1,7 +1,7 @@
 //! 全局快捷键。
 //!
 //! PasteNow 的 `CarbonShortcutManager` 调用 Carbon 的 `RegisterEventHotKey`；
-//! global-hotkey 在 macOS 上用的是同一个 API，不需要辅助功能权限。
+//! global-hotkey 在 macOS 上用的是同一个 API，在 Windows 上用 `RegisterHotKey`，都不需要额外权限。
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 use crate::controller;
+use crate::keys;
 use crate::shared::Shared;
 
 pub struct HotkeyService {
@@ -63,32 +64,51 @@ impl HotkeyService {
 pub fn parse(spec: &str) -> Result<HotKey, String> {
     let hotkey = HotKey::from_str(spec).map_err(|err| format!("快捷键格式不正确：{err}"))?;
     if hotkey.mods.is_empty() {
-        return Err("快捷键至少需要一个修饰键（⌘ ⌥ ⌃ ⇧）".into());
+        return Err(format!(
+            "快捷键至少需要一个修饰键（{}）",
+            keys::MODIFIER_HINT
+        ));
     }
     Ok(hotkey)
 }
 
-/// `Cmd+Shift+V` → `⇧⌘V`
+/// 修饰键的显示顺序与写法（global-hotkey 中的名称 → 界面上的写法）。
+/// macOS 按 ⌃⌥⇧⌘ 的惯例排序；Windows 按 Ctrl+Shift+Alt+Win，且 `CmdOrCtrl` 表示 Ctrl。
+#[cfg(target_os = "macos")]
+const MODIFIERS: [(&str, &[&str]); 4] = [
+    ("⌃", &["CTRL", "CONTROL"]),
+    ("⌥", &["ALT", "OPTION"]),
+    ("⇧", &["SHIFT"]),
+    (
+        "⌘",
+        &["CMD", "COMMAND", "SUPER", "CMDORCTRL", "COMMANDORCONTROL"],
+    ),
+];
+#[cfg(not(target_os = "macos"))]
+const MODIFIERS: [(&str, &[&str]); 4] = [
+    (
+        "Ctrl",
+        &["CTRL", "CONTROL", "CMDORCTRL", "COMMANDORCONTROL"],
+    ),
+    ("Shift", &["SHIFT"]),
+    ("Alt", &["ALT", "OPTION"]),
+    ("Win", &["CMD", "COMMAND", "SUPER"]),
+];
+
+/// macOS：`Cmd+Shift+V` → `⇧⌘V`；Windows：`Alt+Shift+V` → `Shift+Alt+V`
 pub fn display(spec: &str) -> String {
-    display_parts(spec).concat()
+    let parts = display_parts(spec);
+    keys::shortcut(&parts.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
-/// `Cmd+Shift+V` → `["⇧", "⌘", "V"]`，按 macOS 惯例的修饰键顺序（⌃⌥⇧⌘），用于绘制键帽。
+/// 拆成一个个按键，用于绘制键帽：`Cmd+Shift+V` → `["⇧", "⌘", "V"]`。
 pub fn display_parts(spec: &str) -> Vec<String> {
     let parts: Vec<String> = spec
         .split('+')
         .map(|p| p.trim().to_ascii_uppercase())
         .collect();
     let mut out = Vec::new();
-    for (symbol, names) in [
-        ("⌃", &["CTRL", "CONTROL"][..]),
-        ("⌥", &["ALT", "OPTION"][..]),
-        ("⇧", &["SHIFT"][..]),
-        (
-            "⌘",
-            &["CMD", "COMMAND", "SUPER", "CMDORCTRL", "COMMANDORCONTROL"][..],
-        ),
-    ] {
+    for (symbol, names) in MODIFIERS {
         if parts.iter().any(|p| names.contains(&p.as_str())) {
             out.push(symbol.to_string());
         }
@@ -124,7 +144,8 @@ pub fn from_egui(modifiers: egui::Modifiers, key: egui::Key) -> Option<String> {
     if modifiers.shift {
         parts.push("Shift");
     }
-    if modifiers.mac_cmd || modifiers.command {
+    // 只看 mac_cmd：在 Windows 上 egui 的 `command` 等于 Ctrl，不能当成 Win 键。
+    if modifiers.mac_cmd {
         parts.push("Cmd");
     }
     if parts.is_empty() {
@@ -146,11 +167,20 @@ mod tests {
         assert!(parse("Cmd+Nope").is_err());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn displays_symbols() {
         assert_eq!(display("Cmd+Shift+V"), "⇧⌘V");
         assert_eq!(display("Ctrl+Alt+Space"), "⌃⌥空格");
         assert_eq!(display_parts("Shift+Cmd+V"), ["⇧", "⌘", "V"]);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn displays_words() {
+        assert_eq!(display("Alt+Shift+V"), "Shift+Alt+V");
+        assert_eq!(display("CmdOrCtrl+Space"), "Ctrl+空格");
+        assert_eq!(display_parts("Ctrl+Super+K"), ["Ctrl", "Win", "K"]);
     }
 
     #[test]
@@ -166,5 +196,12 @@ mod tests {
             Some("Shift+Cmd+V")
         );
         assert_eq!(from_egui(egui::Modifiers::NONE, egui::Key::V), None);
+        // Windows 上按 Ctrl：egui 的 command 也为 true，但不应被当成 Cmd/Win。
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        assert_eq!(from_egui(ctrl, egui::Key::K).as_deref(), Some("Ctrl+K"));
     }
 }

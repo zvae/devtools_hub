@@ -908,6 +908,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "windows-sys 0.61.2",
  "winit",
 ]
 

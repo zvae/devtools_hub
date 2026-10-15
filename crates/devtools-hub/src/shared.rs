@@ -33,6 +33,8 @@ pub struct Shared {
     pub poll_interval_ms: AtomicU64,
     /// 本应用自己写剪贴板时产生的 changeCount，监听线程遇到它直接跳过。
     pub ignore_change_count: AtomicIsize,
+    /// 本应用正在写剪贴板（Windows 上写入过程中序号会多次变化），监听线程暂停读取。
+    pub writing: AtomicBool,
     /// 每记录一条就加一，UI 据此判断是否需要刷新列表。
     pub revision: AtomicU64,
     pub stop: AtomicBool,
@@ -48,6 +50,7 @@ impl Shared {
             paused: AtomicBool::new(settings.paused),
             poll_interval_ms: AtomicU64::new(settings.poll_interval_ms),
             ignore_change_count: AtomicIsize::new(-1),
+            writing: AtomicBool::new(false),
             revision: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             config: Mutex::new(MonitorConfig {
@@ -99,6 +102,14 @@ impl Shared {
 
     pub fn drain_events(&self) -> Vec<AppEvent> {
         self.events.lock().unwrap().drain(..).collect()
+    }
+
+    /// 由本应用写剪贴板：写入期间监听线程暂停，写完登记最终的序号让它跳过。
+    pub fn write_pasteboard(&self, write: impl FnOnce() -> isize) {
+        self.writing.store(true, Ordering::SeqCst);
+        let count = write();
+        self.ignore_change_count.store(count, Ordering::SeqCst);
+        self.writing.store(false, Ordering::SeqCst);
     }
 
     pub fn bump_revision(&self) {

@@ -1,6 +1,7 @@
-//! 菜单栏图标（PasteNow 是 `LSUIElement` 应用，只在菜单栏显示 `NSStatusItem`）。
+//! 菜单栏 / 托盘图标（PasteNow 是 `LSUIElement` 应用，只在菜单栏显示 `NSStatusItem`）。
 //!
-//! 与 PasteNow 一致：左键点击在图标正下方弹出/收起面板，右键（或 ⌃点击之外的辅助点击）显示菜单。
+//! 与 PasteNow 一致：左键点击在图标旁弹出/收起面板，右键显示菜单。
+//! macOS 上图标是模板图像，由系统按菜单栏明暗着色；Windows 上按任务栏主题画成黑色或白色。
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -10,7 +11,16 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuIt
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::controller;
+use crate::platform::TrayRect;
 use crate::shared::{AppEvent, Shared};
+
+/// macOS 在按下时响应（与系统菜单栏一致）；Windows 在松开时响应，
+/// 否则松开鼠标时任务栏会抢走焦点，刚弹出的面板又被隐藏。
+const CLICK_STATE: MouseButtonState = if cfg!(windows) {
+    MouseButtonState::Up
+} else {
+    MouseButtonState::Down
+};
 
 pub struct Tray {
     _icon: TrayIcon,
@@ -55,15 +65,24 @@ impl Tray {
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
-                button_state: MouseButtonState::Down,
+                button_state,
+                rect,
                 ..
             } = event
             {
-                controller::toggle_from_status_item(&click_shared);
+                if button_state == CLICK_STATE {
+                    let tray = TrayRect {
+                        x: rect.position.x,
+                        y: rect.position.y,
+                        width: f64::from(rect.size.width),
+                        height: f64::from(rect.size.height),
+                    };
+                    controller::toggle_from_status_item(&click_shared, Some(tray));
+                }
             }
         }));
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id.as_ref() {
-            "show" => controller::toggle_from_status_item(&shared),
+            "show" => controller::toggle_from_status_item(&shared, None),
             "pause" => {
                 shared.paused.fetch_xor(true, Ordering::Relaxed);
                 shared.post(AppEvent::PauseChanged);
@@ -74,13 +93,19 @@ impl Tray {
             _ => {}
         }));
 
-        let icon = TrayIconBuilder::new()
+        let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(true)
-            .with_icon_templated(icon()?)
-            .with_tooltip("DevTools Hub 剪贴板历史")
-            .build()?;
+            .with_tooltip("DevTools Hub 剪贴板历史");
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_templated(icon([0, 0, 0])?);
+        #[cfg(not(target_os = "macos"))]
+        let builder = {
+            let light = crate::platform::taskbar_uses_light_theme();
+            builder.with_icon(icon(if light { [0, 0, 0] } else { [255, 255, 255] })?)
+        };
+        let icon = builder.build()?;
         Ok(Self {
             _icon: icon,
             pause,
@@ -95,8 +120,8 @@ impl Tray {
     }
 }
 
-/// 程序绘制一个剪贴板形状的模板图标（单色 + alpha，系统会按明暗模式着色）。
-fn icon() -> Result<Icon> {
+/// 程序绘制一个剪贴板形状的单色图标。
+fn icon(rgb: [u8; 3]) -> Result<Icon> {
     const SIZE: u32 = 44;
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     let s = SIZE as f32;
@@ -126,7 +151,7 @@ fn icon() -> Result<Icon> {
                 alpha = alpha.max(coverage(line));
             }
             let i = ((y * SIZE + x) * 4) as usize;
-            rgba[i..i + 4].copy_from_slice(&[0, 0, 0, (alpha * 255.0) as u8]);
+            rgba[i..i + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], (alpha * 255.0) as u8]);
         }
     }
     Ok(Icon::from_rgba(rgba, SIZE, SIZE)?)

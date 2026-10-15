@@ -1,26 +1,31 @@
-//! DevTools Hub：类 PasteNow 的剪贴板历史管理器。
+//! DevTools Hub：类 PasteNow 的剪贴板历史管理器，支持 macOS 与 Windows。
 //!
 //! 结构：
-//! - `monitor`：后台线程轮询 NSPasteboard 的 changeCount，按规则记录到 SQLite；
-//! - `hotkey` / `tray`：全局快捷键与菜单栏图标，唤起面板；
+//! - `monitor`：后台线程轮询剪贴板序号（macOS 的 changeCount / Windows 的
+//!   GetClipboardSequenceNumber），按规则记录到 SQLite；
+//! - `hotkey` / `tray`：全局快捷键与菜单栏 / 托盘图标，唤起面板；
 //! - `ui`：egui 面板（搜索、分类、预览、键盘操作）与设置页；
-//! - `platform`：macOS 原生能力（剪贴板读写、模拟 ⌘V、窗口控制、开机启动）。
+//! - `platform`：各平台的原生能力（剪贴板读写、模拟粘贴、窗口控制、程序图标、开机启动）。
 
-#[cfg(target_os = "macos")]
+// Windows 发布版不弹出控制台窗口；调试版保留控制台以便查看日志。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+#[cfg(any(target_os = "macos", windows))]
 mod controller;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod hotkey;
-#[cfg(target_os = "macos")]
+mod keys;
+#[cfg(any(target_os = "macos", windows))]
 mod monitor;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod platform;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod settings;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod shared;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod tray;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod ui;
 
 use std::path::PathBuf;
@@ -41,9 +46,10 @@ const HELP: &str = "DevTools Hub 剪贴板历史
 
 选项:
   --show                 启动后立即显示面板
-  --data-dir <目录>      数据目录（默认 ~/Library/Application Support/DevToolsHub，
+  --data-dir <目录>      数据目录（默认 macOS 为 ~/Library/Application Support/DevToolsHub，
+                         Windows 为 %LOCALAPPDATA%\\DevToolsHub；
                          也可用环境变量 DEVTOOLS_HUB_DATA_DIR 指定）
-  --pasteboard <名称>    监听指定名称的私有剪贴板（调试用，不影响系统剪贴板）
+  --pasteboard <名称>    监听指定名称的私有剪贴板（调试用，仅 macOS，不影响系统剪贴板）
   -h, --help             显示帮助";
 
 impl Args {
@@ -69,13 +75,13 @@ impl Args {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn main() {
-    eprintln!("DevTools Hub 剪贴板历史目前只支持 macOS。");
+    eprintln!("DevTools Hub 剪贴板历史目前只支持 macOS 和 Windows。");
     std::process::exit(1);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn main() -> anyhow::Result<()> {
     use anyhow::{anyhow, Context};
     use tracing_subscriber::EnvFilter;
@@ -110,6 +116,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    controller::init_main_thread();
     let settings = settings::Settings::load(&data_dir);
     let shared = shared::Shared::new(&settings);
     let monitor_store =
@@ -121,21 +128,20 @@ fn main() -> anyhow::Result<()> {
         .with_inner_size(settings.window_size)
         .with_min_inner_size([320.0, 400.0])
         .with_decorations(false)
-        .with_transparent(true)
-        .with_has_shadow(true)
         .with_resizable(true)
         .with_visible(false)
         .with_window_level(egui::WindowLevel::AlwaysOnTop);
+    // macOS：透明窗口 + 原生毛玻璃背景。
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_transparent(true).with_has_shadow(true);
+    // Windows：不在任务栏显示按钮（只在通知区域常驻）；不透明窗口，圆角交给 DWM。
+    #[cfg(windows)]
+    let viewport = viewport.with_taskbar(false);
+
     let options = eframe::NativeOptions {
         viewport,
         centered: true,
-        event_loop_builder: Some(Box::new(|builder| {
-            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
-            // 等价于 Info.plist 中的 LSUIElement：不显示 Dock 图标，只在菜单栏常驻。
-            builder
-                .with_activation_policy(ActivationPolicy::Accessory)
-                .with_activate_ignoring_other_apps(false);
-        })),
+        event_loop_builder: event_loop_hook(),
         ..Default::default()
     };
 
@@ -150,4 +156,20 @@ fn main() -> anyhow::Result<()> {
     .map_err(|err| anyhow!("{err}"))?;
     drop(lock_file);
     Ok(())
+}
+
+/// 等价于 Info.plist 中的 LSUIElement：不显示 Dock 图标，只在菜单栏常驻。
+#[cfg(target_os = "macos")]
+fn event_loop_hook() -> Option<eframe::EventLoopBuilderHook> {
+    Some(Box::new(|builder| {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        builder
+            .with_activation_policy(ActivationPolicy::Accessory)
+            .with_activate_ignoring_other_apps(false);
+    }))
+}
+
+#[cfg(windows)]
+fn event_loop_hook() -> Option<eframe::EventLoopBuilderHook> {
+    None
 }

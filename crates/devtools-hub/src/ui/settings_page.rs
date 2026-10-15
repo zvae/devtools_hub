@@ -10,9 +10,9 @@ use super::icons::{self, Icon};
 use super::panel::{centered_row, icon_button, keycaps};
 use super::style::{self, Palette};
 use super::{HubApp, Page};
-use crate::hotkey;
 use crate::platform::{keyboard, login_item, panel::Placement, workspace};
 use crate::settings::{Retention, Settings, POLL_INTERVALS};
+use crate::{hotkey, keys, platform};
 
 #[derive(Default)]
 pub struct SettingsView {
@@ -118,7 +118,15 @@ impl HubApp {
             row(ui, "唤起快捷键", |ui| {
                 ui.label(RichText::new("请按下新的组合键…").color(palette.accent));
             });
-            hint(ui, palette, "需要包含 ⌘ ⌥ ⌃ ⇧ 中的至少一个，esc 取消");
+            hint(
+                ui,
+                palette,
+                &format!(
+                    "需要包含 {} 中的至少一个，{} 取消",
+                    keys::MODIFIER_HINT,
+                    keys::ESCAPE
+                ),
+            );
             let pressed = ui.input(|i| {
                 i.events.iter().find_map(|event| match event {
                     egui::Event::Key {
@@ -161,9 +169,8 @@ impl HubApp {
                 keycaps(ui, &keys, palette);
             });
             let default = Settings::default().hotkey;
-            if settings.hotkey != default
-                && ui.link(RichText::new("恢复默认 ⇧⌘V").size(11.5)).clicked()
-            {
+            let restore = format!("恢复默认 {}", hotkey::display(&default));
+            if settings.hotkey != default && ui.link(RichText::new(restore).size(11.5)).clicked() {
                 settings.hotkey = default;
             }
         }
@@ -184,7 +191,10 @@ impl HubApp {
         hint(
             ui,
             palette,
-            "快捷键唤起时的位置；点击菜单栏图标总是在图标下方弹出",
+            &format!(
+                "快捷键唤起时的位置；点击{}时总是在图标旁弹出",
+                platform::TRAY_NAME
+            ),
         );
         divider(ui, palette);
         switch_row(ui, palette, "失焦时自动隐藏", &mut settings.hide_on_blur);
@@ -208,21 +218,27 @@ impl HubApp {
         hint(
             ui,
             palette,
-            "选中条目后切回之前的应用并模拟 ⌘V；关闭则只复制",
+            &format!(
+                "选中条目后切回之前的应用并模拟 {}；关闭则只复制",
+                keys::shortcut(&[keys::COMMAND, "V"])
+            ),
         );
-        divider(ui, palette);
-        let trusted = keyboard::accessibility_trusted(false);
-        self.accessibility_ok = trusted;
-        row(ui, "辅助功能权限", |ui| {
-            if trusted {
-                ui.label(RichText::new("已授权").color(palette.ok));
-                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-                icons::paint(ui.painter(), icon_rect, Icon::Check, palette.ok);
-            } else if ui.button("去授权").clicked() {
-                keyboard::accessibility_trusted(true);
-                keyboard::open_accessibility_settings();
-            }
-        });
+        // 只有 macOS 需要授权；Windows 模拟按键不需要。
+        if platform::PASTE_NEEDS_PERMISSION {
+            divider(ui, palette);
+            let trusted = keyboard::accessibility_trusted(false);
+            self.accessibility_ok = trusted;
+            row(ui, "辅助功能权限", |ui| {
+                if trusted {
+                    ui.label(RichText::new("已授权").color(palette.ok));
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                    icons::paint(ui.painter(), icon_rect, Icon::Check, palette.ok);
+                } else if ui.button("去授权").clicked() {
+                    keyboard::accessibility_trusted(true);
+                    keyboard::open_accessibility_settings();
+                }
+            });
+        }
         divider(ui, palette);
         switch_row(
             ui,
@@ -332,7 +348,11 @@ impl HubApp {
                 }
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings_view.manual_bundle_id)
-                        .hint_text("或输入 Bundle ID")
+                        .hint_text(if cfg!(windows) {
+                            "或输入程序名，如 KeePass.exe"
+                        } else {
+                            "或输入 Bundle ID"
+                        })
                         .desired_width(ui.available_width()),
                 );
             });

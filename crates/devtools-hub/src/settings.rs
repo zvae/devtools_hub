@@ -12,6 +12,14 @@ use crate::platform::panel::Placement;
 const SETTINGS_FILE: &str = "settings.json";
 pub const DATA_DIR_ENV: &str = "DEVTOOLS_HUB_DATA_DIR";
 
+/// 默认唤起快捷键。
+/// macOS 与 PasteNow 一致（偏好里 carbonKeyCode = 9, carbonModifiers = cmdKey|shiftKey）；
+/// Windows 上 Win+V 是系统剪贴板历史、Ctrl+Shift+V 常被用作“粘贴为纯文本”，因此用 Alt+Shift+V。
+#[cfg(target_os = "macos")]
+pub const DEFAULT_HOTKEY: &str = "Cmd+Shift+V";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_HOTKEY: &str = "Alt+Shift+V";
+
 /// 数据目录：默认 `~/Library/Application Support/DevToolsHub`，
 /// 可以用环境变量 `DEVTOOLS_HUB_DATA_DIR` 或 `--data-dir` 覆盖（开发调试时不污染真实数据）。
 pub fn resolve_data_dir(cli: Option<PathBuf>) -> Result<PathBuf> {
@@ -19,7 +27,8 @@ pub fn resolve_data_dir(cli: Option<PathBuf>) -> Result<PathBuf> {
         Some(dir) => dir,
         None => directories::BaseDirs::new()
             .context("找不到用户数据目录")?
-            .data_dir()
+            // macOS：~/Library/Application Support；Windows：%LOCALAPPDATA%（剪贴板数据不随漫游配置同步）。
+            .data_local_dir()
             .join("DevToolsHub"),
     };
     fs::create_dir_all(&dir).with_context(|| format!("创建数据目录失败：{}", dir.display()))?;
@@ -108,8 +117,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            // 与 PasteNow 默认值一致（偏好里 carbonKeyCode = 9, carbonModifiers = cmdKey|shiftKey）。
-            hotkey: "Cmd+Shift+V".to_string(),
+            hotkey: DEFAULT_HOTKEY.to_string(),
             poll_interval_ms: 500,
             paused: false,
             retention: Retention::default(),
