@@ -1,0 +1,38 @@
+[package]
+name = "devtools-hub"
+description = "DevTools Hub：类 PasteNow 的剪贴板历史管理器（Rust + egui）"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "devtools-hub"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+devtools-clipboard.workspace = true
+directories.workspace = true
+eframe.workspace = true
+egui.workspace = true
+global-hotkey.workspace = true
+image.workspace = true
+raw-window-handle.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tray-icon.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-core-graphics.workspace = true
+objc2-foundation.workspace = true
+winit.workspace = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
+tempfile.workspace = true

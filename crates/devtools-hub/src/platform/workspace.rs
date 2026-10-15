@@ -1,0 +1,47 @@
+//! 前台应用与系统打开操作。
+
+use devtools_clipboard::SourceApp;
+use objc2::rc::{autoreleasepool, Retained};
+use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+use objc2_foundation::{NSString, NSURL};
+
+/// 复制发生时的前台应用（PasteNow 同样在检测到变化时读取 `frontmostApplication`）。
+pub fn frontmost_app() -> SourceApp {
+    autoreleasepool(|_| {
+        NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|app| describe(&app))
+            .unwrap_or_default()
+    })
+}
+
+pub fn describe(app: &NSRunningApplication) -> SourceApp {
+    SourceApp {
+        bundle_id: app.bundleIdentifier().map(|s| s.to_string()),
+        name: app.localizedName().map(|s| s.to_string()),
+    }
+}
+
+/// 当前前台应用（排除自己），用于粘贴前把焦点还给它。
+pub fn frontmost_other_app() -> Option<Retained<NSRunningApplication>> {
+    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    (app.processIdentifier() != std::process::id() as i32).then_some(app)
+}
+
+pub fn open_url(url: &str) -> bool {
+    let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) else {
+        return false;
+    };
+    NSWorkspace::sharedWorkspace().openURL(&url)
+}
+
+pub fn reveal_path(path: &str) {
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+}
+
+pub fn open_path(path: &std::path::Path) {
+    let _ = std::process::Command::new("open").arg(path).spawn();
+}
