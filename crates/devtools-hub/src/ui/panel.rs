@@ -9,8 +9,8 @@ use devtools_clipboard::{
 };
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Key, Layout, Margin, Modifiers, Rect,
-    Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
+    Align, Align2, Color32, FontId, Frame, Id, Key, Layout, Margin, Modifiers, Rect, Response,
+    RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 
 use super::fonts;
@@ -23,7 +23,7 @@ use crate::{hotkey, keys, platform};
 const CARD_HEIGHT: f32 = 74.0;
 const FAVORITE_COLOR: Color32 = Color32::from_rgb(0xf5, 0xa6, 0x23);
 const CARD_GAP: f32 = 8.0;
-const SIDE: f32 = 12.0;
+const SIDE: f32 = style::PAD as f32;
 const QUERY_LIMIT: usize = 1000;
 /// 预览区最多显示的字符数，超长文本在 egui 里排版会明显变慢。
 const PREVIEW_MAX_CHARS: usize = 20_000;
@@ -172,17 +172,17 @@ impl HubApp {
         egui::Panel::top("header")
             .show_separator_line(false)
             .frame(Frame::NONE.inner_margin(Margin {
-                left: 12,
-                right: 12,
-                top: 12,
+                left: style::PAD,
+                right: style::PAD,
+                top: style::PAD,
                 bottom: 4,
             }))
             .show(ui, |ui| self.header(ui, &palette, &mut actions));
         egui::Panel::top("chips")
             .show_separator_line(false)
             .frame(Frame::NONE.inner_margin(Margin {
-                left: 12,
-                right: 8,
+                left: style::PAD,
+                right: style::PAD,
                 top: 4,
                 bottom: 8,
             }))
@@ -193,10 +193,10 @@ impl HubApp {
         egui::Panel::bottom("footer")
             .show_separator_line(false)
             .frame(Frame::NONE.inner_margin(Margin {
-                left: 10,
-                right: 10,
+                left: style::PAD,
+                right: style::PAD,
                 top: 4,
-                bottom: 6,
+                bottom: 8,
             }))
             .show(ui, |ui| self.footer(ui, &palette, &mut actions));
         egui::CentralPanel::default()
@@ -412,18 +412,23 @@ impl HubApp {
         } else {
             Stroke::new(1.0, palette.card_stroke)
         };
-        ui.painter()
-            .rect(rect, 8, palette.field, stroke, StrokeKind::Inside);
+        ui.painter().rect(
+            rect,
+            style::CAPSULE,
+            palette.field,
+            stroke,
+            StrokeKind::Inside,
+        );
         let icon_rect = Rect::from_center_size(
-            egui::pos2(rect.left() + 16.0, rect.center().y),
+            egui::pos2(rect.left() + 17.0, rect.center().y),
             Vec2::splat(14.0),
         );
         icons::paint(ui.painter(), icon_rect, Icon::Search, palette.weak);
         let edit_rect = Rect::from_min_max(
-            egui::pos2(rect.left() + 30.0, rect.top()),
-            egui::pos2(rect.right() - 8.0, rect.bottom()),
+            egui::pos2(rect.left() + 31.0, rect.top()),
+            egui::pos2(rect.right() - 14.0, rect.bottom()),
         );
-        // 用不推进布局光标的子 Ui 放输入框：`ui.put` 会把光标移到输入框右边缘（比外框靠左 8px），
+        // 用不推进布局光标的子 Ui 放输入框：`ui.put` 会把光标移到输入框右边缘（比外框靠左），
         // 右侧的设置按钮就会比左侧的固定按钮贴得更近。
         let mut edit_ui = ui.new_child(
             egui::UiBuilder::new()
@@ -481,7 +486,7 @@ impl HubApp {
                 egui::Popup::menu(&plus).show(|ui| {
                     ui.label(RichText::new("新建列表").strong());
                     let edit = ui.add(
-                        egui::TextEdit::singleline(&mut self.panel.new_list_name)
+                        style::text_field(&mut self.panel.new_list_name)
                             .hint_text("列表名称")
                             .desired_width(160.0),
                     );
@@ -632,20 +637,20 @@ impl HubApp {
         } else {
             palette.card
         };
-        painter.rect(
+        let radius = f32::from(style::CARD_RADIUS);
+        painter.add(style::continuous_rect(
             rect,
-            10,
+            radius,
             fill,
             Stroke::new(1.0, palette.card_stroke),
-            StrokeKind::Inside,
-        );
+        ));
         if selected {
-            painter.rect_stroke(
+            painter.add(style::continuous_rect(
                 rect,
-                10,
+                radius,
+                Color32::TRANSPARENT,
                 Stroke::new(2.0, palette.accent),
-                StrokeKind::Inside,
-            );
+            ));
         }
 
         // 左侧：来源应用图标；没有图标时显示类型徽标。
@@ -662,7 +667,7 @@ impl HubApp {
             Some(texture) => egui::Image::from_texture(&texture).paint_at(ui, icon_rect),
             None => {
                 let color = kind_color(item.kind);
-                painter.rect_filled(icon_rect, 8, color.gamma_multiply(0.16));
+                painter.rect_filled(icon_rect, style::SMALL_RADIUS, color.gamma_multiply(0.16));
                 icons::paint_centered(&painter, icon_rect, 16.0, kind_icon(item.kind), color);
             }
         }
@@ -711,7 +716,7 @@ impl HubApp {
                         size,
                     );
                     egui::Image::from_texture(&texture)
-                        .corner_radius(4)
+                        .corner_radius(style::SMALL_RADIUS)
                         .paint_at(ui, image_rect);
                 } else {
                     let text = item
@@ -795,7 +800,7 @@ impl HubApp {
         ui.menu_button("添加到列表", |ui| {
             for list in self.panel.lists.clone() {
                 let mut member = item.in_list(list.id);
-                if ui.checkbox(&mut member, &list.name).changed() {
+                if style::checkbox(ui, &mut member, &list.name).changed() {
                     actions.push(Action::SetInList {
                         item: item.id,
                         list: list.id,
@@ -806,7 +811,7 @@ impl HubApp {
             ui.separator();
             ui.horizontal(|ui| {
                 let edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.panel.new_list_name)
+                    style::text_field(&mut self.panel.new_list_name)
                         .hint_text("新列表名称")
                         .desired_width(120.0),
                 );
@@ -873,7 +878,7 @@ impl HubApp {
         };
 
         Frame::NONE
-            .inner_margin(Margin::symmetric(12, 0))
+            .inner_margin(Margin::symmetric(style::PAD, 0))
             .show(ui, |ui| {
                 let favorite = item.in_list(FAVORITES_LIST_ID);
                 centered_row(ui, 30.0, |ui| {
@@ -954,28 +959,32 @@ impl HubApp {
                             });
                         ui.add_space(8.0);
                         ui.columns(2, |columns| {
+                            // 按钮文字跟随所在布局的水平对齐，放进居中布局文字才居中。
                             let paste =
                                 egui::Button::new(RichText::new("粘贴").color(Color32::WHITE))
                                     .fill(palette.accent)
                                     .min_size(Vec2::new(columns[0].available_width(), 28.0));
-                            if columns[0].add(paste).on_hover_text(keys::RETURN).clicked() {
+                            let paste = columns[0].vertical_centered(|ui| ui.add(paste)).inner;
+                            if paste.on_hover_text(keys::RETURN).clicked() {
                                 actions.push(Action::Paste(item.id, PasteMode::Original));
                             }
                             let plain = egui::Button::new("以纯文本粘贴")
                                 .min_size(Vec2::new(columns[1].available_width(), 28.0));
                             let plain_keys = keys::shortcut(&[keys::SHIFT, keys::RETURN]);
-                            if columns[1].add(plain).on_hover_text(plain_keys).clicked() {
+                            let plain = columns[1].vertical_centered(|ui| ui.add(plain)).inner;
+                            if plain.on_hover_text(plain_keys).clicked() {
                                 actions.push(Action::Paste(item.id, PasteMode::PlainText));
                             }
                         });
                     });
 
-                Frame::new()
-                    .fill(palette.card)
-                    .stroke(Stroke::new(1.0, palette.card_stroke))
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(Margin::same(10))
-                    .show(ui, |ui| {
+                style::continuous_frame(
+                    ui,
+                    style::CARD_RADIUS,
+                    palette.card,
+                    Stroke::new(1.0, palette.card_stroke),
+                    Margin::same(10),
+                    |ui| {
                         ui.set_min_size(ui.available_size());
                         match item.kind {
                             ContentKind::Image => self.image_preview(ui, &item),
@@ -1009,7 +1018,8 @@ impl HubApp {
                                     });
                             }
                         }
-                    });
+                    },
+                );
             });
         self.panel.preview = Some(preview);
     }
@@ -1022,7 +1032,7 @@ impl HubApp {
                     ui.add(
                         egui::Image::from_texture(&texture)
                             .fit_to_exact_size(size)
-                            .corner_radius(6),
+                            .corner_radius(style::SMALL_RADIUS),
                     );
                 });
             }
@@ -1107,7 +1117,7 @@ pub(super) fn icon_button(ui: &mut Ui, icon: Icon, active: bool, palette: &Palet
         } else {
             palette.field
         };
-        ui.painter().rect_filled(rect, 7, fill);
+        ui.painter().rect_filled(rect, style::CAPSULE, fill);
     }
     let color = if active { palette.accent } else { palette.weak };
     icons::paint_centered(ui.painter(), rect, 15.0, icon, color);
@@ -1173,7 +1183,7 @@ pub(super) fn keycaps(ui: &mut Ui, keys: &[&str], palette: &Palette) -> Response
         let cap = Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(width, HEIGHT));
         ui.painter().rect(
             cap,
-            5,
+            style::SMALL_RADIUS,
             palette.card,
             Stroke::new(1.0, palette.border),
             StrokeKind::Inside,
@@ -1219,31 +1229,36 @@ fn chip(ui: &mut Ui, label: &str, selected: bool, palette: &Palette) -> Response
 }
 
 fn accessibility_banner(ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action>) {
-    Frame::NONE
-        .outer_margin(Margin {
-            left: 12,
-            right: 12,
-            top: 0,
-            bottom: 8,
-        })
-        .inner_margin(Margin::symmetric(10, 6))
-        .fill(palette.warn.gamma_multiply(0.14))
-        .corner_radius(CornerRadius::same(8))
-        .show(ui, |ui| {
-            centered_row(ui, 20.0, |ui| {
-                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-                icons::paint(ui.painter(), icon_rect, Icon::Warning, palette.warn);
-                let text = RichText::new("未授权“辅助功能”，只会复制到剪贴板")
-                    .color(palette.warn)
-                    .size(12.0);
-                ui.label(text);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.link(RichText::new("去授权").size(12.0)).clicked() {
-                        actions.push(Action::RequestAccessibility);
-                    }
+    let margin = Margin {
+        left: style::PAD,
+        right: style::PAD,
+        top: 0,
+        bottom: 8,
+    };
+    Frame::NONE.outer_margin(margin).show(ui, |ui| {
+        style::continuous_frame(
+            ui,
+            style::CARD_RADIUS,
+            palette.warn.gamma_multiply(0.14),
+            Stroke::NONE,
+            Margin::symmetric(12, 6),
+            |ui| {
+                centered_row(ui, 20.0, |ui| {
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                    icons::paint(ui.painter(), icon_rect, Icon::Warning, palette.warn);
+                    let text = RichText::new("未授权“辅助功能”，只会复制到剪贴板")
+                        .color(palette.warn)
+                        .size(12.0);
+                    ui.label(text);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.link(RichText::new("去授权").size(12.0)).clicked() {
+                            actions.push(Action::RequestAccessibility);
+                        }
+                    });
                 });
-            });
-        });
+            },
+        );
+    });
 }
 
 fn files_preview(ui: &mut Ui, text: &str, palette: &Palette, actions: &mut Vec<Action>) {

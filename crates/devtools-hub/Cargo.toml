@@ -3,6 +3,7 @@ name = "devtools-hub"
 description = "DevTools Hub：类 PasteNow 的剪贴板历史管理器（Rust + egui）"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 

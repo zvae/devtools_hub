@@ -17,6 +17,7 @@ use egui_kittest::Harness;
 use image::{ImageFormat, Rgba, RgbaImage};
 
 use super::{style, HubApp, Page};
+use crate::platform::Backdrop;
 use crate::selection::Selection;
 use crate::settings::Settings;
 use crate::shared::Shared;
@@ -254,9 +255,13 @@ fn snapshot_panel_and_settings() {
         assert_eq!(harness.state().page, Page::Settings);
         save(&mut harness, &format!("settings-{suffix}"));
         // 拉高窗口，检查整页设置的布局。
-        harness.set_size(egui::vec2(380.0, 1500.0));
+        harness.set_size(egui::vec2(380.0, 1900.0));
         harness.run_steps(3);
         save(&mut harness, &format!("settings-full-{suffix}"));
+        // 窗口背景是液态玻璃时多出“外观”分组（背景透明度滑块），底色变成半透明。
+        harness.state_mut().backdrop = Backdrop::Glass;
+        harness.run_steps(3);
+        save(&mut harness, &format!("settings-glass-{suffix}"));
     }
 }
 

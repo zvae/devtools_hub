@@ -1,28 +1,29 @@
 //! 浮动面板窗口控制。
 //!
 //! PasteNow 用自定义的 `NSPanel` 子类（`FloatPanel` / `PasteFloatPanel`）实现，
-//! 背景是 `NSVisualEffectView` 毛玻璃；从菜单栏点开时贴在状态栏图标下方
+//! 背景是 `NSVisualEffectView` 毛玻璃（这里在 macOS 26 起换成液态玻璃）；从菜单栏点开时贴在状态栏图标下方
 //! （日志 “The status item screen is: …, visible frame is: …”），用快捷键唤起时
 //! 根据 `NSEvent.mouseLocation` 找到鼠标所在的 `NSScreen` 定位。
 //! eframe 创建的是普通 `NSWindow`，这里直接通过原生 API 控制它：
 //! 显示时激活本应用并记住之前的前台应用，隐藏时把焦点还给它，再由调用方发送 ⌘V。
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use super::workspace;
-pub use crate::platform::{Anchor, Placement};
+pub use crate::platform::{Anchor, Backdrop, Placement};
 use anyhow::{bail, Context, Result};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::{AnyClass, AnyObject};
+use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSAutoresizingMaskOptions, NSEvent,
-    NSEventModifierFlags, NSEventType, NSRunningApplication, NSScreen, NSStatusWindowLevel, NSView,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode,
+    NSEventModifierFlags, NSEventType, NSGlassEffectView, NSGlassEffectViewStyle,
+    NSRunningApplication, NSScreen, NSStatusWindowLevel, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowOrderingMode,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 thread_local! {
@@ -31,9 +32,12 @@ thread_local! {
 }
 
 /// 窗口圆角半径，与 UI 中背景的圆角一致。
-pub const CORNER_RADIUS: f64 = 12.0;
+///
+/// 与 PasteNow 一致：它的面板是标题栏透明的普通窗口（`Titled | FullSizeContentView`），
+/// macOS 26 给这类窗口的圆角是 16pt（`NSWindow._cornerRadius`；带工具栏的窗口是 26pt）。
+pub const CORNER_RADIUS: f64 = 16.0;
 
-static VIBRANCY: AtomicBool = AtomicBool::new(false);
+static BACKDROP: OnceLock<Backdrop> = OnceLock::new();
 
 /// 绑定 eframe 创建的窗口，并设置成浮动面板的行为。必须在主线程调用。
 ///
@@ -59,51 +63,84 @@ pub fn attach(handle: &impl HasWindowHandle, start_hidden: bool) -> Result<()> {
         window.setAlphaValue(0.0);
     }
     let mtm = MainThreadMarker::from(&*window);
-    let vibrancy = install_vibrancy(mtm, &window);
-    VIBRANCY.store(vibrancy, Ordering::Relaxed);
+    let backdrop = install_backdrop(mtm, &window);
+    let _ = BACKDROP.set(backdrop);
     tracing::debug!(
-        "已绑定面板窗口 #{}，毛玻璃背景：{vibrancy}",
+        "已绑定面板窗口 #{}，背景材质：{backdrop:?}",
         window.windowNumber()
     );
     PANEL.with(|panel| *panel.borrow_mut() = Some(window));
     Ok(())
 }
 
-/// 在内容视图下方插入一个 `NSVisualEffectView` 作为毛玻璃背景。
+/// 在内容视图下方插入系统材质作为窗口背景：macOS 26 起是液态玻璃（`NSGlassEffectView`），
+/// 更早的系统是 `NSVisualEffectView` 毛玻璃。
 ///
 /// 不能替换 contentView（winit 依赖它），所以放在窗口框架视图里、位于内容视图之下；
-/// 窗口本身是透明的，egui 只画半透明的底色，背后的模糊效果就能透出来。
-fn install_vibrancy(mtm: MainThreadMarker, window: &NSWindow) -> bool {
+/// 窗口本身是透明的，egui 只画半透明的底色，背后的材质就能透出来。
+fn install_backdrop(mtm: MainThreadMarker, window: &NSWindow) -> Backdrop {
     let Some(content) = window.contentView() else {
-        return false;
+        return Backdrop::Opaque;
     };
     // SAFETY: 只读取父视图引用。
     let Some(frame_view) = (unsafe { content.superview() }) else {
-        return false;
+        return Backdrop::Opaque;
     };
-    let effect = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content.frame());
-    effect.setMaterial(NSVisualEffectMaterial::Popover);
-    effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-    effect.setState(NSVisualEffectState::Active);
-    effect.setAutoresizingMask(
+    // 旧系统上没有这个类，直接 alloc 会因找不到类而 panic，先在运行时查一下。
+    let (view, backdrop): (Retained<NSView>, _) = if AnyClass::get(c"NSGlassEffectView").is_some() {
+        let glass =
+            NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), content.frame());
+        glass.setStyle(NSGlassEffectViewStyle::Regular);
+        glass.setCornerRadius(CORNER_RADIUS);
+        (Retained::into_super(glass), Backdrop::Glass)
+    } else {
+        let effect =
+            NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), content.frame());
+        effect.setMaterial(NSVisualEffectMaterial::Popover);
+        effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        effect.setState(NSVisualEffectState::Active);
+        effect.setWantsLayer(true);
+        // SAFETY: setWantsLayer(true) 之后 layer 是 CALayer，这几个方法都存在
+        // （`cornerCurve` 从 macOS 10.15 起才有，先确认）。
+        unsafe {
+            let layer: Option<Retained<AnyObject>> = msg_send![&*effect, layer];
+            if let Some(layer) = layer {
+                let _: () = msg_send![&*layer, setCornerRadius: CORNER_RADIUS];
+                let _: () = msg_send![&*layer, setMasksToBounds: true];
+                let curve = sel!(setCornerCurve:);
+                let responds: bool = msg_send![&*layer, respondsToSelector: curve];
+                if responds {
+                    // `kCACornerCurveContinuous` 的值就是这个字符串。
+                    let continuous = NSString::from_str("continuous");
+                    let _: () = msg_send![&*layer, setCornerCurve: &*continuous];
+                }
+            }
+        }
+        (Retained::into_super(effect), Backdrop::Vibrancy)
+    };
+    view.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
-    effect.setWantsLayer(true);
-    // SAFETY: setWantsLayer(true) 之后 layer 是 CALayer，这两个方法都存在。
+    frame_view.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, Some(&content));
+    set_window_corner_radius(window);
+    window.invalidateShadow();
+    backdrop
+}
+
+/// 告诉系统窗口的圆角。
+///
+/// macOS 26 给前台（key）窗口画的阴影和描边按窗口自己的圆角生成，不看窗口内容的形状；
+/// 无边框窗口的这个值是系统默认的小圆角，面板在前台时四角外会露出一圈方形的阴影边。
+/// 没有公开 API，用私有的 `_setCornerRadius:`，旧系统上没有这个方法时什么也不做。
+fn set_window_corner_radius(window: &NSWindow) {
+    let selector = sel!(_setCornerRadius:);
+    // SAFETY: 先确认方法存在；参数是 CGFloat。
     unsafe {
-        let layer: Option<Retained<AnyObject>> = msg_send![&*effect, layer];
-        if let Some(layer) = layer {
-            let _: () = msg_send![&*layer, setCornerRadius: CORNER_RADIUS];
-            let _: () = msg_send![&*layer, setMasksToBounds: true];
+        let responds: bool = msg_send![window, respondsToSelector: selector];
+        if responds {
+            let _: () = msg_send![window, _setCornerRadius: CORNER_RADIUS];
         }
     }
-    frame_view.addSubview_positioned_relativeTo(
-        &effect,
-        NSWindowOrderingMode::Below,
-        Some(&content),
-    );
-    window.invalidateShadow();
-    true
 }
 
 /// 收起启动时被 eframe 显示出来的（透明）窗口，并恢复不透明度。
@@ -114,9 +151,9 @@ pub fn finish_startup_hide() {
     });
 }
 
-/// 是否成功启用了毛玻璃背景（UI 据此决定底色是否半透明）。
-pub fn has_vibrancy() -> bool {
-    VIBRANCY.load(Ordering::Relaxed)
+/// 窗口背景用的是哪种材质（UI 据此决定底色的不透明度）。
+pub fn backdrop() -> Backdrop {
+    BACKDROP.get().copied().unwrap_or_default()
 }
 
 fn with_panel<R>(f: impl FnOnce(MainThreadMarker, &NSWindow) -> R) -> Option<R> {

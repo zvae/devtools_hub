@@ -7,18 +7,24 @@ use egui::{Align, Align2, Color32, FontId, Key, Modifiers, Rect, Sense, Stroke, 
 
 use super::fonts;
 use super::icons::{self, Icon};
-use super::style::Palette;
+use super::style::{self, Palette};
 use super::HubApp;
 use crate::selection::Selection;
 use crate::tools::{self, QuickAction};
 
 const WIDTH: f32 = 300.0;
-/// 窗口内边距（与 `HubApp::draw` 中这一页的 inner_margin 一致）。
-const MARGIN: f32 = 6.0;
+/// 窗口内边距（`HubApp::draw` 中这一页的 inner_margin）。
+pub(super) const MARGIN: f32 = 6.0;
+/// 选中行的圆角：窗口圆角 16 − `MARGIN`，与窗口同心。
+const ROW_RADIUS: f32 = 10.0;
 const HEADER_HEIGHT: f32 = 46.0;
 const HINT_HEIGHT: f32 = 26.0;
 const ROW_HEIGHT: f32 = 40.0;
 const ROW_GAP: f32 = 2.0;
+/// 行内图标中心、文字起点与右侧提示到行边缘的距离；标题区与功能行共用，两者左右对齐。
+const ICON_CENTER: f32 = 22.0;
+const TEXT_LEFT: f32 = 44.0;
+const RIGHT_INSET: f32 = 14.0;
 
 #[derive(Default)]
 pub struct QuickPanelView {
@@ -94,7 +100,7 @@ impl HubApp {
             let (rect, _) = ui
                 .allocate_exact_size(Vec2::new(ui.available_width(), HINT_HEIGHT), Sense::hover());
             ui.painter().text(
-                rect.left_center() + Vec2::new(8.0, 0.0),
+                rect.left_center() + Vec2::new(TEXT_LEFT, 0.0),
                 Align2::LEFT_CENTER,
                 "没有能处理选中内容的功能",
                 FontId::proportional(12.0),
@@ -158,12 +164,12 @@ impl HubApp {
             ),
         };
         let icon_rect = Rect::from_center_size(
-            egui::pos2(rect.left() + 16.0, rect.center().y),
+            egui::pos2(rect.left() + ICON_CENTER, rect.center().y),
             Vec2::splat(16.0),
         );
         icons::paint(ui.painter(), icon_rect, icon, palette.weak);
-        let text_left = rect.left() + 34.0;
-        let width = rect.right() - text_left - 8.0;
+        let text_left = rect.left() + TEXT_LEFT;
+        let width = rect.right() - text_left - RIGHT_INSET;
         let title = ui.painter().layout_no_wrap(
             title,
             FontId::new(13.0, egui::FontFamily::Name(fonts::SEMIBOLD.into())),
@@ -184,7 +190,7 @@ impl HubApp {
             palette.weak,
         );
         ui.painter().hline(
-            rect.x_range().shrink(4.0),
+            rect.x_range().shrink(RIGHT_INSET),
             rect.bottom() - 0.5,
             Stroke::new(1.0, palette.card_stroke),
         );
@@ -212,15 +218,20 @@ fn action_row(
 ) {
     let painter = ui.painter();
     if selected {
-        painter.rect_filled(rect, 8, palette.accent.gamma_multiply(0.16));
+        painter.add(style::continuous_rect(
+            rect,
+            ROW_RADIUS,
+            palette.accent.gamma_multiply(0.16),
+            Stroke::NONE,
+        ));
     }
     let badge_rect = Rect::from_center_size(
-        egui::pos2(rect.left() + 22.0, rect.center().y),
+        egui::pos2(rect.left() + ICON_CENTER, rect.center().y),
         Vec2::splat(26.0),
     );
     paint_badge(ui, badge_rect, action, palette);
     painter.text(
-        egui::pos2(rect.left() + 44.0, rect.center().y),
+        egui::pos2(rect.left() + TEXT_LEFT, rect.center().y),
         Align2::LEFT_CENTER,
         action.label(),
         FontId::proportional(13.5),
@@ -234,7 +245,7 @@ fn action_row(
         String::new()
     };
     let right = painter.text(
-        egui::pos2(rect.right() - 12.0, rect.center().y),
+        egui::pos2(rect.right() - RIGHT_INSET, rect.center().y),
         Align2::RIGHT_CENTER,
         hint,
         FontId::proportional(12.0),
@@ -254,7 +265,7 @@ fn action_row(
         )
         .size()
         .x;
-    let space = right.left() - (rect.left() + 44.0 + label_width) - 20.0;
+    let space = right.left() - (rect.left() + TEXT_LEFT + label_width) - 20.0;
     if space > 40.0 {
         job.wrap = egui::text::TextWrapping::truncate_at_width(space);
         job.halign = Align::RIGHT;
@@ -272,7 +283,11 @@ pub(super) fn paint_badge(ui: &Ui, rect: Rect, action: QuickAction, palette: &Pa
     let painter = ui.painter();
     match action {
         QuickAction::JsonEditor => {
-            painter.rect_filled(rect, 6, Color32::from_rgb(0x3a, 0x3d, 0x46));
+            painter.rect_filled(
+                rect,
+                style::SMALL_RADIUS,
+                Color32::from_rgb(0x3a, 0x3d, 0x46),
+            );
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -282,7 +297,7 @@ pub(super) fn paint_badge(ui: &Ui, rect: Rect, action: QuickAction, palette: &Pa
             );
         }
         QuickAction::ClipboardHistory => {
-            painter.rect_filled(rect, 6, palette.accent);
+            painter.rect_filled(rect, style::SMALL_RADIUS, palette.accent);
             icons::paint_centered(
                 painter,
                 rect,
