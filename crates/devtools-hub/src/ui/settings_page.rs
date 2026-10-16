@@ -10,7 +10,7 @@ use super::icons::{self, Icon};
 use super::panel::{centered_row, icon_button, keycaps};
 use super::style::{self, Palette};
 use super::{HubApp, Page};
-use crate::platform::{keyboard, login_item, panel::Placement, workspace};
+use crate::platform::{keyboard, login_item, panel::Placement, workspace, Backdrop};
 use crate::settings::{Retention, Settings, POLL_INTERVALS};
 use crate::{hotkey, keys, platform};
 
@@ -59,12 +59,18 @@ impl HubApp {
         });
 
         let mut settings = self.settings.clone();
+        let mut open_repo = false;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 section(ui, &palette, "通用", |ui| {
                     self.general_section(ui, &palette, &mut settings)
                 });
+                if self.backdrop != Backdrop::Opaque {
+                    section(ui, &palette, "外观", |ui| {
+                        appearance_section(ui, &palette, &mut settings)
+                    });
+                }
                 section(ui, &palette, "粘贴", |ui| {
                     self.paste_section(ui, &palette, &mut settings)
                 });
@@ -82,15 +88,29 @@ impl HubApp {
                 });
                 section(ui, &palette, "数据", |ui| self.data_section(ui, &palette));
                 ui.add_space(10.0);
-                hint(
-                    ui,
-                    &palette,
-                    &format!(
-                        "DevTools Hub {} · 实现思路参考 PasteNow",
-                        env!("CARGO_PKG_VERSION")
-                    ),
-                );
+                // 与分组标题左对齐。
+                let margin = egui::Margin {
+                    left: 12,
+                    ..Default::default()
+                };
+                egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
+                    hint(
+                        ui,
+                        &palette,
+                        &format!(
+                            "DevTools Hub {} · 实现思路参考 PasteNow",
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                    );
+                    let link = RichText::new(format!("GitHub 仓库：{}", repo_label())).size(11.5);
+                    open_repo = ui.link(link).on_hover_text(REPOSITORY).clicked();
+                });
             });
+        if open_repo {
+            // 面板浮在其他窗口之上，打开浏览器后收起，免得挡住网页。
+            workspace::open_url(REPOSITORY);
+            self.hide_panel(false);
+        }
 
         if settings != self.settings {
             let hotkey_changed = settings.hotkey != self.settings.hotkey;
@@ -351,7 +371,7 @@ impl HubApp {
                     self.settings_view.manual_bundle_id.clear();
                 }
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.settings_view.manual_bundle_id)
+                    style::text_field(&mut self.settings_view.manual_bundle_id)
                         .hint_text(if cfg!(windows) {
                             "或输入程序名，如 KeePass.exe"
                         } else {
@@ -374,9 +394,7 @@ impl HubApp {
             divider(ui, palette);
             centered_row(ui, 28.0, |ui| match &mut self.settings_view.renaming {
                 Some((id, name)) if *id == list.id => {
-                    ui.add(
-                        egui::TextEdit::singleline(name).desired_width(ui.available_width() - 60.0),
-                    );
+                    ui.add(style::text_field(name).desired_width(ui.available_width() - 60.0));
                     if ui.button("保存").clicked() {
                         if let Err(err) = self.store.rename_list(list.id, name) {
                             self.settings_view.message = Some(format!("{err:#}"));
@@ -429,7 +447,7 @@ impl HubApp {
                     changed = true;
                 }
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.settings_view.new_list_name)
+                    style::text_field(&mut self.settings_view.new_list_name)
                         .hint_text("新列表名称")
                         .desired_width(ui.available_width()),
                 );
@@ -562,21 +580,61 @@ fn record_section(ui: &mut Ui, palette: &Palette, settings: &mut Settings) {
     hint(ui, palette, "0 表示不限制；列表中的条目不计入");
 }
 
+fn appearance_section(ui: &mut Ui, palette: &Palette, settings: &mut Settings) {
+    row(ui, "背景透明度", |ui| {
+        // 行是从右到左排的：先放数值（固定宽度，拖动时滑块不跟着挪），再放滑块。
+        let value = RichText::new(format!("{}%", settings.panel_transparency)).color(palette.weak);
+        ui.add_sized([34.0, 20.0], egui::Label::new(value));
+        ui.spacing_mut().slider_width = 150.0;
+        // 滑块会把圆角加到填充条的长度上，全局的胶囊圆角（255）会让填充条越界，换成轨道高度的一半。
+        let rail_radius = (ui.spacing().slider_rail_height / 2.0) as u8;
+        ui.visuals_mut().widgets.inactive.corner_radius = rail_radius.into();
+        ui.add(
+            egui::Slider::new(&mut settings.panel_transparency, 0..=100)
+                .show_value(false)
+                .trailing_fill(true),
+        );
+    });
+    hint(
+        ui,
+        palette,
+        "面板底色的透明度：越大越能透出背后的玻璃效果，越小文字越清晰",
+    );
+}
+
+/// 源代码仓库地址（来自 Cargo.toml 的 `repository`）。
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// 仓库地址去掉协议前缀，显示得短一些。
+fn repo_label() -> &'static str {
+    REPOSITORY.trim_start_matches("https://")
+}
+
 /// 分组标题 + 圆角卡片。
 fn section(ui: &mut Ui, palette: &Palette, title: &str, add_contents: impl FnOnce(&mut Ui)) {
     ui.add_space(12.0);
-    ui.label(RichText::new(title).size(12.0).color(palette.weak));
-    ui.add_space(2.0);
-    egui::Frame::new()
-        .fill(palette.card)
-        .stroke(Stroke::new(1.0, palette.card_stroke))
-        .corner_radius(10)
-        .inner_margin(egui::Margin::symmetric(12, 8))
+    // 标题与卡片内的文字左对齐（卡片内边距 12），和系统设置的分组样式一致。
+    egui::Frame::NONE
+        .inner_margin(egui::Margin {
+            left: 12,
+            ..Default::default()
+        })
         .show(ui, |ui| {
+            ui.label(RichText::new(title).size(12.0).color(palette.weak));
+        });
+    ui.add_space(2.0);
+    style::continuous_frame(
+        ui,
+        style::CARD_RADIUS,
+        palette.card,
+        Stroke::new(1.0, palette.card_stroke),
+        egui::Margin::symmetric(12, 8),
+        |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 4.0;
             add_contents(ui);
-        });
+        },
+    );
 }
 
 /// 左侧标签、右侧控件的一行。

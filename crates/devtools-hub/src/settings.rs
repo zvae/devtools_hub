@@ -118,6 +118,8 @@ pub struct Settings {
     /// JSON 编辑器窗口大小（逻辑像素）。
     pub json_editor_size: [f32; 2],
     pub json_indent: Indent,
+    /// 面板底色的透明度（0–100）。窗口背景是液态玻璃 / 毛玻璃时生效，越大越能透出背后的内容。
+    pub panel_transparency: u8,
 }
 
 impl Default for Settings {
@@ -137,6 +139,7 @@ impl Default for Settings {
             middle_click: true,
             json_editor_size: [760.0, 560.0],
             json_indent: Indent::default(),
+            panel_transparency: 60,
         }
     }
 }

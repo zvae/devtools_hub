@@ -19,7 +19,7 @@ use super::fonts;
 use super::icons::{self, Icon};
 use super::panel::{centered_row, icon_button};
 use super::quick_panel::paint_badge;
-use super::style::Palette;
+use super::style::{self, Palette};
 use super::HubApp;
 use crate::keys;
 use crate::platform::panel as native_panel;
@@ -140,19 +140,19 @@ impl HubApp {
         egui::Panel::top("json-header")
             .show_separator_line(false)
             .frame(Frame::NONE.inner_margin(Margin {
-                left: 12,
-                right: 10,
-                top: 8,
-                bottom: 6,
+                left: style::PAD,
+                right: style::PAD,
+                top: style::PAD,
+                bottom: 8,
             }))
             .show(ui, |ui| self.json_header(ui, &palette, &mut actions));
         egui::Panel::bottom("json-footer")
             .show_separator_line(false)
             .frame(Frame::NONE.inner_margin(Margin {
-                left: 10,
-                right: 10,
-                top: 6,
-                bottom: 8,
+                left: style::PAD,
+                right: style::PAD,
+                top: 8,
+                bottom: style::PAD,
             }))
             .show(ui, |ui| {
                 self.json_footer(ui, &palette, &status, &mut actions)
@@ -235,18 +235,23 @@ impl HubApp {
             } else {
                 Stroke::new(1.0, palette.card_stroke)
             };
-            ui.painter()
-                .rect(rect, 7, palette.field, stroke, egui::StrokeKind::Inside);
+            ui.painter().rect(
+                rect,
+                style::CAPSULE,
+                palette.field,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
             ui.painter().text(
-                egui::pos2(rect.left() + 10.0, rect.center().y),
+                egui::pos2(rect.left() + 14.0, rect.center().y),
                 Align2::LEFT_CENTER,
                 "this",
                 FontId::monospace(12.5),
                 palette.weak,
             );
             let edit_rect = Rect::from_min_max(
-                egui::pos2(rect.left() + 46.0, rect.top()),
-                egui::pos2(rect.right() - 8.0, rect.bottom()),
+                egui::pos2(rect.left() + 50.0, rect.top()),
+                egui::pos2(rect.right() - 14.0, rect.bottom()),
             );
             let mut edit_ui = ui.new_child(
                 egui::UiBuilder::new()
@@ -268,11 +273,12 @@ impl HubApp {
                     .desired_width(edit_rect.width()),
             );
         });
-        ui.add_space(4.0);
-        // 第二行：状态与操作按钮。
+        ui.add_space(6.0);
+        // 第二行：状态与操作按钮，和上面的输入框一样高。
         centered_row(ui, 28.0, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().interact_size.y = 28.0;
                 let alt = |key: &str| keys::shortcut(&[keys::ALT, key]);
                 if ui
                     .button("转义复制")

@@ -23,7 +23,7 @@ use devtools_clipboard::{uti, Snapshot, Store};
 
 use crate::hotkey::{self, HotkeyService};
 use crate::platform::pasteboard::Pasteboard;
-use crate::platform::{keyboard, panel as native_panel, Anchor, Placement};
+use crate::platform::{keyboard, panel as native_panel, Anchor, Backdrop, Placement};
 use crate::selection::{self, Selection};
 use crate::settings::Settings;
 use crate::shared::{AppEvent, Shared};
@@ -87,8 +87,8 @@ pub struct HubApp {
     toast: Option<Toast>,
     accessibility_ok: bool,
     was_focused: bool,
-    /// 窗口是否有原生毛玻璃背景（离屏渲染测试中没有）。
-    translucent: bool,
+    /// 窗口的原生背景材质（离屏渲染测试中是不透明的）。
+    backdrop: Backdrop,
     /// 第一帧之后需要把被 eframe 自动显示的窗口收起来。
     startup_hide_pending: bool,
 }
@@ -114,7 +114,7 @@ impl HubApp {
         if let Err(err) = native_panel::attach(cc, app.startup_hide_pending) {
             tracing::warn!("无法设置面板窗口：{err:#}");
         }
-        app.translucent = native_panel::has_vibrancy();
+        app.backdrop = native_panel::backdrop();
         match HotkeyService::new(shared.clone()) {
             Ok(mut service) => {
                 if let Err(err) = service.apply(&app.settings.hotkey) {
@@ -170,13 +170,17 @@ impl HubApp {
             toast: None,
             accessibility_ok: keyboard::accessibility_trusted(false),
             was_focused: false,
-            translucent: false,
+            backdrop: Backdrop::Opaque,
             startup_hide_pending: false,
         }
     }
 
     fn palette(&self, ctx: &egui::Context) -> Palette {
-        Palette::new(ctx.theme() == egui::Theme::Dark, self.translucent)
+        Palette::new(
+            ctx.theme() == egui::Theme::Dark,
+            self.backdrop,
+            self.settings.panel_transparency,
+        )
     }
 
     fn handle_events(&mut self) {
@@ -442,7 +446,7 @@ impl HubApp {
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(egui::Color32::from_black_alpha(200))
-                    .corner_radius(14)
+                    .corner_radius(style::CAPSULE)
                     .inner_margin(egui::Margin::symmetric(14, 7))
                     .show(ui, |ui| {
                         ui.label(
@@ -481,11 +485,11 @@ impl eframe::App for HubApp {
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        if self.translucent {
-            // 窗口透明（macOS 毛玻璃），圆角背景由 CentralPanel 的 Frame 绘制。
+        if self.backdrop != Backdrop::Opaque {
+            // 窗口透明（macOS 毛玻璃 / 液态玻璃），圆角背景在 `draw` 里绘制。
             [0.0; 4]
         } else {
-            Palette::new(visuals.dark_mode, false)
+            Palette::new(visuals.dark_mode, Backdrop::Opaque, 0)
                 .background
                 .to_normalized_gamma_f32()
         }
@@ -497,16 +501,24 @@ impl HubApp {
         let palette = self.palette(ui.ctx());
         let inner_margin = match self.page {
             Page::Panel | Page::JsonEditor => egui::Margin::ZERO,
-            Page::Settings => egui::Margin::same(14),
-            Page::QuickActions => egui::Margin::same(6),
+            Page::Settings => egui::Margin::same(style::PAD),
+            Page::QuickActions => egui::Margin::same(quick_panel::MARGIN as i8),
         };
-        let frame = egui::Frame::new()
-            .fill(palette.background)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(native_panel::CORNER_RADIUS as u8)
-            .inner_margin(inner_margin);
+        // 液态玻璃自带高光描边，不再叠一圈边框。
+        let border = if self.backdrop == Backdrop::Glass {
+            egui::Stroke::NONE
+        } else {
+            egui::Stroke::new(1.0, palette.border)
+        };
+        // 背景与系统窗口一样用连续曲率的圆角，与下面的液态玻璃 / 毛玻璃形状一致。
+        ui.painter().add(style::continuous_rect(
+            ui.max_rect(),
+            native_panel::CORNER_RADIUS as f32,
+            palette.background,
+            border,
+        ));
         egui::CentralPanel::default()
-            .frame(frame)
+            .frame(egui::Frame::NONE.inner_margin(inner_margin))
             .show(ui, |ui| match self.page {
                 Page::Panel => self.panel_ui(ui),
                 Page::Settings => self.settings_ui(ui),

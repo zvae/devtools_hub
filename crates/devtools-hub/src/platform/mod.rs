@@ -63,6 +63,18 @@ impl Placement {
     }
 }
 
+/// 面板窗口的背景材质，UI 据此决定底色的不透明度。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Backdrop {
+    /// 不透明底色（Windows、离屏渲染测试）。
+    #[default]
+    Opaque,
+    /// macOS 15 及更早：`NSVisualEffectView` 毛玻璃。
+    Vibrancy,
+    /// macOS 26 起：`NSGlassEffectView` 液态玻璃。
+    Glass,
+}
+
 /// 托盘图标在屏幕上的位置（物理像素，左上角为原点），来自托盘点击事件。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrayRect {

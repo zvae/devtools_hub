@@ -28,7 +28,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::workspace;
-pub use crate::platform::{Anchor, Placement};
+pub use crate::platform::{Anchor, Backdrop, Placement};
 
 /// egui 背景画成直角，圆角由 DWM 处理（Windows 11 上为系统圆角，Windows 10 为直角）。
 pub const CORNER_RADIUS: f64 = 0.0;
@@ -88,8 +88,8 @@ pub fn finish_startup_hide() {
 }
 
 /// Windows 上不使用毛玻璃背景（wgpu 的透明窗口在 Windows 上支持不稳定）。
-pub fn has_vibrancy() -> bool {
-    false
+pub fn backdrop() -> Backdrop {
+    Backdrop::Opaque
 }
 
 pub fn is_visible() -> bool {

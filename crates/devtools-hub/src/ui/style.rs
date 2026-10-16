@@ -1,15 +1,37 @@
-//! 字体、配色与格式化工具。
+//! 字体、配色、圆角与留白规范，以及格式化工具。
 
 use devtools_clipboard::ContentKind;
-use egui::{Color32, FontFamily, FontId, TextStyle, Theme};
+use egui::{Color32, FontFamily, FontId, Pos2, Rect, Shape, Stroke, TextStyle, Theme, Ui, Vec2};
 
 use super::fonts;
 use super::icons::Icon;
+use crate::platform::Backdrop;
+
+// 圆角与留白规范，参照 PasteNow（macOS 26 版）：面板窗口圆角 16pt，复制项卡片 15pt
+// （选中时 2pt 强调色描边），圆角曲线都是连续曲率（`kCACornerCurveContinuous`，见 [`continuous_rect`]）。
+// 全应用只用下面几档：
+// - 窗口 16（`panel::CORNER_RADIUS`），内容离窗口边缘 `PAD` = 8；
+// - 复制项卡片、预览卡片、设置分组、提示横幅：`CARD_RADIUS`；
+// - 按钮、输入框、分类标签、图标按钮：胶囊形 `CAPSULE`；
+// - 菜单与提示框 `MENU_RADIUS`，与窗口相同；菜单项是 24 高的胶囊，离外框 `MENU_MARGIN`，与外框同心；
+// - 键帽、功能徽标、缩略图、复选框等小元素：`SMALL_RADIUS`。
+
+/// 窗口内容到窗口边缘的留白。
+pub const PAD: i8 = 8;
+/// 卡片、分组：PasteNow 复制项卡片的圆角。
+pub const CARD_RADIUS: u8 = 15;
+/// 胶囊形：绘制时圆角会被限制为短边的一半。
+pub const CAPSULE: u8 = u8::MAX;
+/// 菜单、下拉列表与提示框的圆角（`MENU_MARGIN` + 菜单项高度的一半）。
+pub const MENU_RADIUS: u8 = 16;
+pub const MENU_MARGIN: i8 = 4;
+/// 键帽、功能徽标、缩略图、复选框等小元素。
+pub const SMALL_RADIUS: u8 = 6;
 
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts::definitions());
     for theme in [Theme::Light, Theme::Dark] {
-        let palette = Palette::new(theme == Theme::Dark, false);
+        let palette = Palette::new(theme == Theme::Dark, Backdrop::Opaque, 0);
         ctx.style_mut_of(theme, |style| {
             // 字号与 macOS 系统界面接近：正文 13，小字 11。
             style.text_styles = [
@@ -24,14 +46,17 @@ pub fn install(ctx: &egui::Context) {
             ]
             .into();
             style.spacing.item_spacing = egui::vec2(6.0, 6.0);
-            style.spacing.button_padding = egui::vec2(10.0, 4.0);
+            // macOS 26 标准控件（`NSButton`、`NSPopUpButton`）高 24pt，菜单项也按这个高度。
+            style.spacing.interact_size.y = 24.0;
+            style.spacing.button_padding = egui::vec2(12.0, 4.0);
+            style.spacing.menu_margin = egui::Margin::same(MENU_MARGIN);
             style.interaction.selectable_labels = true;
             let visuals = &mut style.visuals;
             visuals.selection.bg_fill = palette.accent.gamma_multiply(0.35);
             visuals.selection.stroke.color = palette.accent;
             visuals.hyperlink_color = palette.accent;
-            visuals.window_corner_radius = 10.into();
-            visuals.menu_corner_radius = 8.into();
+            visuals.window_corner_radius = MENU_RADIUS.into();
+            visuals.menu_corner_radius = MENU_RADIUS.into();
             for widget in [
                 &mut visuals.widgets.inactive,
                 &mut visuals.widgets.hovered,
@@ -39,13 +64,116 @@ pub fn install(ctx: &egui::Context) {
                 &mut visuals.widgets.open,
                 &mut visuals.widgets.noninteractive,
             ] {
-                widget.corner_radius = 6.into();
+                widget.corner_radius = CAPSULE.into();
             }
         });
     }
 }
 
-/// 面板配色。开启毛玻璃时底色半透明，让背后的模糊效果透出来。
+/// 单行输入框。控件是胶囊形，左右留出半个圆角，文字不会贴到弧线上。
+pub fn text_field(text: &mut String) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(text).margin(egui::Margin::symmetric(10, 4))
+}
+
+/// 复选框用小圆角（全局控件是胶囊形，复选框会变成圆形）。
+pub fn checkbox(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> egui::Response {
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        for widget in [
+            &mut widgets.inactive,
+            &mut widgets.hovered,
+            &mut widgets.active,
+        ] {
+            widget.corner_radius = (SMALL_RADIUS / 2).into();
+        }
+        ui.checkbox(checked, text)
+    })
+    .inner
+}
+
+/// 连续曲率的圆角矩形（macOS 的 `kCACornerCurveContinuous`，系统窗口和 PasteNow 都用它）。
+///
+/// 普通圆角是一段圆弧，直边和圆弧交界处曲率突变；连续曲率的圆角从离角 1.53r 处就开始弯，
+/// 曲率逐渐变化，看起来更柔和。这里用 iOS 7 起圆角矩形常用的三段三次贝塞尔近似。
+/// 描边画在矩形内侧（与 `StrokeKind::Inside` 一致）。
+pub fn continuous_rect(rect: Rect, radius: f32, fill: Color32, stroke: Stroke) -> Shape {
+    if radius < 0.5 {
+        let shape = egui::epaint::RectShape::new(rect, 0, fill, stroke, egui::StrokeKind::Inside);
+        return Shape::Rect(shape);
+    }
+    // 描边以轮廓为中线，轮廓内缩半个线宽，描边就落在原矩形之内。
+    let rect = rect.shrink(stroke.width / 2.0);
+    // 每个角从离角 a 处开始弯：(a, b) 是相对角点、沿进入边和离开边的距离。
+    const START: f32 = 1.528_664_8;
+    const CURVES: [[(f32, f32); 3]; 3] = [
+        [(1.088_493, 0.0), (0.868_407, 0.0), (0.631_494, 0.074_911)],
+        [
+            (0.372_824, 0.169_059),
+            (0.169_059, 0.372_824),
+            (0.074_911, 0.631_494),
+        ],
+        [(0.0, 0.868_407), (0.0, 1.088_493), (0.0, START)],
+    ];
+    let radius = radius.min(rect.width().min(rect.height()) / 2.0 / START);
+    let steps = (radius / 2.0).ceil().clamp(2.0, 8.0) as usize;
+    // 顺时针依次处理右上、右下、左下、左上四个角：角点、指回进入边的方向、沿离开边的方向。
+    let corners = [
+        (rect.right_top(), Vec2::new(-1.0, 0.0), Vec2::new(0.0, 1.0)),
+        (
+            rect.right_bottom(),
+            Vec2::new(0.0, -1.0),
+            Vec2::new(-1.0, 0.0),
+        ),
+        (
+            rect.left_bottom(),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(0.0, -1.0),
+        ),
+        (rect.left_top(), Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0)),
+    ];
+    let mut points = Vec::with_capacity(4 * (1 + 3 * steps));
+    for (corner, back, forward) in corners {
+        let at = |(a, b): (f32, f32)| corner + back * (a * radius) + forward * (b * radius);
+        let mut start = at((START, 0.0));
+        points.push(start);
+        for [c1, c2, end] in CURVES {
+            let (c1, c2, end) = (at(c1), at(c2), at(end));
+            for step in 1..=steps {
+                let t = step as f32 / steps as f32;
+                let u = 1.0 - t;
+                let point = start.to_vec2() * (u * u * u)
+                    + c1.to_vec2() * (3.0 * u * u * t)
+                    + c2.to_vec2() * (3.0 * u * t * t)
+                    + end.to_vec2() * (t * t * t);
+                points.push(Pos2::ZERO + point);
+            }
+            start = end;
+        }
+    }
+    Shape::convex_polygon(points, fill, stroke)
+}
+
+/// 背景是连续曲率圆角矩形的 `Frame`：先占位，内容画完知道大小后再补上背景。
+pub fn continuous_frame<R>(
+    ui: &mut Ui,
+    radius: u8,
+    fill: Color32,
+    stroke: Stroke,
+    inner_margin: egui::Margin,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let background = ui.painter().add(Shape::Noop);
+    let inner = egui::Frame::NONE
+        .inner_margin(inner_margin)
+        .show(ui, add_contents);
+    ui.painter().set(
+        background,
+        continuous_rect(inner.response.rect, f32::from(radius), fill, stroke),
+    );
+    inner
+}
+
+/// 面板配色。窗口背景是毛玻璃或液态玻璃时底色半透明，让背后的材质透出来。
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub accent: Color32,
@@ -64,17 +192,20 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn new(dark: bool, translucent: bool) -> Self {
+    /// `transparency`：设置中的背景透明度（0–100），窗口背景是系统材质时才生效。
+    pub fn new(dark: bool, backdrop: Backdrop, transparency: u8) -> Self {
         let accent = Color32::from_rgb(0x30, 0x7b, 0xf6);
+        let alpha = match backdrop {
+            Backdrop::Opaque => 255,
+            Backdrop::Vibrancy | Backdrop::Glass => {
+                (255.0 * (1.0 - f32::from(transparency.min(100)) / 100.0)).round() as u8
+            }
+        };
+        let (dark_alpha, light_alpha) = (alpha, alpha);
         if dark {
             Self {
                 accent,
-                background: Color32::from_rgba_unmultiplied(
-                    30,
-                    30,
-                    32,
-                    if translucent { 150 } else { 255 },
-                ),
+                background: Color32::from_rgba_unmultiplied(30, 30, 32, dark_alpha),
                 border: Color32::from_white_alpha(30),
                 text: Color32::from_rgb(0xf2, 0xf2, 0xf7),
                 weak: Color32::from_rgb(0x98, 0x98, 0x9f),
@@ -89,12 +220,7 @@ impl Palette {
         } else {
             Self {
                 accent,
-                background: Color32::from_rgba_unmultiplied(
-                    246,
-                    246,
-                    248,
-                    if translucent { 160 } else { 255 },
-                ),
+                background: Color32::from_rgba_unmultiplied(246, 246, 248, light_alpha),
                 border: Color32::from_black_alpha(24),
                 text: Color32::from_rgb(0x1d, 0x1d, 0x1f),
                 weak: Color32::from_rgb(0x86, 0x86, 0x8b),
