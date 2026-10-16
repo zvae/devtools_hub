@@ -11,7 +11,7 @@ use crate::settings::Settings;
 use crate::update::UpdateState;
 
 /// 从热键、菜单栏发往 UI 的事件。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEvent {
     /// 面板刚刚显示：重置搜索、刷新列表、聚焦搜索框。
     PanelShown,
@@ -25,6 +25,8 @@ pub enum AppEvent {
     UpdateChanged,
     /// 点击了托盘菜单的“发现新版本”：设置页滚动到底部的更新信息。
     RevealUpdate,
+    /// 在面板的原生右键菜单里选中了一项，值是菜单项 id。
+    MenuCommand(String),
 }
 
 /// 监听线程需要的配置快照。

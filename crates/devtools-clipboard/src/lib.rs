@@ -4,6 +4,7 @@ pub mod codec;
 pub mod model;
 pub mod rules;
 pub mod store;
+pub mod styled;
 pub mod thumbnail;
 pub mod uti;
 pub mod windows_formats;

@@ -1,3 +1,67 @@
+# Rust / Cargo
 /target
-.DS_Store
+**/target/
+**/*.rs.bk
+*.pdb
+
+# 构建产物
 /dist
+/out
+/build
+*.dmg
+*.app
+*.zip
+*.tar.gz
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+.directory
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+.fleet/
+.zed/
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+*.orig
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+
+# 测试与性能分析
+*.profraw
+*.profdata
+flamegraph.svg
+perf.data*
+**/tests/snapshots/*.snap.new
+**/*.pending-snap
+
+# 本地 AI 工具目录
+.workbuddy/
+.claude/settings.local.json

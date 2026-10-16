@@ -3,15 +3,16 @@
 //! 采用 macOS 偏好设置常见的“左侧标签、右侧控件”行布局，布尔项使用开关。
 
 use devtools_clipboard::{ClipList, ExcludedApp, SourceApp, Store, StoreStats, FAVORITES_LIST_ID};
-use egui::{Align, Color32, Key, Layout, Response, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Align, Color32, Key, Layout, Rect, Response, RichText, Sense, Stroke, Ui, Vec2};
 
 use super::fonts;
+use super::glass;
 use super::icons::{self, Icon};
-use super::panel::{centered_row, icon_button, keycaps};
+use super::panel::{centered_row, drag_window, glass_tint, icon_button, keycaps, tab_label};
 use super::style::{self, Palette};
 use super::{HubApp, Page};
 use crate::platform::{keyboard, login_item, panel::Placement, workspace, Backdrop};
-use crate::settings::{Retention, Settings, POLL_INTERVALS};
+use crate::settings::{Retention, Settings, Tab, POLL_INTERVALS};
 use crate::update::{self, Install, Release, Status, REPOSITORY};
 use crate::{hotkey, keys, platform};
 
@@ -29,6 +30,10 @@ pub struct SettingsView {
     message: Option<String>,
     /// 下一帧滚动到底部的更新信息（从菜单栏的“发现新版本”打开设置时）。
     pub reveal_update: bool,
+    /// 下一帧滚动到“分类标签”分组（从面板的“编辑分类标签…”打开设置时）。
+    pub reveal_tabs: bool,
+    /// 浮在内容上面的标题栏的高度（上一帧量出来的）。
+    header_height: f32,
 }
 
 impl SettingsView {
@@ -47,25 +52,25 @@ impl HubApp {
         let palette = self.palette(ui.ctx());
         let escape = !self.settings_view.recording_hotkey
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
-        centered_row(ui, 30.0, |ui| {
-            if icon_button(ui, Icon::Back, false, &palette).clicked() || escape {
-                self.cancel_hotkey_recording();
-                self.page = Page::Panel;
-                self.panel.reset_for_show();
-            }
-            ui.label(
-                RichText::new("设置")
-                    .size(15.0)
-                    .family(egui::FontFamily::Name(fonts::SEMIBOLD.into()))
-                    .color(palette.text),
-            );
-        });
-
+        // 标题栏浮在内容上面（与面板的顶部栏一样是玻璃，见 `glass`）：内容从窗口顶部开始，
+        // 上面留出标题栏的高度（上一帧量出来的），滚到标题栏下面的部分不直接画。
+        let window = ui.max_rect().expand(f32::from(style::PAD));
+        let top = self.settings_view.header_height;
+        let area = ui.max_rect();
         let mut settings = self.settings.clone();
         let mut open_url = None;
+        let mut source = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .scroll_bar_rect(area.with_min_y(window.top() + top))
             .show(ui, |ui| {
+                let clip = ui
+                    .clip_rect()
+                    .intersect(Rect::everything_below(window.top() + top));
+                ui.set_clip_rect(clip);
+                let layer = ui.layer_id();
+                let start = glass::Source::shape_count(ui.ctx(), layer);
+                ui.add_space((top - (area.top() - window.top()) - 12.0).max(0.0));
                 section(ui, &palette, "通用", |ui| {
                     self.general_section(ui, &palette, &mut settings)
                 });
@@ -86,6 +91,14 @@ impl HubApp {
                 section(ui, &palette, "隐私与排除规则", |ui| {
                     self.rules_section(ui, &palette, &mut settings)
                 });
+                let tabs = section(ui, &palette, "分类标签", |ui| {
+                    self.tabs_section(ui, &palette, &mut settings)
+                });
+                if std::mem::take(&mut self.settings_view.reveal_tabs) {
+                    // 滚到标题栏下面露出来的位置，而不是被标题栏挡住的视口顶部。
+                    let rect = tabs.rect.with_min_y(tabs.rect.top() - top - 8.0);
+                    ui.scroll_to_rect(rect, Some(Align::Min));
+                }
                 section(ui, &palette, "列表", |ui| {
                     self.lists_section(ui, &palette)
                 });
@@ -102,7 +115,16 @@ impl HubApp {
                 if std::mem::take(&mut self.settings_view.reveal_update) {
                     about.response.scroll_to_me(Some(Align::Max));
                 }
+                let end = glass::Source::shape_count(ui.ctx(), layer);
+                source = Some(glass::Source {
+                    layer,
+                    shapes: start..end,
+                });
             });
+        if let Some(liquid) = &self.liquid {
+            liquid.capture(ui.ctx(), source.as_ref(), window, palette.background);
+        }
+        self.settings_header(ui, &palette, window, source.as_ref(), escape);
         if let Some(url) = open_url {
             // 面板浮在其他窗口之上，打开浏览器后收起，免得挡住网页。
             workspace::open_url(&url);
@@ -118,6 +140,61 @@ impl HubApp {
             self.persist_settings();
             self.sync_middle_click();
         }
+    }
+
+    /// 浮在内容上面的标题栏：返回按钮与“设置”。
+    fn settings_header(
+        &mut self,
+        ui: &mut Ui,
+        palette: &Palette,
+        window: Rect,
+        source: Option<&glass::Source>,
+        escape: bool,
+    ) {
+        egui::Area::new(ui.id().with("settings-header"))
+            .order(egui::Order::Middle)
+            .fixed_pos(window.min)
+            .constrain(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_width(window.width());
+                let bar = glass::Bar::begin(ui.painter());
+                let last = Rect::from_min_size(
+                    window.min,
+                    Vec2::new(window.width(), self.settings_view.header_height),
+                );
+                drag_window(ui, last);
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin {
+                        left: style::PAD,
+                        right: style::PAD,
+                        top: style::PAD,
+                        bottom: 6,
+                    })
+                    .show(ui, |ui| {
+                        centered_row(ui, 30.0, |ui| {
+                            if icon_button(ui, Icon::Back, false, palette).clicked() || escape {
+                                self.cancel_hotkey_recording();
+                                self.page = Page::Panel;
+                                self.panel.reset_for_show();
+                            }
+                            ui.label(
+                                RichText::new("设置")
+                                    .size(15.0)
+                                    .family(egui::FontFamily::Name(fonts::SEMIBOLD.into()))
+                                    .color(palette.text),
+                            );
+                        });
+                    });
+                let height = ui.min_rect().bottom() - window.top();
+                let rect = Rect::from_min_size(window.min, Vec2::new(window.width(), height));
+                let liquid = self.liquid.as_ref().map(|liquid| (liquid, 0));
+                let tint = glass_tint(palette, liquid.is_some());
+                bar.finish(ui.painter(), rect, glass::Edge::Top, source, tint, liquid);
+                if (height - self.settings_view.header_height).abs() > 0.5 {
+                    self.settings_view.header_height = height;
+                    ui.ctx().request_discard("标题栏的高度变了");
+                }
+            });
     }
 
     /// 离开设置页时若仍在录制，恢复原快捷键的注册。
@@ -196,7 +273,7 @@ impl HubApp {
             }
         }
         if let Some(error) = &self.hotkey_error {
-            ui.label(RichText::new(error).color(palette.warn).size(11.5));
+            ui.label(hint_text(error.clone(), palette.warn));
         }
         divider(ui, palette);
         row(ui, "出现位置", |ui| {
@@ -284,11 +361,7 @@ impl HubApp {
                 hint(ui, palette, &format!("已是最新版本{checked}"));
             }
             Status::Failed(error) => {
-                ui.label(
-                    RichText::new(format!("检查更新失败：{error}"))
-                        .size(11.5)
-                        .color(palette.warn),
-                );
+                ui.label(hint_text(format!("检查更新失败：{error}"), palette.warn));
             }
             Status::Available(release) => {
                 ui.label(
@@ -353,11 +426,7 @@ impl HubApp {
                 return;
             }
             Some(Install::Failed(error)) => {
-                ui.label(
-                    RichText::new(format!("自动更新失败：{error}"))
-                        .size(11.5)
-                        .color(palette.warn),
-                );
+                ui.label(hint_text(format!("自动更新失败：{error}"), palette.warn));
             }
             None => {}
         }
@@ -573,6 +642,74 @@ impl HubApp {
         });
     }
 
+    /// 面板顶部分类标签的显示与顺序。
+    fn tabs_section(&mut self, ui: &mut Ui, palette: &Palette, settings: &mut Settings) {
+        hint(
+            ui,
+            palette,
+            "“全部”固定在最前面；新建的列表会显示在最后。在面板上右键标签也可以隐藏",
+        );
+        let lists = &self.settings_view.lists;
+        let list_ids: Vec<i64> = lists.iter().map(|list| list.id).collect();
+        let mut tabs = settings.ordered_tabs(&list_ids);
+        let count = tabs.len();
+        let mut changed = false;
+        let mut swap = None;
+        for (index, setting) in tabs.iter_mut().enumerate() {
+            let Some(label) = tab_label(setting.tab, lists) else {
+                continue;
+            };
+            divider(ui, palette);
+            let label = label.trim_start_matches("★ ").to_string();
+            centered_row(ui, 30.0, |ui| {
+                let icon = match setting.tab {
+                    Tab::Text => Icon::Document,
+                    Tab::Link => Icon::Link,
+                    Tab::Image => Icon::Image,
+                    Tab::Files => Icon::Folder,
+                    Tab::List(FAVORITES_LIST_ID) => Icon::StarFilled,
+                    Tab::List(_) => Icon::List,
+                };
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                icons::paint(ui.painter(), icon_rect, icon, palette.weak);
+                let color = if setting.visible {
+                    palette.text
+                } else {
+                    palette.weak
+                };
+                ui.label(RichText::new(label).color(color));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    changed |= toggle(ui, &mut setting.visible, palette).changed();
+                    ui.add_space(4.0);
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let down = ui
+                        .add_enabled_ui(index + 1 < count, |ui| {
+                            icon_button(ui, Icon::ChevronDown, false, palette)
+                        })
+                        .inner;
+                    if down.on_hover_text("下移").clicked() {
+                        swap = Some((index, index + 1));
+                    }
+                    let up = ui
+                        .add_enabled_ui(index > 0, |ui| {
+                            icon_button(ui, Icon::ChevronUp, false, palette)
+                        })
+                        .inner;
+                    if up.on_hover_text("上移").clicked() {
+                        swap = Some((index - 1, index));
+                    }
+                });
+            });
+        }
+        if let Some((a, b)) = swap {
+            tabs.swap(a, b);
+            changed = true;
+        }
+        if changed {
+            settings.tabs = tabs;
+        }
+    }
+
     fn lists_section(&mut self, ui: &mut Ui, palette: &Palette) {
         hint(
             ui,
@@ -600,11 +737,7 @@ impl HubApp {
                         icons::paint(ui.painter(), icon_rect, Icon::StarFilled, palette.weak);
                     }
                     ui.label(RichText::new(&list.name).color(palette.text));
-                    ui.label(
-                        RichText::new(format!("{} 条", list.item_count))
-                            .color(palette.weak)
-                            .size(11.5),
-                    );
+                    ui.label(hint_text(format!("{} 条", list.item_count), palette.weak));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if list.id != FAVORITES_LIST_ID
                             && icon_button(ui, Icon::Close, false, palette)
@@ -694,7 +827,7 @@ impl HubApp {
             hint(ui, palette, "清空后无法恢复；列表中的条目会保留");
         }
         if let Some(message) = &self.settings_view.message {
-            ui.label(RichText::new(message).color(palette.weak).size(11.5));
+            ui.label(hint_text(message.clone(), palette.weak));
         }
     }
 }
@@ -719,11 +852,10 @@ fn middle_click_section(ui: &mut Ui, palette: &Palette, settings: &mut Settings)
         if keyboard::accessibility_trusted(false) {
             hint(ui, palette, "开启后，中键点击不会再传给前台应用");
         } else {
-            ui.label(
-                RichText::new("需要“辅助功能”权限才能监听鼠标中键和读取选中的内容")
-                    .color(palette.warn)
-                    .size(11.5),
-            );
+            ui.label(hint_text(
+                "需要“辅助功能”权限才能监听鼠标中键和读取选中的内容",
+                palette.warn,
+            ));
         }
     }
 }
@@ -797,20 +929,33 @@ fn repo_label() -> &'static str {
     REPOSITORY.trim_start_matches("https://")
 }
 
-/// 分组标题 + 圆角卡片。
-fn section(ui: &mut Ui, palette: &Palette, title: &str, add_contents: impl FnOnce(&mut Ui)) {
+/// 分组标题 + 圆角卡片，返回整个分组的响应（用于滚动到这个分组）。
+fn section(
+    ui: &mut Ui,
+    palette: &Palette,
+    title: &str,
+    add_contents: impl FnOnce(&mut Ui),
+) -> Response {
     ui.add_space(12.0);
     // 标题与卡片内的文字左对齐（卡片内边距 12），和系统设置的分组样式一致。
-    egui::Frame::NONE
+    let heading = egui::Frame::NONE
         .inner_margin(egui::Margin {
             left: 12,
             ..Default::default()
         })
         .show(ui, |ui| {
-            ui.label(RichText::new(title).size(12.0).color(palette.weak));
-        });
+            // 分组标题用小号中粗：与行标题（13、常规、主文字色）拉开层次，
+            // 和系统设置里分组标题的写法一致。
+            ui.label(
+                RichText::new(title)
+                    .size(style::TEXT_SECTION)
+                    .family(egui::FontFamily::Name(fonts::SEMIBOLD.into()))
+                    .color(palette.weak),
+            );
+        })
+        .response;
     ui.add_space(2.0);
-    style::continuous_frame(
+    let card = style::continuous_frame(
         ui,
         style::CARD_RADIUS,
         palette.card,
@@ -821,7 +966,9 @@ fn section(ui: &mut Ui, palette: &Palette, title: &str, add_contents: impl FnOnc
             ui.spacing_mut().item_spacing.y = 4.0;
             add_contents(ui);
         },
-    );
+    )
+    .response;
+    heading.union(card)
 }
 
 /// 左侧标签、右侧控件的一行。
@@ -859,8 +1006,16 @@ fn switch_row(ui: &mut Ui, palette: &Palette, label: &str, value: &mut bool) -> 
     changed
 }
 
+/// 说明文字：比正文小一号，行距放宽（中文换行时更舒展）。
 fn hint(ui: &mut Ui, palette: &Palette, text: &str) {
-    ui.label(RichText::new(text).size(11.5).color(palette.weak));
+    ui.label(hint_text(text, palette.weak));
+}
+
+fn hint_text(text: impl Into<String>, color: Color32) -> RichText {
+    RichText::new(text)
+        .size(style::TEXT_HINT)
+        .line_height(Some(style::HINT_LINE_HEIGHT))
+        .color(color)
 }
 
 fn divider(ui: &mut Ui, palette: &Palette) {

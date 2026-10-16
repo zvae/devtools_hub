@@ -13,7 +13,7 @@ use crate::platform::Backdrop;
 // - 窗口 16（`panel::CORNER_RADIUS`），内容离窗口边缘 `PAD` = 8；
 // - 复制项卡片、预览卡片、设置分组、提示横幅：`CARD_RADIUS`；
 // - 按钮、输入框、分类标签、图标按钮：胶囊形 `CAPSULE`；
-// - 菜单与提示框 `MENU_RADIUS`，与窗口相同；菜单项是 24 高的胶囊，离外框 `MENU_MARGIN`，与外框同心；
+// - 菜单与提示框 `MENU_RADIUS`，与窗口相同；菜单项是 24 高的胶囊，离外框 `MENU_MARGIN`，与外框同心（见 `menu`）；
 // - 键帽、功能徽标、缩略图、复选框等小元素：`SMALL_RADIUS`。
 
 /// 窗口内容到窗口边缘的留白。
@@ -27,6 +27,19 @@ pub const MENU_RADIUS: u8 = 16;
 pub const MENU_MARGIN: i8 = 4;
 /// 键帽、功能徽标、缩略图、复选框等小元素。
 pub const SMALL_RADIUS: u8 = 6;
+
+// 字号规范，全应用只用下面几档：
+// - 页面标题 15（`FontFamily::Name(SEMIBOLD)`），分组标题 12；
+// - 行标题与正文 13（`TextStyle::Body`）；
+// - 说明文字与链接 11.5。
+/// 分组标题（设置页各分组的“通用”“粘贴”等）。
+pub const TEXT_SECTION: f32 = 12.0;
+/// 说明文字与链接。
+pub const TEXT_HINT: f32 = 11.5;
+/// 说明文字的行距。egui 按字体族的主字体（SF Pro，约 1.18em）逐个行框排行，
+/// 中文字形比西文高（苹方约 1.4em），默认行距下中文换行会挤在一起；
+/// 这里给到 11.5 × 1.4 ≈ 16，与系统界面的中文行距接近。
+pub const HINT_LINE_HEIGHT: f32 = 16.0;
 
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts::definitions());
@@ -57,6 +70,20 @@ pub fn install(ctx: &egui::Context) {
             visuals.hyperlink_color = palette.accent;
             visuals.window_corner_radius = MENU_RADIUS.into();
             visuals.menu_corner_radius = MENU_RADIUS.into();
+            // 菜单与提示框浮在卡片上方：底色比卡片略亮（浅色模式纯白），细描边加柔和阴影分出层次。
+            let dark = theme == Theme::Dark;
+            visuals.window_fill = if dark {
+                Color32::from_rgb(44, 44, 48)
+            } else {
+                Color32::WHITE
+            };
+            visuals.window_stroke = Stroke::new(1.0, palette.border);
+            visuals.popup_shadow = egui::Shadow {
+                offset: [0, 8],
+                blur: 28,
+                spread: 0,
+                color: Color32::from_black_alpha(if dark { 110 } else { 40 }),
+            };
             for widget in [
                 &mut visuals.widgets.inactive,
                 &mut visuals.widgets.hovered,
@@ -65,6 +92,10 @@ pub fn install(ctx: &egui::Context) {
                 &mut visuals.widgets.noninteractive,
             ] {
                 widget.corner_radius = CAPSULE.into();
+                // 文字一律用配色里的主文字色。egui 默认给的是普通文字 gray(140)、
+                // 按钮文字 gray(180)（浅色模式下 gray(80)、gray(60)），比配色里的
+                // 说明文字（`Palette::weak`）还淡，行标题会比说明文字更弱，层级颠倒。
+                widget.fg_stroke.color = palette.text;
             }
         });
     }
@@ -73,22 +104,6 @@ pub fn install(ctx: &egui::Context) {
 /// 单行输入框。控件是胶囊形，左右留出半个圆角，文字不会贴到弧线上。
 pub fn text_field(text: &mut String) -> egui::TextEdit<'_> {
     egui::TextEdit::singleline(text).margin(egui::Margin::symmetric(10, 4))
-}
-
-/// 复选框用小圆角（全局控件是胶囊形，复选框会变成圆形）。
-pub fn checkbox(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> egui::Response {
-    ui.scope(|ui| {
-        let widgets = &mut ui.visuals_mut().widgets;
-        for widget in [
-            &mut widgets.inactive,
-            &mut widgets.hovered,
-            &mut widgets.active,
-        ] {
-            widget.corner_radius = (SMALL_RADIUS / 2).into();
-        }
-        ui.checkbox(checked, text)
-    })
-    .inner
 }
 
 /// 连续曲率的圆角矩形（macOS 的 `kCACornerCurveContinuous`，系统窗口和 PasteNow 都用它）。

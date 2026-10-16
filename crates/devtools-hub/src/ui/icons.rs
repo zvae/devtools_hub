@@ -29,6 +29,9 @@ pub enum Icon {
     Pencil,
     Return,
     Tab,
+    List,
+    ChevronUp,
+    ChevronDown,
 }
 
 /// 16×16 网格坐标到屏幕坐标的映射。
@@ -262,6 +265,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             );
             line(&[(9.2, 4.0), (12.0, 6.8)]);
         }
+        Icon::List => {
+            for y in [4.0, 8.0, 12.0] {
+                painter.circle_filled(g.p(2.9, y), g.r(1.0), color);
+                line(&[(5.8, y), (13.8, y)]);
+            }
+        }
+        Icon::ChevronUp => line(&[(3.0, 10.5), (8.0, 5.5), (13.0, 10.5)]),
+        Icon::ChevronDown => line(&[(3.0, 5.5), (8.0, 10.5), (13.0, 5.5)]),
     }
 }
 

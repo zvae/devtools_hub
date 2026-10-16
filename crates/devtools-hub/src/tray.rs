@@ -102,7 +102,8 @@ impl Tray {
                 shared.post(AppEvent::RevealUpdate);
             }
             "quit" => std::process::exit(0),
-            _ => {}
+            // 面板的右键菜单（见 `ui::native_menu`）：交给界面在下一帧处理。
+            id => shared.post(AppEvent::MenuCommand(id.to_string())),
         }));
 
         let builder = TrayIconBuilder::new()

@@ -2,9 +2,14 @@
 //!
 //! 四个页面共用同一个窗口：切换页面时由平台层调整窗口大小和位置。
 
+mod code_text;
 mod fonts;
+mod glass;
 mod icons;
 mod json_editor;
+mod liquid_glass;
+mod menu;
+mod native_menu;
 mod panel;
 mod quick_panel;
 mod settings_page;
@@ -31,7 +36,9 @@ use crate::tray::Tray;
 use crate::update::{self, Release};
 use crate::{controller, middle_click, Args};
 
+use code_text::CodeStyles;
 use json_editor::JsonEditorView;
+use liquid_glass::LiquidGlass;
 use panel::PanelView;
 use quick_panel::QuickPanelView;
 use settings_page::SettingsView;
@@ -84,12 +91,16 @@ pub struct HubApp {
     /// 鼠标中键监听线程是否已启动（只启动一次，之后由设置控制是否拦截）。
     middle_click_started: bool,
     textures: Textures,
+    /// 富文本代码的高亮样式。
+    code: CodeStyles,
     app_icons: AppIcons,
     toast: Option<Toast>,
     accessibility_ok: bool,
     was_focused: bool,
     /// 窗口的原生背景材质（离屏渲染测试中是不透明的）。
     backdrop: Backdrop,
+    /// 栏的液态玻璃效果（需要 eframe 的 wgpu 渲染器，离屏测试里没有）。
+    liquid: Option<LiquidGlass>,
     /// 第一帧之后需要把被 eframe 自动显示的窗口收起来。
     startup_hide_pending: bool,
     /// 在面板上关掉了提示的新版本（本次运行不再在面板上提示，菜单栏和设置页照常显示）。
@@ -118,6 +129,7 @@ impl HubApp {
             tracing::warn!("无法设置面板窗口：{err:#}");
         }
         app.backdrop = native_panel::backdrop();
+        app.liquid = cc.wgpu_render_state.as_ref().map(LiquidGlass::new);
         match HotkeyService::new(shared.clone()) {
             Ok(mut service) => {
                 if let Err(err) = service.apply(&app.settings.hotkey) {
@@ -174,11 +186,13 @@ impl HubApp {
             json: JsonEditorView::default(),
             middle_click_started: false,
             textures: Textures::default(),
+            code: CodeStyles::default(),
             app_icons: AppIcons::default(),
             toast: None,
             accessibility_ok: keyboard::accessibility_trusted(false),
             was_focused: false,
             backdrop: Backdrop::Opaque,
+            liquid: None,
             startup_hide_pending: false,
             update_dismissed: None,
         }
@@ -208,6 +222,7 @@ impl HubApp {
                     update::restart_if_installed(&self.shared, &self.relaunch_args());
                 }
                 AppEvent::RevealUpdate => self.settings_view.reveal_update = true,
+                AppEvent::MenuCommand(id) => self.menu_command(&id),
             }
         }
         let revision = self.shared.revision.load(Ordering::Relaxed);
@@ -281,6 +296,13 @@ impl HubApp {
             args.extend(["--pasteboard".into(), name.into()]);
         }
         args
+    }
+
+    /// 在当前窗口中打开设置页，并滚动到“分类标签”分组。
+    fn reveal_tabs(&mut self) {
+        self.settings_view.refresh(&self.store);
+        self.page = Page::Settings;
+        self.settings_view.reveal_tabs = true;
     }
 
     /// 在当前窗口中打开设置页，并滚动到底部的更新信息。
