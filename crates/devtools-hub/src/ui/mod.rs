@@ -5,6 +5,7 @@
 mod fonts;
 mod icons;
 mod json_editor;
+mod menu;
 mod panel;
 mod quick_panel;
 mod settings_page;
@@ -281,6 +282,13 @@ impl HubApp {
             args.extend(["--pasteboard".into(), name.into()]);
         }
         args
+    }
+
+    /// 在当前窗口中打开设置页，并滚动到“分类标签”分组。
+    fn reveal_tabs(&mut self) {
+        self.settings_view.refresh(&self.store);
+        self.page = Page::Settings;
+        self.settings_view.reveal_tabs = true;
     }
 
     /// 在当前窗口中打开设置页，并滚动到底部的更新信息。

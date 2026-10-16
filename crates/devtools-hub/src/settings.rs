@@ -94,6 +94,28 @@ pub const POLL_INTERVALS: [(u64, &str); 4] = [
     (1000, "1 秒（省电）"),
 ];
 
+/// 面板顶部的分类标签。“全部”固定在最前面，不在其中。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tab {
+    Text,
+    Link,
+    Image,
+    Files,
+    /// 列表（收藏或用户新建的列表），值是列表 id。
+    List(i64),
+}
+
+impl Tab {
+    pub const BUILT_IN: [Tab; 4] = [Tab::Text, Tab::Link, Tab::Image, Tab::Files];
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabSetting {
+    pub tab: Tab,
+    pub visible: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -124,6 +146,8 @@ pub struct Settings {
     pub auto_check_updates: bool,
     /// 用户选择跳过的版本：不再自动提醒；发布了更新的版本时照常提醒。
     pub skipped_version: Option<String>,
+    /// 分类标签的顺序与是否显示，完整的顺序见 [`Settings::ordered_tabs`]。
+    pub tabs: Vec<TabSetting>,
 }
 
 impl Default for Settings {
@@ -146,6 +170,7 @@ impl Default for Settings {
             panel_transparency: 60,
             auto_check_updates: true,
             skipped_version: None,
+            tabs: Vec::new(),
         }
     }
 }
@@ -175,6 +200,30 @@ impl Settings {
 
     pub fn max_items(&self) -> Option<usize> {
         (self.max_items > 0).then_some(self.max_items as usize)
+    }
+
+    /// 按设置排好的全部分类标签：去掉已删除的列表；设置里没有的标签（新建的列表）排在最后并显示。
+    pub fn ordered_tabs(&self, list_ids: &[i64]) -> Vec<TabSetting> {
+        let mut tabs: Vec<TabSetting> = Vec::new();
+        let known = |tabs: &[TabSetting], tab: Tab| tabs.iter().any(|t| t.tab == tab);
+        for setting in &self.tabs {
+            let exists = match setting.tab {
+                Tab::List(id) => list_ids.contains(&id),
+                _ => true,
+            };
+            if exists && !known(&tabs, setting.tab) {
+                tabs.push(*setting);
+            }
+        }
+        let all = Tab::BUILT_IN
+            .into_iter()
+            .chain(list_ids.iter().map(|&id| Tab::List(id)));
+        for tab in all {
+            if !known(&tabs, tab) {
+                tabs.push(TabSetting { tab, visible: true });
+            }
+        }
+        tabs
     }
 }
 
@@ -206,5 +255,56 @@ mod tests {
         fs::write(dir.path().join(SETTINGS_FILE), "{oops").unwrap();
         assert_eq!(Settings::load(dir.path()), Settings::default());
         assert!(dir.path().join("settings.invalid.json").exists());
+    }
+
+    #[test]
+    fn orders_tabs_and_follows_lists() {
+        let hidden = |tab| TabSetting {
+            tab,
+            visible: false,
+        };
+        let shown = |tab| TabSetting { tab, visible: true };
+        // 默认：内置标签在前，列表按创建顺序在后，都显示。
+        let tabs = Settings::default().ordered_tabs(&[1, 7]);
+        assert_eq!(
+            tabs,
+            [
+                shown(Tab::Text),
+                shown(Tab::Link),
+                shown(Tab::Image),
+                shown(Tab::Files),
+                shown(Tab::List(1)),
+                shown(Tab::List(7)),
+            ]
+        );
+        // 保存的顺序优先；已删除的列表（3）去掉，新建的列表（9）补在最后。
+        let settings = Settings {
+            tabs: vec![
+                shown(Tab::List(1)),
+                hidden(Tab::Image),
+                hidden(Tab::List(3)),
+                shown(Tab::Text),
+                shown(Tab::Link),
+                shown(Tab::Files),
+            ],
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.ordered_tabs(&[1, 9]),
+            [
+                shown(Tab::List(1)),
+                hidden(Tab::Image),
+                shown(Tab::Text),
+                shown(Tab::Link),
+                shown(Tab::Files),
+                shown(Tab::List(9)),
+            ]
+        );
+        // 序列化成可读的 JSON。
+        let json = serde_json::to_string(&settings.tabs[..2]).unwrap();
+        assert_eq!(
+            json,
+            r#"[{"tab":{"list":1},"visible":true},{"tab":"image","visible":false}]"#
+        );
     }
 }

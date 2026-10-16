@@ -7,11 +7,11 @@ use egui::{Align, Color32, Key, Layout, Response, RichText, Sense, Stroke, Ui, V
 
 use super::fonts;
 use super::icons::{self, Icon};
-use super::panel::{centered_row, icon_button, keycaps};
+use super::panel::{centered_row, icon_button, keycaps, tab_label};
 use super::style::{self, Palette};
 use super::{HubApp, Page};
 use crate::platform::{keyboard, login_item, panel::Placement, workspace, Backdrop};
-use crate::settings::{Retention, Settings, POLL_INTERVALS};
+use crate::settings::{Retention, Settings, Tab, POLL_INTERVALS};
 use crate::update::{self, Install, Release, Status, REPOSITORY};
 use crate::{hotkey, keys, platform};
 
@@ -29,6 +29,8 @@ pub struct SettingsView {
     message: Option<String>,
     /// 下一帧滚动到底部的更新信息（从菜单栏的“发现新版本”打开设置时）。
     pub reveal_update: bool,
+    /// 下一帧滚动到“分类标签”分组（从面板的“编辑分类标签…”打开设置时）。
+    pub reveal_tabs: bool,
 }
 
 impl SettingsView {
@@ -86,6 +88,12 @@ impl HubApp {
                 section(ui, &palette, "隐私与排除规则", |ui| {
                     self.rules_section(ui, &palette, &mut settings)
                 });
+                let tabs = section(ui, &palette, "分类标签", |ui| {
+                    self.tabs_section(ui, &palette, &mut settings)
+                });
+                if std::mem::take(&mut self.settings_view.reveal_tabs) {
+                    tabs.scroll_to_me(Some(Align::Min));
+                }
                 section(ui, &palette, "列表", |ui| {
                     self.lists_section(ui, &palette)
                 });
@@ -573,6 +581,74 @@ impl HubApp {
         });
     }
 
+    /// 面板顶部分类标签的显示与顺序。
+    fn tabs_section(&mut self, ui: &mut Ui, palette: &Palette, settings: &mut Settings) {
+        hint(
+            ui,
+            palette,
+            "“全部”固定在最前面；新建的列表会显示在最后。在面板上右键标签也可以隐藏",
+        );
+        let lists = &self.settings_view.lists;
+        let list_ids: Vec<i64> = lists.iter().map(|list| list.id).collect();
+        let mut tabs = settings.ordered_tabs(&list_ids);
+        let count = tabs.len();
+        let mut changed = false;
+        let mut swap = None;
+        for (index, setting) in tabs.iter_mut().enumerate() {
+            let Some(label) = tab_label(setting.tab, lists) else {
+                continue;
+            };
+            divider(ui, palette);
+            let label = label.trim_start_matches("★ ").to_string();
+            centered_row(ui, 30.0, |ui| {
+                let icon = match setting.tab {
+                    Tab::Text => Icon::Document,
+                    Tab::Link => Icon::Link,
+                    Tab::Image => Icon::Image,
+                    Tab::Files => Icon::Folder,
+                    Tab::List(FAVORITES_LIST_ID) => Icon::StarFilled,
+                    Tab::List(_) => Icon::List,
+                };
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                icons::paint(ui.painter(), icon_rect, icon, palette.weak);
+                let color = if setting.visible {
+                    palette.text
+                } else {
+                    palette.weak
+                };
+                ui.label(RichText::new(label).color(color));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    changed |= toggle(ui, &mut setting.visible, palette).changed();
+                    ui.add_space(4.0);
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let down = ui
+                        .add_enabled_ui(index + 1 < count, |ui| {
+                            icon_button(ui, Icon::ChevronDown, false, palette)
+                        })
+                        .inner;
+                    if down.on_hover_text("下移").clicked() {
+                        swap = Some((index, index + 1));
+                    }
+                    let up = ui
+                        .add_enabled_ui(index > 0, |ui| {
+                            icon_button(ui, Icon::ChevronUp, false, palette)
+                        })
+                        .inner;
+                    if up.on_hover_text("上移").clicked() {
+                        swap = Some((index - 1, index));
+                    }
+                });
+            });
+        }
+        if let Some((a, b)) = swap {
+            tabs.swap(a, b);
+            changed = true;
+        }
+        if changed {
+            settings.tabs = tabs;
+        }
+    }
+
     fn lists_section(&mut self, ui: &mut Ui, palette: &Palette) {
         hint(
             ui,
@@ -797,20 +873,26 @@ fn repo_label() -> &'static str {
     REPOSITORY.trim_start_matches("https://")
 }
 
-/// 分组标题 + 圆角卡片。
-fn section(ui: &mut Ui, palette: &Palette, title: &str, add_contents: impl FnOnce(&mut Ui)) {
+/// 分组标题 + 圆角卡片，返回整个分组的响应（用于滚动到这个分组）。
+fn section(
+    ui: &mut Ui,
+    palette: &Palette,
+    title: &str,
+    add_contents: impl FnOnce(&mut Ui),
+) -> Response {
     ui.add_space(12.0);
     // 标题与卡片内的文字左对齐（卡片内边距 12），和系统设置的分组样式一致。
-    egui::Frame::NONE
+    let heading = egui::Frame::NONE
         .inner_margin(egui::Margin {
             left: 12,
             ..Default::default()
         })
         .show(ui, |ui| {
             ui.label(RichText::new(title).size(12.0).color(palette.weak));
-        });
+        })
+        .response;
     ui.add_space(2.0);
-    style::continuous_frame(
+    let card = style::continuous_frame(
         ui,
         style::CARD_RADIUS,
         palette.card,
@@ -821,7 +903,9 @@ fn section(ui: &mut Ui, palette: &Palette, title: &str, add_contents: impl FnOnc
             ui.spacing_mut().item_spacing.y = 4.0;
             add_contents(ui);
         },
-    );
+    )
+    .response;
+    heading.union(card)
 }
 
 /// 左侧标签、右侧控件的一行。

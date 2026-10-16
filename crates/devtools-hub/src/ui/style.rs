@@ -13,7 +13,7 @@ use crate::platform::Backdrop;
 // - 窗口 16（`panel::CORNER_RADIUS`），内容离窗口边缘 `PAD` = 8；
 // - 复制项卡片、预览卡片、设置分组、提示横幅：`CARD_RADIUS`；
 // - 按钮、输入框、分类标签、图标按钮：胶囊形 `CAPSULE`；
-// - 菜单与提示框 `MENU_RADIUS`，与窗口相同；菜单项是 24 高的胶囊，离外框 `MENU_MARGIN`，与外框同心；
+// - 菜单与提示框 `MENU_RADIUS`，与窗口相同；菜单项是 24 高的胶囊，离外框 `MENU_MARGIN`，与外框同心（见 `menu`）；
 // - 键帽、功能徽标、缩略图、复选框等小元素：`SMALL_RADIUS`。
 
 /// 窗口内容到窗口边缘的留白。
@@ -57,6 +57,20 @@ pub fn install(ctx: &egui::Context) {
             visuals.hyperlink_color = palette.accent;
             visuals.window_corner_radius = MENU_RADIUS.into();
             visuals.menu_corner_radius = MENU_RADIUS.into();
+            // 菜单与提示框浮在卡片上方：底色比卡片略亮（浅色模式纯白），细描边加柔和阴影分出层次。
+            let dark = theme == Theme::Dark;
+            visuals.window_fill = if dark {
+                Color32::from_rgb(44, 44, 48)
+            } else {
+                Color32::WHITE
+            };
+            visuals.window_stroke = Stroke::new(1.0, palette.border);
+            visuals.popup_shadow = egui::Shadow {
+                offset: [0, 8],
+                blur: 28,
+                spread: 0,
+                color: Color32::from_black_alpha(if dark { 110 } else { 40 }),
+            };
             for widget in [
                 &mut visuals.widgets.inactive,
                 &mut visuals.widgets.hovered,
@@ -73,22 +87,6 @@ pub fn install(ctx: &egui::Context) {
 /// 单行输入框。控件是胶囊形，左右留出半个圆角，文字不会贴到弧线上。
 pub fn text_field(text: &mut String) -> egui::TextEdit<'_> {
     egui::TextEdit::singleline(text).margin(egui::Margin::symmetric(10, 4))
-}
-
-/// 复选框用小圆角（全局控件是胶囊形，复选框会变成圆形）。
-pub fn checkbox(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> egui::Response {
-    ui.scope(|ui| {
-        let widgets = &mut ui.visuals_mut().widgets;
-        for widget in [
-            &mut widgets.inactive,
-            &mut widgets.hovered,
-            &mut widgets.active,
-        ] {
-            widget.corner_radius = (SMALL_RADIUS / 2).into();
-        }
-        ui.checkbox(checked, text)
-    })
-    .inner
 }
 
 /// 连续曲率的圆角矩形（macOS 的 `kCACornerCurveContinuous`，系统窗口和 PasteNow 都用它）。
@@ -189,6 +187,8 @@ pub struct Palette {
     pub track: Color32,
     pub warn: Color32,
     pub ok: Color32,
+    /// 删除等破坏性操作（macOS 的 systemRed）。
+    pub danger: Color32,
 }
 
 impl Palette {
@@ -216,6 +216,7 @@ impl Palette {
                 track: Color32::from_gray(78),
                 warn: Color32::from_rgb(0xff, 0xb3, 0x40),
                 ok: Color32::from_rgb(0x34, 0xc7, 0x59),
+                danger: Color32::from_rgb(0xff, 0x45, 0x3a),
             }
         } else {
             Self {
@@ -231,6 +232,7 @@ impl Palette {
                 track: Color32::from_gray(214),
                 warn: Color32::from_rgb(0xc2, 0x6a, 0x00),
                 ok: Color32::from_rgb(0x28, 0xa7, 0x45),
+                danger: Color32::from_rgb(0xff, 0x3b, 0x30),
             }
         }
     }

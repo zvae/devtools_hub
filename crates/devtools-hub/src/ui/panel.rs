@@ -9,15 +9,17 @@ use devtools_clipboard::{
 };
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
-    Align, Align2, Color32, FontId, Frame, Id, Key, Layout, Margin, Modifiers, Rect, Response,
-    RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
+    Align, Align2, Color32, FontId, Frame, Id, Key, Layout, Margin, Modifiers, PopupCloseBehavior,
+    Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 
 use super::fonts;
 use super::icons::{self, Icon};
+use super::menu;
 use super::style::{self, kind_color, kind_icon, Palette};
 use super::{HubApp, PasteMode};
 use crate::platform::{keyboard, panel as native_panel, workspace};
+use crate::settings::{Settings, Tab};
 use crate::update::{self, Install, Release};
 use crate::{hotkey, keys, platform};
 
@@ -39,6 +41,27 @@ pub enum Filter {
 }
 
 impl Filter {
+    fn from_tab(tab: Tab) -> Self {
+        match tab {
+            Tab::Text => Filter::Textual,
+            Tab::Link => Filter::Kind(ContentKind::Link),
+            Tab::Image => Filter::Kind(ContentKind::Image),
+            Tab::Files => Filter::Kind(ContentKind::Files),
+            Tab::List(id) => Filter::List(id),
+        }
+    }
+
+    /// 对应的分类标签；“全部”没有。
+    fn tab(self) -> Option<Tab> {
+        match self {
+            Filter::All => None,
+            Filter::List(id) => Some(Tab::List(id)),
+            filter => Tab::BUILT_IN
+                .into_iter()
+                .find(|&tab| Filter::from_tab(tab) == filter),
+        }
+    }
+
     fn to_query(self) -> (Option<KindFilter>, Option<i64>) {
         match self {
             Filter::All => (None, None),
@@ -77,6 +100,8 @@ pub struct PanelView {
     viewport_height: f32,
     preview: Option<Preview>,
     new_list_name: String,
+    /// 右键菜单当前显示“添加到列表”页。
+    menu_lists: bool,
     error: Option<String>,
 }
 
@@ -97,27 +122,24 @@ impl PanelView {
         self.items.get(self.selected)
     }
 
-    fn filters(&self) -> Vec<(String, Filter)> {
-        let mut filters = vec![
-            ("全部".to_string(), Filter::All),
-            ("文本".to_string(), Filter::Textual),
-            ("链接".to_string(), Filter::Kind(ContentKind::Link)),
-            ("图片".to_string(), Filter::Kind(ContentKind::Image)),
-            ("文件".to_string(), Filter::Kind(ContentKind::Files)),
-        ];
-        for list in &self.lists {
-            let label = if list.id == FAVORITES_LIST_ID {
-                format!("★ {}", list.name)
-            } else {
-                list.name.clone()
-            };
-            filters.push((label, Filter::List(list.id)));
-        }
-        filters
+    /// 顶部显示的分类标签：“全部”在最前，其余按设置的顺序，跳过隐藏的。
+    fn filters(&self, settings: &Settings) -> Vec<(String, Filter)> {
+        let list_ids: Vec<i64> = self.lists.iter().map(|list| list.id).collect();
+        let tabs = settings
+            .ordered_tabs(&list_ids)
+            .into_iter()
+            .filter(|setting| setting.visible)
+            .filter_map(|setting| {
+                let label = tab_label(setting.tab, &self.lists)?;
+                Some((label, Filter::from_tab(setting.tab)))
+            });
+        std::iter::once(("全部".to_string(), Filter::All))
+            .chain(tabs)
+            .collect()
     }
 
-    fn cycle_filter(&mut self, forward: bool) {
-        let filters = self.filters();
+    fn cycle_filter(&mut self, forward: bool, settings: &Settings) {
+        let filters = self.filters(settings);
         let current = filters
             .iter()
             .position(|(_, f)| *f == self.filter)
@@ -157,6 +179,8 @@ enum Action {
     CreateList { name: String, add_item: Option<i64> },
     TogglePreview,
     TogglePause,
+    HideTab(Tab),
+    EditTabs,
     OpenSettings,
     Close,
     OpenUrl(String),
@@ -171,7 +195,10 @@ impl HubApp {
     pub(super) fn panel_ui(&mut self, ui: &mut Ui) {
         let palette = self.palette(ui.ctx());
         let mut actions = Vec::new();
-        self.panel_keys(ui.ctx(), &mut actions);
+        // 菜单打开时按键交给菜单（esc 关闭菜单、在菜单的输入框里打字），不触发面板快捷键。
+        if !egui::Popup::is_any_open(ui.ctx()) {
+            self.panel_keys(ui.ctx(), &mut actions);
+        }
 
         egui::Panel::top("header")
             .show_separator_line(false)
@@ -361,7 +388,7 @@ impl HubApp {
             actions.push(Action::Paste(item.id, PasteMode::Original));
         }
         if tab || back_tab {
-            panel.cycle_filter(tab);
+            panel.cycle_filter(tab, &self.settings);
         }
         if jump_first {
             panel.select(0);
@@ -465,8 +492,8 @@ impl HubApp {
             self.panel.preview_open = false;
             self.panel.needs_reload = true;
         }
-        let wants_focus =
-            self.panel.focus_search || (!response.has_focus() && !ui.ctx().any_popup_open());
+        let wants_focus = self.panel.focus_search
+            || (!response.has_focus() && !egui::Popup::is_any_open(ui.ctx()));
         if wants_focus && (native_panel::is_visible() || cfg!(test)) {
             response.request_focus();
             self.panel.focus_search = false;
@@ -474,7 +501,7 @@ impl HubApp {
     }
 
     fn chips(&mut self, ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action>) {
-        let filters = self.panel.filters();
+        let filters = self.panel.filters(&self.settings);
         centered_row(ui, 28.0, |ui| {
             let scroll_width = ui.available_width() - 30.0;
             egui::ScrollArea::horizontal()
@@ -486,33 +513,54 @@ impl HubApp {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         for (label, filter) in filters {
                             let selected = self.panel.filter == filter;
-                            if chip(ui, &label, selected, palette).clicked() {
+                            let response = chip(ui, &label, selected, palette);
+                            if response.clicked() {
                                 self.panel.set_filter(filter);
                             }
+                            egui::Popup::context_menu(&response).show(|ui| {
+                                menu::begin(ui, 180.0);
+                                if let Some(tab) = filter.tab() {
+                                    if menu::Item::new(Icon::EyeSlash, "隐藏此标签")
+                                        .ui(ui, palette)
+                                        .clicked()
+                                    {
+                                        actions.push(Action::HideTab(tab));
+                                    }
+                                }
+                                if menu::Item::new(Icon::Gear, "编辑分类标签…")
+                                    .ui(ui, palette)
+                                    .clicked()
+                                {
+                                    actions.push(Action::EditTabs);
+                                }
+                            });
                         }
                     });
                 });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let plus = icon_button(ui, Icon::Plus, false, palette).on_hover_text("新建列表");
-                egui::Popup::menu(&plus).show(|ui| {
-                    ui.label(RichText::new("新建列表").strong());
-                    let edit = ui.add(
-                        style::text_field(&mut self.panel.new_list_name)
-                            .hint_text("列表名称")
-                            .desired_width(160.0),
-                    );
-                    edit.request_focus();
-                    let submit = ui.input(|i| i.key_pressed(Key::Enter));
-                    if (ui.button("创建").clicked() || submit)
-                        && !self.panel.new_list_name.trim().is_empty()
-                    {
-                        actions.push(Action::CreateList {
-                            name: std::mem::take(&mut self.panel.new_list_name),
-                            add_item: None,
-                        });
-                        ui.close();
-                    }
-                });
+                egui::Popup::menu(&plus)
+                    // 点击输入框不关闭。
+                    .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        menu::begin(ui, 220.0);
+                        menu::heading(ui, palette, "新建列表");
+                        if new_list_row(ui, &mut self.panel.new_list_name, palette, true) {
+                            actions.push(Action::CreateList {
+                                name: std::mem::take(&mut self.panel.new_list_name),
+                                add_item: None,
+                            });
+                            ui.close();
+                        }
+                        menu::separator(ui, palette);
+                        if menu::Item::new(Icon::Gear, "编辑分类标签…")
+                            .ui(ui, palette)
+                            .clicked()
+                        {
+                            actions.push(Action::EditTabs);
+                            ui.close();
+                        }
+                    });
             });
         });
     }
@@ -637,6 +685,9 @@ impl HubApp {
         let rect = row.shrink2(Vec2::new(SIDE, 0.0));
         if response.clicked() || response.secondary_clicked() {
             self.panel.selected = index;
+        }
+        if response.secondary_clicked() {
+            self.panel.menu_lists = false;
         }
         if response.double_clicked() {
             actions.push(Action::Paste(item.id, PasteMode::Original));
@@ -789,55 +840,79 @@ impl HubApp {
             }
         }
 
-        response.context_menu(|ui| self.item_menu(ui, item, actions));
+        egui::Popup::context_menu(&response)
+            // 菜单里有翻页和输入框，点击菜单内部不自动关闭，选中菜单项后由 `item_menu` 关闭。
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| self.item_menu(ui, item, palette, actions));
     }
 
-    fn item_menu(&mut self, ui: &mut Ui, item: &ClipItem, actions: &mut Vec<Action>) {
+    fn item_menu(
+        &mut self,
+        ui: &mut Ui,
+        item: &ClipItem,
+        palette: &Palette,
+        actions: &mut Vec<Action>,
+    ) {
+        menu::begin(ui, 220.0);
+        let chosen = if self.panel.menu_lists {
+            self.list_menu(ui, item, palette)
+        } else {
+            self.main_menu(ui, item, palette)
+        };
+        if let Some(action) = chosen {
+            actions.push(action);
+            ui.close();
+        }
+    }
+
+    fn main_menu(&mut self, ui: &mut Ui, item: &ClipItem, palette: &Palette) -> Option<Action> {
+        let mut chosen = None;
         let target = native_panel::previous_app_name()
             .map_or_else(|| "粘贴".to_string(), |app| format!("粘贴到 {app}"));
-        if ui.button(target).clicked() {
-            actions.push(Action::Paste(item.id, PasteMode::Original));
-        }
-        if ui.button("以纯文本粘贴").clicked() {
-            actions.push(Action::Paste(item.id, PasteMode::PlainText));
-        }
-        if ui.button("仅复制").clicked() {
-            actions.push(Action::Paste(item.id, PasteMode::CopyOnly));
-        }
-        if ui.button("预览").clicked() {
-            actions.push(Action::TogglePreview);
-        }
-        ui.separator();
-        ui.menu_button("添加到列表", |ui| {
-            for list in self.panel.lists.clone() {
-                let mut member = item.in_list(list.id);
-                if style::checkbox(ui, &mut member, &list.name).changed() {
-                    actions.push(Action::SetInList {
-                        item: item.id,
-                        list: list.id,
-                        member,
-                    });
-                }
+        let entries = [
+            (
+                Icon::Clipboard,
+                target.as_str(),
+                &[keys::RETURN][..],
+                PasteMode::Original,
+            ),
+            (
+                Icon::Text,
+                "以纯文本粘贴",
+                &[keys::SHIFT, keys::RETURN],
+                PasteMode::PlainText,
+            ),
+            (
+                Icon::Copy,
+                "仅复制",
+                &[keys::COMMAND, keys::RETURN],
+                PasteMode::CopyOnly,
+            ),
+        ];
+        for (icon, label, shortcut, mode) in entries {
+            if menu::Item::new(icon, label)
+                .shortcut(shortcut)
+                .ui(ui, palette)
+                .clicked()
+            {
+                chosen = Some(Action::Paste(item.id, mode));
             }
-            ui.separator();
-            ui.horizontal(|ui| {
-                let edit = ui.add(
-                    style::text_field(&mut self.panel.new_list_name)
-                        .hint_text("新列表名称")
-                        .desired_width(120.0),
-                );
-                let submit = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                if (ui.button("新建").clicked() || submit)
-                    && !self.panel.new_list_name.trim().is_empty()
-                {
-                    actions.push(Action::CreateList {
-                        name: std::mem::take(&mut self.panel.new_list_name),
-                        add_item: Some(item.id),
-                    });
-                    ui.close();
-                }
-            });
-        });
+        }
+        if menu::Item::new(Icon::Eye, "预览")
+            .shortcut(&[keys::COMMAND, "Y"])
+            .ui(ui, palette)
+            .clicked()
+        {
+            chosen = Some(Action::TogglePreview);
+        }
+        menu::separator(ui, palette);
+        if menu::Item::new(Icon::List, "添加到列表")
+            .chevron()
+            .ui(ui, palette)
+            .clicked()
+        {
+            self.panel.menu_lists = true;
+        }
         if item.kind == ContentKind::Files {
             let first_path = self
                 .store
@@ -846,21 +921,58 @@ impl HubApp {
                 .flatten()
                 .and_then(|text| text.lines().next().map(str::to_string));
             if let Some(path) = first_path {
-                if ui
-                    .button(format!("在{}中显示", platform::FILE_MANAGER))
+                let label = format!("在{}中显示", platform::FILE_MANAGER);
+                if menu::Item::new(Icon::Folder, label)
+                    .ui(ui, palette)
                     .clicked()
                 {
-                    actions.push(Action::Reveal(path));
+                    chosen = Some(Action::Reveal(path));
                 }
             }
         }
-        ui.separator();
-        if ui
-            .button(RichText::new("删除").color(ui.visuals().error_fg_color))
+        menu::separator(ui, palette);
+        if menu::Item::new(Icon::Trash, "删除")
+            .shortcut(&[keys::COMMAND, keys::DELETE])
+            .danger()
+            .ui(ui, palette)
             .clicked()
         {
-            actions.push(Action::Delete(item.id));
+            chosen = Some(Action::Delete(item.id));
         }
+        chosen
+    }
+
+    /// “添加到列表”页：已加入的列表打勾，点击切换；底部新建列表并把条目加进去。
+    fn list_menu(&mut self, ui: &mut Ui, item: &ClipItem, palette: &Palette) -> Option<Action> {
+        let mut chosen = None;
+        if menu::Item::new(Icon::Back, "添加到列表")
+            .ui(ui, palette)
+            .clicked()
+        {
+            self.panel.menu_lists = false;
+        }
+        menu::separator(ui, palette);
+        for list in &self.panel.lists {
+            let member = item.in_list(list.id);
+            if menu::Item::new(member.then_some(Icon::Check), &list.name)
+                .ui(ui, palette)
+                .clicked()
+            {
+                chosen = Some(Action::SetInList {
+                    item: item.id,
+                    list: list.id,
+                    member: !member,
+                });
+            }
+        }
+        menu::separator(ui, palette);
+        if new_list_row(ui, &mut self.panel.new_list_name, palette, false) {
+            chosen = Some(Action::CreateList {
+                name: std::mem::take(&mut self.panel.new_list_name),
+                add_item: Some(item.id),
+            });
+        }
+        chosen
     }
 
     fn preview_ui(&mut self, ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action>) {
@@ -1096,6 +1208,20 @@ impl HubApp {
                     self.settings.paused = !self.settings.paused;
                     self.persist_settings();
                 }
+                Action::HideTab(tab) => {
+                    let list_ids: Vec<i64> = self.panel.lists.iter().map(|list| list.id).collect();
+                    let mut tabs = self.settings.ordered_tabs(&list_ids);
+                    for setting in tabs.iter_mut().filter(|setting| setting.tab == tab) {
+                        setting.visible = false;
+                    }
+                    self.settings.tabs = tabs;
+                    self.persist_settings();
+                    if self.panel.filter.tab() == Some(tab) {
+                        self.panel.set_filter(Filter::All);
+                    }
+                    self.show_toast("已隐藏，可在设置的“分类标签”中恢复".to_string());
+                }
+                Action::EditTabs => self.reveal_tabs(),
                 Action::OpenSettings => {
                     self.settings_view.refresh(&self.store);
                     self.page = super::Page::Settings;
@@ -1123,6 +1249,52 @@ impl HubApp {
             }
         }
     }
+}
+
+/// 新建列表的输入框和按钮（菜单里用），回车或点“新建”提交，返回是否提交。
+fn new_list_row(ui: &mut Ui, name: &mut String, palette: &Palette, autofocus: bool) -> bool {
+    Frame::NONE
+        .inner_margin(Margin::symmetric(4, 3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let edit = ui.add(
+                    style::text_field(name)
+                        .hint_text("新列表名称")
+                        .background_color(palette.field)
+                        .desired_width(146.0),
+                );
+                if autofocus {
+                    edit.request_focus();
+                }
+                let submit = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                let valid = !name.trim().is_empty();
+                let create = egui::Button::new(RichText::new("新建").color(Color32::WHITE))
+                    .fill(palette.accent)
+                    .min_size(Vec2::new(48.0, 24.0));
+                (ui.add_enabled(valid, create).clicked() || submit) && valid
+            })
+            .inner
+        })
+        .inner
+}
+
+/// 分类标签上显示的名字；列表已被删除时返回 `None`。
+pub(super) fn tab_label(tab: Tab, lists: &[ClipList]) -> Option<String> {
+    let label = match tab {
+        Tab::Text => "文本".to_string(),
+        Tab::Link => "链接".to_string(),
+        Tab::Image => "图片".to_string(),
+        Tab::Files => "文件".to_string(),
+        Tab::List(id) => {
+            let list = lists.iter().find(|list| list.id == id)?;
+            if id == FAVORITES_LIST_ID {
+                format!("★ {}", list.name)
+            } else {
+                list.name.clone()
+            }
+        }
+    };
+    Some(label)
 }
 
 /// 无边框图标按钮：悬停时显示浅色底，`active` 时用强调色。

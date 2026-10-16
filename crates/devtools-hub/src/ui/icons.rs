@@ -29,6 +29,16 @@ pub enum Icon {
     Pencil,
     Return,
     Tab,
+    Clipboard,
+    Copy,
+    Text,
+    Eye,
+    EyeSlash,
+    List,
+    Trash,
+    ChevronRight,
+    ChevronUp,
+    ChevronDown,
 }
 
 /// 16×16 网格坐标到屏幕坐标的映射。
@@ -262,6 +272,74 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             );
             line(&[(9.2, 4.0), (12.0, 6.8)]);
         }
+        Icon::Clipboard => {
+            painter.rect_stroke(
+                g.rect(3.0, 2.8, 13.0, 14.4),
+                g.r(1.6),
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            painter.rect_filled(g.rect(5.6, 1.4, 10.4, 4.4), g.r(1.0), color);
+            line(&[(5.8, 8.0), (10.2, 8.0)]);
+            line(&[(5.8, 10.8), (8.8, 10.8)]);
+        }
+        Icon::Copy => {
+            // 两张叠放的纸：后面那张只画露出来的部分。
+            painter.rect_stroke(
+                g.rect(1.8, 5.4, 10.6, 14.2),
+                g.r(1.6),
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            line(&[
+                (5.4, 5.4),
+                (5.4, 1.8),
+                (14.2, 1.8),
+                (14.2, 10.6),
+                (10.6, 10.6),
+            ]);
+        }
+        Icon::Text => {
+            line(&[(3.2, 4.8), (3.2, 2.8), (12.8, 2.8), (12.8, 4.8)]);
+            line(&[(8.0, 2.8), (8.0, 13.4)]);
+            line(&[(6.0, 13.4), (10.0, 13.4)]);
+        }
+        Icon::Eye | Icon::EyeSlash => {
+            // 上下两段正弦弧围成的眼形，中间是瞳孔。
+            let n = 16;
+            let arc = |sign: f32| {
+                (0..=n).map(move |i| {
+                    let t = i as f32 / n as f32;
+                    (
+                        1.4 + 13.2 * t,
+                        8.0 + sign * 4.4 * (t * std::f32::consts::PI).sin(),
+                    )
+                })
+            };
+            let mut points: Vec<(f32, f32)> = arc(-1.0).collect();
+            points.extend(arc(1.0).rev().skip(1).take(n - 1));
+            closed(&points, false);
+            painter.circle_stroke(g.p(8.0, 8.0), g.r(2.3), stroke);
+            if icon == Icon::EyeSlash {
+                line(&[(2.4, 2.4), (13.6, 13.6)]);
+            }
+        }
+        Icon::List => {
+            for y in [4.0, 8.0, 12.0] {
+                painter.circle_filled(g.p(2.9, y), g.r(1.0), color);
+                line(&[(5.8, y), (13.8, y)]);
+            }
+        }
+        Icon::Trash => {
+            line(&[(2.2, 4.2), (13.8, 4.2)]);
+            line(&[(6.0, 4.2), (6.0, 2.0), (10.0, 2.0), (10.0, 4.2)]);
+            line(&[(3.8, 4.2), (4.7, 14.2), (11.3, 14.2), (12.2, 4.2)]);
+            line(&[(6.6, 6.8), (6.6, 11.6)]);
+            line(&[(9.4, 6.8), (9.4, 11.6)]);
+        }
+        Icon::ChevronRight => line(&[(6.0, 3.0), (11.0, 8.0), (6.0, 13.0)]),
+        Icon::ChevronUp => line(&[(3.0, 10.5), (8.0, 5.5), (13.0, 10.5)]),
+        Icon::ChevronDown => line(&[(3.0, 5.5), (8.0, 10.5), (13.0, 5.5)]),
     }
 }
 

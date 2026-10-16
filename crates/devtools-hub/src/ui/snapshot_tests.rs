@@ -13,13 +13,14 @@ use devtools_clipboard::{
     thumbnail, uti, Capture, Representation, Snapshot, SourceApp, Store, FAVORITES_LIST_ID,
 };
 use egui::{Key, Modifiers};
+use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use image::{ImageFormat, Rgba, RgbaImage};
 
 use super::{style, HubApp, Page};
 use crate::platform::Backdrop;
 use crate::selection::Selection;
-use crate::settings::Settings;
+use crate::settings::{Settings, Tab, TabSetting};
 use crate::shared::{AppEvent, Shared};
 use crate::tools::QuickAction;
 use crate::update::{Asset, Install, Release, Status};
@@ -304,6 +305,157 @@ fn harness_for(
     harness.run_steps(3);
     harness
 }
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_context_menu() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(&mut Store::open(dir.path()).unwrap());
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(380.0, 640.0), |app| {
+            app.panel.reset_for_show();
+        });
+        // 右键最后一条（文件）：菜单里多出“在访达中显示”。
+        click_at(
+            &mut harness,
+            egui::pos2(190.0, MENU_CARD_Y),
+            egui::PointerButton::Secondary,
+        );
+        assert_eq!(harness.state().panel.selected, 5);
+        save(&mut harness, &format!("menu-{suffix}"));
+
+        // 悬停“删除”：红底白字。
+        harness.get_by_label("删除").hover();
+        harness.run_steps(4);
+        save(&mut harness, &format!("menu-delete-{suffix}"));
+
+        // 点击“添加到列表”：在菜单内翻到列表页，已加入的列表打勾。
+        harness.get_by_label("添加到列表").click();
+        harness.run_steps(4);
+        assert!(harness.query_by_label("新建").is_some());
+        save(&mut harness, &format!("menu-lists-{suffix}"));
+
+        // 在菜单的输入框里打字：空格、回车不触发面板的预览与粘贴，回车新建列表并加入条目。
+        // 第一个输入框是搜索框，菜单里的输入框在后面。
+        let field = |harness: &Harness<'_, HubApp>| {
+            let fields: Vec<_> = harness
+                .get_all_by_role(egui::accesskit::Role::TextInput)
+                .collect();
+            assert_eq!(fields.len(), 2);
+            fields[1].rect().center()
+        };
+        let pos = field(&harness);
+        click_at(&mut harness, pos, egui::PointerButton::Primary);
+        harness.event(egui::Event::Text("工作 笔记".into()));
+        harness.run_steps(2);
+        assert!(!harness.state().panel.preview_open);
+        save(&mut harness, &format!("menu-new-list-{suffix}"));
+        harness.key_press(Key::Enter);
+        harness.run_steps(4);
+        let panel = &harness.state().panel;
+        assert!(!egui::Popup::is_any_open(&harness.ctx), "新建后菜单应关闭");
+        let list = panel
+            .lists
+            .iter()
+            .find(|l| l.name == "工作 笔记")
+            .expect("应新建列表");
+        assert!(panel.items[5].in_list(list.id));
+    }
+}
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_tabs() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(&mut Store::open(dir.path()).unwrap());
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(380.0, 640.0), |app| {
+            app.panel.reset_for_show();
+        });
+        // 右上角“+”：新建列表弹窗，esc 只关闭弹窗，不收起面板。
+        click_at(&mut harness, PLUS_BUTTON, egui::PointerButton::Primary);
+        assert!(egui::Popup::is_any_open(&harness.ctx));
+        save(&mut harness, &format!("new-list-popup-{suffix}"));
+        harness.key_press(Key::Escape);
+        harness.run_steps(3);
+        assert!(!egui::Popup::is_any_open(&harness.ctx));
+        assert_eq!(harness.state().page, Page::Panel);
+
+        // 右键“链接”标签 → 隐藏此标签。
+        click_at(&mut harness, LINK_CHIP, egui::PointerButton::Secondary);
+        save(&mut harness, &format!("tab-menu-{suffix}"));
+        harness.get_by_label("隐藏此标签").click();
+        harness.run_steps(4);
+        let tabs = harness.state().settings.tabs.clone();
+        assert!(tabs.contains(&TabSetting {
+            tab: Tab::Link,
+            visible: false,
+        }));
+        save(&mut harness, &format!("tabs-hidden-{suffix}"));
+
+        // 右键“全部” → 编辑分类标签…：打开设置页并滚动到“分类标签”分组。
+        click_at(&mut harness, ALL_CHIP, egui::PointerButton::Secondary);
+        harness.get_by_label("编辑分类标签…").click();
+        harness.run_steps(5);
+        assert_eq!(harness.state().page, Page::Settings);
+        save(&mut harness, &format!("settings-tabs-{suffix}"));
+
+        // “收藏”上移一位，重新打开“链接”，返回面板后标签按新顺序显示。
+        click_at(&mut harness, FAVORITES_UP, egui::PointerButton::Primary);
+        click_at(&mut harness, LINK_TOGGLE, egui::PointerButton::Primary);
+        let tabs: Vec<Tab> = harness
+            .state()
+            .settings
+            .ordered_tabs(&[FAVORITES_LIST_ID])
+            .into_iter()
+            .filter(|setting| setting.visible)
+            .map(|setting| setting.tab)
+            .collect();
+        assert_eq!(
+            tabs,
+            [
+                Tab::Text,
+                Tab::Link,
+                Tab::Image,
+                Tab::List(FAVORITES_LIST_ID),
+                Tab::Files
+            ]
+        );
+        harness.key_press(Key::Escape);
+        harness.run_steps(4);
+        assert_eq!(harness.state().page, Page::Panel);
+        save(&mut harness, &format!("tabs-reordered-{suffix}"));
+
+        // 恢复默认，下一个主题从头开始。
+        harness.state_mut().settings.tabs.clear();
+    }
+}
+
+/// 移动鼠标到 `pos` 并按下、松开 `button`。
+fn click_at(harness: &mut Harness<'_, HubApp>, pos: egui::Pos2, button: egui::PointerButton) {
+    harness.hover_at(pos);
+    harness.run_steps(1);
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    harness.run_steps(4);
+}
+
+/// 380×640 的面板里，分类标签一行的控件位置。
+const ALL_CHIP: egui::Pos2 = egui::pos2(39.0, 68.0);
+const LINK_CHIP: egui::Pos2 = egui::pos2(139.0, 68.0);
+const PLUS_BUTTON: egui::Pos2 = egui::pos2(350.0, 68.0);
+/// 设置页滚动到“分类标签”分组后，“收藏”一行的上移按钮与“链接”一行的开关。
+const FAVORITES_UP: egui::Pos2 = egui::pos2(264.0, 295.0);
+const LINK_TOGGLE: egui::Pos2 = egui::pos2(334.0, 178.0);
+
+/// 面板里最后一张卡片（第 6 条）的纵坐标。
+const MENU_CARD_Y: f32 = 580.0;
 
 /// 快捷面板的窗口大小。harness 外层的 CentralPanel 四周各有 8 点边距，一并加上。
 fn quick_size(app: &HubApp) -> egui::Vec2 {
