@@ -19,11 +19,12 @@ use windows_sys::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONULL,
 };
 use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
-    IsWindow, IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    BringWindowToTop, GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowRect,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow, SetWindowPos,
+    ShowWindow, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
 };
 
 use super::workspace;
@@ -109,14 +110,18 @@ pub fn is_active() -> bool {
     is_visible() && unsafe { GetForegroundWindow() } == hwnd
 }
 
-pub fn show(anchor: Anchor) -> bool {
+/// 显示面板并设为前台。`size` 是内容区大小（逻辑像素）：同一个窗口既用作剪贴板面板，
+/// 也用作鼠标中键快捷面板和 JSON 编辑器，各自大小不同。
+/// 窗口原本隐藏、或者大小有变化时，按 `anchor` 重新定位。
+pub fn show(anchor: Anchor, size: [f32; 2]) -> bool {
     let hwnd = window();
     if hwnd.is_null() {
         return false;
     }
     // SAFETY: hwnd 是已绑定的面板窗口。
     unsafe {
-        if IsWindowVisible(hwnd) == 0 {
+        let visible = IsWindowVisible(hwnd) != 0;
+        if !visible {
             // 从托盘弹出时前台是任务栏（或我们自己的托盘窗口），它不能作为粘贴目标；
             // 这种情况回退到监听线程最近记录的真实前台程序。
             let foreground = GetForegroundWindow();
@@ -128,6 +133,8 @@ pub fn show(anchor: Anchor) -> bool {
             if !previous.is_null() && IsWindow(previous) != 0 {
                 PREVIOUS.with(|cell| cell.set(previous));
             }
+        }
+        if resize(hwnd, size) || !visible {
             position(hwnd, anchor);
         }
         ShowWindow(hwnd, SW_SHOW);
@@ -179,6 +186,38 @@ unsafe fn bring_to_front(hwnd: HWND) {
     if attached {
         AttachThreadInput(current_thread, foreground_thread, 0);
     }
+}
+
+/// 把客户区改成 `size`（逻辑像素，按窗口所在显示器的 DPI 换算），左上角不动。
+/// 返回大小是否有变化。
+unsafe fn resize(hwnd: HWND, size: [f32; 2]) -> bool {
+    let dpi = GetDpiForWindow(hwnd);
+    let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+    let (width, height) = (
+        (size[0] * scale).round() as i32,
+        (size[1] * scale).round() as i32,
+    );
+    let (mut client, mut frame): (RECT, RECT) = (zeroed(), zeroed());
+    if GetClientRect(hwnd, &mut client) == 0 || GetWindowRect(hwnd, &mut frame) == 0 {
+        return false;
+    }
+    let (client_width, client_height) = (client.right - client.left, client.bottom - client.top);
+    if (client_width - width).abs() <= 1 && (client_height - height).abs() <= 1 {
+        return false;
+    }
+    // 窗口可能带不可见的边框，按窗口与客户区的差值补上。
+    let extra_width = (frame.right - frame.left) - client_width;
+    let extra_height = (frame.bottom - frame.top) - client_height;
+    SetWindowPos(
+        hwnd,
+        null_mut(),
+        0,
+        0,
+        width + extra_width,
+        height + extra_height,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    true
 }
 
 unsafe fn position(hwnd: HWND, anchor: Anchor) {

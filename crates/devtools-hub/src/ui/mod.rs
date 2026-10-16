@@ -1,8 +1,12 @@
-//! egui 界面：剪贴板面板与设置页。
+//! egui 界面：剪贴板面板、设置页、鼠标中键快捷面板与 JSON 编辑器。
+//!
+//! 四个页面共用同一个窗口：切换页面时由平台层调整窗口大小和位置。
 
 mod fonts;
 mod icons;
+mod json_editor;
 mod panel;
+mod quick_panel;
 mod settings_page;
 #[cfg(test)]
 mod snapshot_tests;
@@ -19,13 +23,16 @@ use devtools_clipboard::{uti, Snapshot, Store};
 
 use crate::hotkey::{self, HotkeyService};
 use crate::platform::pasteboard::Pasteboard;
-use crate::platform::{keyboard, panel as native_panel};
+use crate::platform::{keyboard, panel as native_panel, Anchor, Placement};
+use crate::selection::{self, Selection};
 use crate::settings::Settings;
 use crate::shared::{AppEvent, Shared};
 use crate::tray::Tray;
-use crate::{controller, Args};
+use crate::{controller, middle_click, Args};
 
+use json_editor::JsonEditorView;
 use panel::PanelView;
+use quick_panel::QuickPanelView;
 use settings_page::SettingsView;
 use style::Palette;
 use textures::{AppIcons, Textures};
@@ -34,6 +41,9 @@ use textures::{AppIcons, Textures};
 enum Page {
     Panel,
     Settings,
+    /// 鼠标中键弹出的快捷面板。
+    QuickActions,
+    JsonEditor,
 }
 
 /// 粘贴方式。
@@ -52,6 +62,9 @@ struct Toast {
     until: Instant,
 }
 
+/// JSON 编辑器直接打开的 .json 文件大小上限。
+const JSON_FILE_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
 pub struct HubApp {
     ctx: egui::Context,
     shared: Arc<Shared>,
@@ -65,6 +78,10 @@ pub struct HubApp {
     page: Page,
     panel: PanelView,
     settings_view: SettingsView,
+    quick: QuickPanelView,
+    json: JsonEditorView,
+    /// 鼠标中键监听线程是否已启动（只启动一次，之后由设置控制是否拦截）。
+    middle_click_started: bool,
     textures: Textures,
     app_icons: AppIcons,
     toast: Option<Toast>,
@@ -108,6 +125,7 @@ impl HubApp {
             }
             Err(err) => app.hotkey_error = Some(format!("无法初始化全局快捷键：{err}")),
         }
+        app.sync_middle_click();
         app.tray = Tray::new(
             shared.clone(),
             app.data_dir.clone(),
@@ -144,6 +162,9 @@ impl HubApp {
             page: Page::Panel,
             panel: PanelView::default(),
             settings_view: SettingsView::default(),
+            quick: QuickPanelView::default(),
+            json: JsonEditorView::default(),
+            middle_click_started: false,
             textures: Textures::default(),
             app_icons: AppIcons::default(),
             toast: None,
@@ -168,6 +189,7 @@ impl HubApp {
                     self.settings.paused = self.shared.paused.load(Ordering::Relaxed);
                     self.persist_settings();
                 }
+                AppEvent::MiddleClick => self.on_middle_click(),
             }
         }
         let revision = self.shared.revision.load(Ordering::Relaxed);
@@ -190,12 +212,20 @@ impl HubApp {
     }
 
     /// 隐藏面板，并记住用户调整过的窗口大小（PasteNow 存在 `float-panel-size` 偏好里）。
+    /// 剪贴板面板与 JSON 编辑器分别记录；快捷面板的大小是固定的。
     fn hide_panel(&mut self, restore_focus: bool) {
         if let Some(rect) = self.ctx.input(|i| i.viewport().inner_rect) {
             let size = [rect.width().round(), rect.height().round()];
-            if size != self.settings.window_size && size[0] > 100.0 && size[1] > 100.0 {
-                self.settings.window_size = size;
-                self.persist_settings();
+            let saved = match self.page {
+                Page::Panel | Page::Settings => Some(&mut self.settings.window_size),
+                Page::JsonEditor => Some(&mut self.settings.json_editor_size),
+                Page::QuickActions => None,
+            };
+            if let Some(saved) = saved {
+                if size != *saved && size[0] > 100.0 && size[1] > 100.0 {
+                    *saved = size;
+                    self.persist_settings();
+                }
             }
         }
         native_panel::hide(restore_focus);
@@ -268,6 +298,86 @@ impl HubApp {
         });
     }
 
+    /// 鼠标中键：模拟复制读取选中的内容，然后在鼠标处弹出快捷面板。
+    ///
+    /// 与 uTools 不同，读取期间不先显示面板：面板显示时会激活本应用，复制快捷键就发不到原来的应用了。
+    /// 读取一般只要几十毫秒，没有选中内容时最多等约 0.3 秒。
+    fn on_middle_click(&mut self) {
+        if !self.settings.middle_click || native_panel::is_active() {
+            return;
+        }
+        self.startup_hide_pending = false;
+        self.cancel_hotkey_recording();
+        self.accessibility_ok = keyboard::accessibility_trusted(false);
+        let selection = if self.accessibility_ok {
+            let keycode = keyboard::copy_keycode();
+            selection::capture(&self.shared, &self.pasteboard(), || {
+                keyboard::post_copy(keycode)
+            })
+        } else {
+            None
+        };
+        tracing::debug!(
+            "鼠标中键：{}",
+            selection
+                .as_ref()
+                .map_or_else(|| "没有选中内容".to_string(), Selection::label)
+        );
+        self.quick.open(selection);
+        self.page = Page::QuickActions;
+        native_panel::show(
+            Anchor::Placement(Placement::NearCursor),
+            self.quick.window_size(),
+        );
+    }
+
+    /// 打开 JSON 编辑器：有选中内容时载入并自动格式化，没有时保留上次的内容。
+    fn open_json_editor(&mut self, selection: Option<Selection>) {
+        let indent = self.settings.json_indent;
+        match selection {
+            Some(Selection::Text(text)) => self.json.load(&text, indent),
+            Some(Selection::Files(paths)) => {
+                let path = std::path::Path::new(&paths[0]);
+                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                if size > JSON_FILE_MAX_BYTES {
+                    self.show_toast(format!("文件太大（{}）", style::byte_size(size)));
+                    self.json.focus();
+                } else {
+                    match std::fs::read_to_string(path) {
+                        Ok(text) => self.json.load(&text, indent),
+                        Err(err) => {
+                            self.show_toast(format!("读取文件失败：{err}"));
+                            self.json.focus();
+                        }
+                    }
+                }
+            }
+            None => self.json.focus(),
+        }
+        self.page = Page::JsonEditor;
+        native_panel::show(
+            Anchor::Placement(Placement::ScreenCenter),
+            self.settings.json_editor_size,
+        );
+    }
+
+    /// 从快捷面板切换到剪贴板历史面板。
+    fn open_clipboard_panel(&mut self) {
+        self.on_shown(Page::Panel);
+        native_panel::show(
+            Anchor::Placement(self.settings.placement),
+            self.settings.window_size,
+        );
+    }
+
+    /// 设置开启时启动鼠标中键监听（只启动一次；关闭时监听线程直接放行中键）。
+    fn sync_middle_click(&mut self) {
+        if self.settings.middle_click && !self.middle_click_started {
+            middle_click::start(self.shared.clone());
+            self.middle_click_started = true;
+        }
+    }
+
     fn snapshot_for(&self, id: i64, mode: PasteMode) -> Result<Snapshot> {
         let snapshot = self.store.snapshot(id)?;
         if mode != PasteMode::PlainText {
@@ -296,12 +406,14 @@ impl HubApp {
         };
         let lost_focus = self.was_focused && !focused;
         self.was_focused = focused;
-        if lost_focus
-            && self.settings.hide_on_blur
-            && !self.panel.pinned
-            && self.page == Page::Panel
-            && native_panel::is_visible()
-        {
+        let auto_hide = match self.page {
+            Page::Panel => self.settings.hide_on_blur && !self.panel.pinned,
+            Page::Settings => false,
+            // 快捷面板与 uTools 一样，点到别处就收起。
+            Page::QuickActions => true,
+            Page::JsonEditor => self.settings.hide_on_blur && !self.json.pinned,
+        };
+        if lost_focus && auto_hide && native_panel::is_visible() {
             // 用户点击了别的应用：只隐藏，不抢回焦点。
             controller::note_auto_hide();
             self.hide_panel(false);
@@ -317,8 +429,14 @@ impl HubApp {
             self.toast = None;
             return;
         }
+        // JSON 编辑器底部有两行工具栏，提示放在它上面。
+        let bottom = if self.page == Page::JsonEditor {
+            -96.0
+        } else {
+            -48.0
+        };
         egui::Area::new(egui::Id::new("toast"))
-            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -48.0))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, bottom))
             .order(egui::Order::Foreground)
             .interactable(false)
             .show(ctx, |ui| {
@@ -356,7 +474,7 @@ impl eframe::App for HubApp {
         self.handle_focus();
         // Windows 上面板显示期间定时刷新：失焦不一定产生 repaint 事件（winit 的焦点状态可能已经不一致），
         // 需要轮询才能发现焦点变化。macOS 的失焦事件可靠，不需要轮询；隐藏时不排重绘，保持空闲。
-        if cfg!(windows) && self.page == Page::Panel && native_panel::is_visible() {
+        if cfg!(windows) && self.page != Page::Settings && native_panel::is_visible() {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
         self.draw(ui);
@@ -378,8 +496,9 @@ impl HubApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let palette = self.palette(ui.ctx());
         let inner_margin = match self.page {
-            Page::Panel => egui::Margin::ZERO,
+            Page::Panel | Page::JsonEditor => egui::Margin::ZERO,
             Page::Settings => egui::Margin::same(14),
+            Page::QuickActions => egui::Margin::same(6),
         };
         let frame = egui::Frame::new()
             .fill(palette.background)
@@ -391,6 +510,8 @@ impl HubApp {
             .show(ui, |ui| match self.page {
                 Page::Panel => self.panel_ui(ui),
                 Page::Settings => self.settings_ui(ui),
+                Page::QuickActions => self.quick_ui(ui),
+                Page::JsonEditor => self.json_editor_ui(ui),
             });
         let ctx = self.ctx.clone();
         self.toast_ui(&ctx);

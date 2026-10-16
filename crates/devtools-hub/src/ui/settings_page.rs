@@ -68,6 +68,9 @@ impl HubApp {
                 section(ui, &palette, "粘贴", |ui| {
                     self.paste_section(ui, &palette, &mut settings)
                 });
+                section(ui, &palette, "鼠标中键", |ui| {
+                    middle_click_section(ui, &palette, &mut settings)
+                });
                 section(ui, &palette, "记录", |ui| {
                     record_section(ui, &palette, &mut settings)
                 });
@@ -96,6 +99,7 @@ impl HubApp {
                 self.apply_hotkey();
             }
             self.persist_settings();
+            self.sync_middle_click();
         }
     }
 
@@ -483,6 +487,35 @@ impl HubApp {
         }
         if let Some(message) = &self.settings_view.message {
             ui.label(RichText::new(message).color(palette.weak).size(11.5));
+        }
+    }
+}
+
+fn middle_click_section(ui: &mut Ui, palette: &Palette, settings: &mut Settings) {
+    switch_row(
+        ui,
+        palette,
+        "按下鼠标中键弹出快捷面板",
+        &mut settings.middle_click,
+    );
+    hint(
+        ui,
+        palette,
+        &format!(
+            "在其他应用中选中文字后按鼠标中键，会模拟 {} 读取选中的内容（读完恢复剪贴板），\
+             列出能处理它的功能，例如选中 JSON 时可以用 JSON 编辑器格式化；没有选中时列出常用功能",
+            keys::shortcut(&[keys::COMMAND, "C"])
+        ),
+    );
+    if platform::PASTE_NEEDS_PERMISSION && settings.middle_click {
+        if keyboard::accessibility_trusted(false) {
+            hint(ui, palette, "开启后，中键点击不会再传给前台应用");
+        } else {
+            ui.label(
+                RichText::new("需要“辅助功能”权限才能监听鼠标中键和读取选中的内容")
+                    .color(palette.warn)
+                    .size(11.5),
+            );
         }
     }
 }

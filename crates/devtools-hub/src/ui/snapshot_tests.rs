@@ -1,4 +1,5 @@
-//! 离屏渲染测试：用示例数据渲染面板和设置页，输出 PNG 供人工检查，并验证键盘操作。
+//! 离屏渲染测试：用示例数据渲染面板、设置页、鼠标中键快捷面板和 JSON 编辑器，
+//! 输出 PNG 供人工检查，并验证键盘操作。
 //!
 //! 需要 GPU（wgpu/Metal），默认忽略。手动运行：
 //! `cargo test -p devtools-hub snapshot -- --ignored`
@@ -16,8 +17,10 @@ use egui_kittest::Harness;
 use image::{ImageFormat, Rgba, RgbaImage};
 
 use super::{style, HubApp, Page};
+use crate::selection::Selection;
 use crate::settings::Settings;
 use crate::shared::Shared;
+use crate::tools::QuickAction;
 
 fn source(bundle_id: &str, name: &str) -> SourceApp {
     SourceApp {
@@ -254,5 +257,142 @@ fn snapshot_panel_and_settings() {
         harness.set_size(egui::vec2(380.0, 1500.0));
         harness.run_steps(3);
         save(&mut harness, &format!("settings-full-{suffix}"));
+    }
+}
+
+/// uTools 截图中选中的那段 JSON（单行），外加一个嵌套数组。
+const SELECTED_JSON: &str = r#"{"menuId": 701011,"menuName": "预算和投入","menuNameEn": "","parentId": 7010,"icon": "","routePath": "bugetInvest","sort": 2.0,"visible": true,"subList": [{"menuId": 70101101, "menuName": "预算编制", "todoCount": 3}],"todoCount": 0}"#;
+
+fn harness_for(
+    dir: &std::path::Path,
+    theme: egui::Theme,
+    size: egui::Vec2,
+    setup: impl FnOnce(&mut HubApp),
+) -> Harness<'static, HubApp> {
+    let settings = Settings::default();
+    let app = HubApp::build(
+        egui::Context::default(),
+        Shared::new(&settings),
+        Store::open(dir).unwrap(),
+        dir.to_path_buf(),
+        settings,
+    );
+    let mut harness = Harness::builder()
+        .with_size(size)
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut HubApp| {
+                app.handle_events();
+                app.draw(ui);
+            },
+            app,
+        );
+    let ctx = harness.ctx.clone();
+    style::install(&ctx);
+    ctx.set_theme(theme);
+    ctx.all_styles_mut(|style| style.interaction.tooltip_delay = 0.0);
+    harness.state_mut().ctx = ctx;
+    // 字体在上面才装进 harness 的 Context，页面要在这之后再切换。
+    setup(harness.state_mut());
+    harness.run_steps(3);
+    harness
+}
+
+/// 快捷面板的窗口大小。harness 外层的 CentralPanel 四周各有 8 点边距，一并加上。
+fn quick_size(app: &HubApp) -> egui::Vec2 {
+    let [width, height] = app.quick.window_size();
+    egui::vec2(width + 16.0, height + 16.0)
+}
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_quick_panel_and_json_editor() {
+    let dir = tempfile::tempdir().unwrap();
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        // 没有选中内容：列出常用功能。
+        let mut probe = None;
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
+            app.quick.open(None);
+            app.page = Page::QuickActions;
+            probe = Some(quick_size(app));
+        });
+        harness.set_size(probe.unwrap());
+        harness.run_steps(2);
+        save(&mut harness, &format!("quick-empty-{suffix}"));
+
+        // 选中的文本不是 JSON：提示没有匹配的功能。
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
+            app.quick
+                .open(Some(Selection::Text("今天的会议改到下午三点".into())));
+            app.page = Page::QuickActions;
+            probe = Some(quick_size(app));
+        });
+        assert_eq!(
+            harness.state().quick.actions,
+            [QuickAction::ClipboardHistory]
+        );
+        harness.set_size(probe.unwrap());
+        harness.run_steps(2);
+        save(&mut harness, &format!("quick-unmatched-{suffix}"));
+
+        // 选中 JSON：第一项是 JSON 编辑器，回车打开并自动格式化。
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
+            app.quick.open(Some(Selection::Text(SELECTED_JSON.into())));
+            app.page = Page::QuickActions;
+            probe = Some(quick_size(app));
+        });
+        assert_eq!(
+            harness.state().quick.actions,
+            [QuickAction::JsonEditor, QuickAction::ClipboardHistory]
+        );
+        harness.set_size(probe.unwrap());
+        harness.run_steps(2);
+        save(&mut harness, &format!("quick-json-{suffix}"));
+        harness.key_press(Key::ArrowDown);
+        harness.run_steps(1);
+        assert_eq!(harness.state().quick.selected, 1);
+        harness.key_press(Key::ArrowUp);
+        harness.run_steps(1);
+        harness.key_press(Key::Enter);
+        harness.run_steps(1);
+        assert_eq!(harness.state().page, Page::JsonEditor);
+        assert!(harness
+            .state()
+            .json
+            .text
+            .starts_with("{\n    \"menuId\": 701011,\n    \"menuName\": \"预算和投入\","));
+        assert!(
+            harness.state().json.text.contains("\"sort\": 2.0,"),
+            "数字保持原样"
+        );
+        harness.set_size(egui::vec2(760.0, 560.0));
+        harness.run_steps(4);
+        save(&mut harness, &format!("json-editor-{suffix}"));
+
+        // ⌥C 压缩并复制。
+        harness.key_press_modifiers(Modifiers::ALT, Key::C);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().toast.as_ref().map(|t| t.text.as_str()),
+            Some("已复制压缩后的 JSON")
+        );
+        assert!(!harness.state().json.text.contains('ç'), "⌥C 不应输入字符");
+
+        // 路径过滤。
+        harness.state_mut().json.filter = ".subList[].menuName".into();
+        harness.run_steps(4);
+        save(&mut harness, &format!("json-filter-{suffix}"));
+
+        // 格式错误：底栏显示行列号，出错行标红。
+        harness.state_mut().json.filter.clear();
+        harness.state_mut().json.text = "{\n    \"a\": 1\n    \"b\": [1, 2,]\n}".into();
+        harness.run_steps(4);
+        save(&mut harness, &format!("json-error-{suffix}"));
+
+        // esc 关闭编辑器。
+        harness.key_press(Key::Escape);
+        harness.run_steps(2);
+        assert_eq!(harness.state().page, Page::Panel);
     }
 }

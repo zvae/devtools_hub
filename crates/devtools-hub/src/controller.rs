@@ -61,7 +61,7 @@ pub fn show_panel(shared: &Shared, open_settings: bool) {
         });
         return;
     }
-    panel::show(Anchor::Placement(shared.placement()));
+    panel::show(Anchor::Placement(shared.placement()), shared.panel_size());
     shared.post(if open_settings {
         AppEvent::OpenSettings
     } else {
@@ -78,7 +78,7 @@ pub fn toggle_from_status_item(shared: &Shared, tray: Option<TrayRect>) {
     if panel::is_visible() {
         panel::hide(true);
     } else if !just_auto_hidden() {
-        panel::show(Anchor::StatusItem(tray));
+        panel::show(Anchor::StatusItem(tray), shared.panel_size());
         shared.post(AppEvent::PanelShown);
     }
 }

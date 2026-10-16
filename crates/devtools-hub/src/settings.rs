@@ -8,6 +8,7 @@ use devtools_clipboard::CaptureRules;
 use serde::{Deserialize, Serialize};
 
 use crate::platform::panel::Placement;
+use crate::tools::json::Indent;
 
 const SETTINGS_FILE: &str = "settings.json";
 pub const DATA_DIR_ENV: &str = "DEVTOOLS_HUB_DATA_DIR";
@@ -112,6 +113,11 @@ pub struct Settings {
     pub hide_on_blur: bool,
     /// 面板大小（逻辑像素），PasteNow 的默认大小约为 360×787。
     pub window_size: [f32; 2],
+    /// 在其他应用中按下鼠标中键时弹出快捷面板（对应 uTools 的“鼠标按键弹出：按下鼠标中键”）。
+    pub middle_click: bool,
+    /// JSON 编辑器窗口大小（逻辑像素）。
+    pub json_editor_size: [f32; 2],
+    pub json_indent: Indent,
 }
 
 impl Default for Settings {
@@ -128,6 +134,9 @@ impl Default for Settings {
             placement: Placement::default(),
             hide_on_blur: true,
             window_size: [380.0, 640.0],
+            middle_click: true,
+            json_editor_size: [760.0, 560.0],
+            json_indent: Indent::default(),
         }
     }
 }

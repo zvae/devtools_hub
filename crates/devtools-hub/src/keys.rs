@@ -4,6 +4,7 @@
 mod labels {
     pub const COMMAND: &str = "⌘";
     pub const SHIFT: &str = "⇧";
+    pub const ALT: &str = "⌥";
     pub const RETURN: &str = "↩";
     pub const DELETE: &str = "⌫";
     pub const TAB: &str = "⇥";
@@ -16,6 +17,7 @@ mod labels {
 mod labels {
     pub const COMMAND: &str = "Ctrl";
     pub const SHIFT: &str = "Shift";
+    pub const ALT: &str = "Alt";
     pub const RETURN: &str = "Enter";
     pub const DELETE: &str = "Del";
     pub const TAB: &str = "Tab";
