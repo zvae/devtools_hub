@@ -26,7 +26,7 @@ PasteNow 的实现分析和证据见 [docs/PasteNow实现分析.md](docs/PasteNo
 | | macOS | Windows |
 | --- | --- | --- |
 | 默认唤起快捷键 | `⇧⌘V`（与 PasteNow 一致） | `Alt+Shift+V`（`Win+V` 是系统剪贴板历史，`Ctrl+Shift+V` 常被用作“粘贴为纯文本”） |
-| 托盘图标 | 菜单栏，面板出现在图标正下方 | 通知区域，任务栏在下方时面板出现在图标上方；图标颜色跟随任务栏明暗 |
+| 托盘图标 | 菜单栏，面板出现在图标正下方 | 通知区域，任务栏在下方时面板出现在图标上方 |
 | 面板背景 | 原生毛玻璃 `NSVisualEffectView` | 不透明背景；Windows 11 上由系统绘制圆角 |
 | 字体 | SF Pro + 苹方，等宽 SF Mono | Segoe UI + 微软雅黑 UI，等宽 Cascadia Mono / Consolas |
 | 快捷键写法 | ⌘ ⇧ ↩ 等符号 | Ctrl、Shift、Enter 等文字 |
@@ -105,6 +105,14 @@ zsh scripts/bundle-macos.sh
 
 会生成 `target/release/DevTools Hub.app`（`LSUIElement`、ad-hoc 签名）。
 
+### 图标
+
+原图是 `crates/devtools-hub/assets/` 下的 `logo.png`（应用图标）和 `menu_bar.png`（菜单栏 / 托盘图标）。修改原图后运行下面的脚本（需要 Pillow 和 macOS 的 `iconutil`），重新生成并提交各平台图标：`AppIcon.icns`（打包进 .app）、`icon.ico`（由 `build.rs` 嵌入 Windows exe）、`icon.png`（Windows 窗口图标）、`tray.png`（托盘图标）。
+
+```bash
+python3 scripts/generate-icons.py
+```
+
 ### macOS 权限
 
 自动粘贴要模拟 ⌘V，需要在“系统设置 › 隐私与安全性 › 辅助功能”中授权。未授权时，选中条目只会复制到剪贴板，面板顶部会出现“去授权”按钮。
@@ -147,6 +155,8 @@ crates/
 │   ├── store.rs              SQLite 存储：去重、搜索、列表、清理、外部数据
 │   └── thumbnail.rs          图片缩略图
 └── devtools-hub/             应用（macOS / Windows）
+    ├── assets/               应用图标与托盘图标（原图及生成的各平台格式）
+    ├── build.rs              Windows 上把程序图标嵌入 exe
     ├── monitor.rs            剪贴板监听线程
     ├── middle_click.rs       鼠标中键快捷面板的触发
     ├── selection.rs          模拟复制读取选中的内容，读完恢复剪贴板

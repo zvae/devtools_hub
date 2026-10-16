@@ -1,7 +1,7 @@
 //! 菜单栏 / 托盘图标（PasteNow 是 `LSUIElement` 应用，只在菜单栏显示 `NSStatusItem`）。
 //!
 //! 与 PasteNow 一致：左键点击在图标旁弹出/收起面板，右键显示菜单。
-//! macOS 上图标是模板图像，由系统按菜单栏明暗着色；Windows 上按任务栏主题画成黑色或白色。
+//! 图标是彩色的，菜单栏 / 任务栏明暗主题下都按原色显示。
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -98,14 +98,12 @@ impl Tray {
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(true)
             .with_tooltip("DevTools Hub 剪贴板历史");
+        // macOS 菜单栏图标高 22pt，按 2 倍像素提供；Windows 按系统 DPI 下的小图标尺寸提供。
         #[cfg(target_os = "macos")]
-        let builder = builder.with_icon_templated(icon([0, 0, 0])?);
+        let size = 44;
         #[cfg(not(target_os = "macos"))]
-        let builder = {
-            let light = crate::platform::taskbar_uses_light_theme();
-            builder.with_icon(icon(if light { [0, 0, 0] } else { [255, 255, 255] })?)
-        };
-        let icon = builder.build()?;
+        let size = crate::platform::small_icon_size();
+        let icon = builder.with_icon(icon(size)?).build()?;
         Ok(Self {
             _icon: icon,
             pause,
@@ -120,54 +118,14 @@ impl Tray {
     }
 }
 
-/// 程序绘制一个剪贴板形状的单色图标。
-fn icon(rgb: [u8; 3]) -> Result<Icon> {
-    const SIZE: u32 = 44;
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-    let s = SIZE as f32;
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            // 板身：圆角矩形描边
-            let body = rounded_rect_sdf(px, py, (s * 0.2, s * 0.16), (s * 0.8, s * 0.94), s * 0.1);
-            let mut alpha = coverage(body.abs() - s * 0.045);
-            // 夹子：实心圆角矩形
-            alpha = alpha.max(coverage(rounded_rect_sdf(
-                px,
-                py,
-                (s * 0.34, s * 0.06),
-                (s * 0.66, s * 0.24),
-                s * 0.05,
-            )));
-            // 内容横线
-            for (top, right) in [(0.42, 0.66), (0.57, 0.66), (0.72, 0.52)] {
-                let line = rounded_rect_sdf(
-                    px,
-                    py,
-                    (s * 0.34, s * top),
-                    (s * right, s * (top + 0.06)),
-                    s * 0.03,
-                );
-                alpha = alpha.max(coverage(line));
-            }
-            let i = ((y * SIZE + x) * 4) as usize;
-            rgba[i..i + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], (alpha * 255.0) as u8]);
-        }
-    }
-    Ok(Icon::from_rgba(rgba, SIZE, SIZE)?)
-}
+/// 菜单栏 / 托盘图标，由 `scripts/generate-icons.py` 从 `assets/menu_bar.png` 生成。
+const TRAY_PNG: &[u8] = include_bytes!("../assets/tray.png");
 
-fn rounded_rect_sdf(px: f32, py: f32, min: (f32, f32), max: (f32, f32), radius: f32) -> f32 {
-    let (cx, cy) = ((min.0 + max.0) / 2.0, (min.1 + max.1) / 2.0);
-    let (hx, hy) = (
-        (max.0 - min.0) / 2.0 - radius,
-        (max.1 - min.1) / 2.0 - radius,
-    );
-    let (dx, dy) = ((px - cx).abs() - hx, (py - cy).abs() - hy);
-    let outside = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt();
-    outside + dx.max(dy).min(0.0) - radius
-}
+/// 解码托盘图标并缩放到 `size` 像素见方，由我们而不是系统缩放，小尺寸下更清晰。
+fn icon(size: u32) -> Result<Icon> {
+    use image::imageops::{self, FilterType};
 
-fn coverage(distance: f32) -> f32 {
-    (0.5 - distance).clamp(0.0, 1.0)
+    let image = image::load_from_memory(TRAY_PNG)?.into_rgba8();
+    let image = imageops::resize(&image, size, size, FilterType::Lanczos3);
+    Ok(Icon::from_rgba(image.into_raw(), size, size)?)
 }

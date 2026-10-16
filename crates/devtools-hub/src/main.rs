@@ -141,12 +141,26 @@ fn main() -> anyhow::Result<()> {
         .with_resizable(true)
         .with_visible(false)
         .with_window_level(egui::WindowLevel::AlwaysOnTop);
-    // macOS：透明窗口 + 原生毛玻璃背景。
+    // macOS：透明窗口 + 原生毛玻璃背景。应用图标用 .app 里的 AppIcon.icns，
+    // 传空图标是为了阻止 eframe 在运行时把它换成 egui 的默认图标。
     #[cfg(target_os = "macos")]
-    let viewport = viewport.with_transparent(true).with_has_shadow(true);
+    let viewport = viewport
+        .with_transparent(true)
+        .with_has_shadow(true)
+        .with_icon(egui::IconData::default());
     // Windows：不在任务栏显示按钮（只在通知区域常驻）；不透明窗口，圆角交给 DWM。
+    // 窗口图标在 Alt+Tab 中显示；exe 文件的图标由 build.rs 嵌入。
     #[cfg(windows)]
-    let viewport = viewport.with_taskbar(false);
+    let viewport = {
+        let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))
+            .context("解码窗口图标失败")?
+            .into_rgba8();
+        viewport.with_taskbar(false).with_icon(egui::IconData {
+            width: icon.width(),
+            height: icon.height(),
+            rgba: icon.into_raw(),
+        })
+    };
 
     let options = eframe::NativeOptions {
         viewport,
