@@ -13,15 +13,19 @@ use egui::{
     Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 
+use super::code_text;
 use super::fonts;
+use super::glass;
 use super::icons::{self, Icon};
 use super::menu;
+use super::native_menu::{self, Entry, NativeMenu};
 use super::style::{self, kind_color, kind_icon, Palette};
 use super::{HubApp, PasteMode};
 use crate::platform::{keyboard, panel as native_panel, workspace};
 use crate::settings::{Settings, Tab};
 use crate::update::{self, Install, Release};
 use crate::{hotkey, keys, platform};
+use tray_icon::menu::accelerator::Code;
 
 const CARD_HEIGHT: f32 = 74.0;
 const FAVORITE_COLOR: Color32 = Color32::from_rgb(0xf5, 0xa6, 0x23);
@@ -100,8 +104,15 @@ pub struct PanelView {
     viewport_height: f32,
     preview: Option<Preview>,
     new_list_name: String,
-    /// 右键菜单当前显示“添加到列表”页。
-    menu_lists: bool,
+    /// 最近弹出的原生右键菜单，选中菜单项后从这里取回对应的操作。
+    context_menu: Option<NativeMenu<Action>>,
+    /// 下一帧打开右上角的新建列表弹窗（右键菜单的“新建列表…”）。
+    open_new_list: bool,
+    /// 新建列表弹窗打开期间，新列表要加入的条目。
+    new_list_item: Option<i64>,
+    /// 浮在列表上面、下面的顶部栏与底部栏的高度（上一帧量出来的）。
+    header_height: f32,
+    footer_height: f32,
     error: Option<String>,
 }
 
@@ -172,15 +183,31 @@ impl PanelView {
 }
 
 /// 面板上产生的操作，绘制结束后统一执行，避免绘制过程中借用冲突。
-enum Action {
+#[derive(Debug, PartialEq)]
+pub(super) enum Action {
     Paste(i64, PasteMode),
     Delete(i64),
-    SetInList { item: i64, list: i64, member: bool },
-    CreateList { name: String, add_item: Option<i64> },
+    SetInList {
+        item: i64,
+        list: i64,
+        member: bool,
+    },
+    CreateList {
+        name: String,
+        add_item: Option<i64>,
+    },
     TogglePreview,
     TogglePause,
     HideTab(Tab),
     EditTabs,
+    /// 弹出条目的右键菜单。
+    ItemMenu(i64),
+    /// 弹出分类标签的右键菜单（“全部”没有对应的标签）。
+    TabMenu(Option<Tab>),
+    /// 打开新建列表弹窗，新列表创建后加入 `add_item`。
+    NewList {
+        add_item: Option<i64>,
+    },
     OpenSettings,
     Close,
     OpenUrl(String),
@@ -200,64 +227,43 @@ impl HubApp {
             self.panel_keys(ui.ctx(), &mut actions);
         }
 
-        egui::Panel::top("header")
-            .show_separator_line(false)
-            .frame(Frame::NONE.inner_margin(Margin {
-                left: style::PAD,
-                right: style::PAD,
-                top: style::PAD,
-                bottom: 4,
-            }))
-            .show(ui, |ui| self.header(ui, &palette, &mut actions));
-        egui::Panel::top("chips")
-            .show_separator_line(false)
-            .frame(Frame::NONE.inner_margin(Margin {
-                left: style::PAD,
-                right: style::PAD,
-                top: 4,
-                bottom: 8,
-            }))
-            .show(ui, |ui| self.chips(ui, &palette, &mut actions));
         if self.panel.needs_reload {
             self.reload_items();
         }
-        egui::Panel::bottom("footer")
-            .show_separator_line(false)
-            .frame(Frame::NONE.inner_margin(Margin {
-                left: style::PAD,
-                right: style::PAD,
-                top: 4,
-                bottom: 8,
-            }))
-            .show(ui, |ui| self.footer(ui, &palette, &mut actions));
+        let window = ui.max_rect();
+        // 顶部栏、底部栏浮在列表上面：列表占满整个窗口，上下留出两个栏的高度（上一帧量出来的）。
+        let (top, bottom) = (self.panel.header_height, self.panel.footer_height);
+        let mut list = None;
         egui::CentralPanel::default()
             .frame(Frame::NONE)
             .show(ui, |ui| {
-                if let Some(error) = self.panel.error.clone() {
-                    ui.label(RichText::new(error).color(palette.warn));
-                }
-                if self.settings.paste_to_active_app && !self.accessibility_ok {
-                    accessibility_banner(ui, &palette, &mut actions);
-                }
-                if let Some(release) = self
-                    .pending_update()
-                    .filter(|release| self.update_dismissed.as_ref() != Some(&release.version))
-                {
-                    let install = self.shared.update_state().install;
-                    update_banner(ui, &palette, &release, install.as_ref(), &mut actions);
-                }
                 if self.panel.preview_open && !self.panel.items.is_empty() {
-                    self.preview_ui(ui, &palette, &mut actions);
+                    let inner = Rect::from_min_max(
+                        window.min + Vec2::new(0.0, top),
+                        window.max - Vec2::new(0.0, bottom),
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                        self.preview_ui(ui, &palette, &mut actions)
+                    });
                 } else {
                     self.panel.preview_open = false;
-                    self.card_list(ui, &palette, &mut actions);
+                    list = self.card_list(ui, &palette, &mut actions, top, bottom);
                 }
             });
+        if let Some(liquid) = &self.liquid {
+            liquid.capture(ui.ctx(), list.as_ref(), window, palette.background);
+        }
+        self.glass_header(ui, &palette, window, list.as_ref(), &mut actions);
+        self.glass_footer(ui, &palette, window, list.as_ref(), &mut actions);
+        if self.panel.needs_reload {
+            // 搜索词或分类在顶部栏里变了：下一帧按新条件重新加载列表。
+            ui.ctx().request_repaint();
+        }
 
         self.apply_actions(actions);
     }
 
-    fn reload_items(&mut self) {
+    pub(super) fn reload_items(&mut self) {
         self.panel.needs_reload = false;
         let (kind, list_id) = self.panel.filter.to_query();
         let query = ItemQuery {
@@ -412,13 +418,120 @@ impl HubApp {
         }
     }
 
+    /// 浮在列表上方的顶部栏：搜索框、分类标签与提示横幅，背景是玻璃（见 `glass`）。
+    fn glass_header(
+        &mut self,
+        ui: &mut Ui,
+        palette: &Palette,
+        window: Rect,
+        list: Option<&glass::Source>,
+        actions: &mut Vec<Action>,
+    ) {
+        egui::Area::new(ui.id().with("glass-header"))
+            .order(egui::Order::Middle)
+            .fixed_pos(window.min)
+            .constrain(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_width(window.width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let bar = glass::Bar::begin(ui.painter());
+                let last = Rect::from_min_size(
+                    window.min,
+                    Vec2::new(window.width(), self.panel.header_height),
+                );
+                drag_window(ui, last);
+                Frame::NONE
+                    .inner_margin(Margin {
+                        left: style::PAD,
+                        right: style::PAD,
+                        top: style::PAD,
+                        bottom: 4,
+                    })
+                    .show(ui, |ui| self.header(ui, palette, actions));
+                Frame::NONE
+                    .inner_margin(Margin {
+                        left: style::PAD,
+                        right: style::PAD,
+                        top: 4,
+                        bottom: 8,
+                    })
+                    .show(ui, |ui| self.chips(ui, palette, actions));
+                if let Some(error) = self.panel.error.clone() {
+                    Frame::NONE
+                        .inner_margin(Margin::symmetric(style::PAD, 4))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(error).color(palette.warn));
+                        });
+                }
+                if self.settings.paste_to_active_app && !self.accessibility_ok {
+                    accessibility_banner(ui, palette, actions);
+                }
+                if let Some(release) = self
+                    .pending_update()
+                    .filter(|release| self.update_dismissed.as_ref() != Some(&release.version))
+                {
+                    let install = self.shared.update_state().install;
+                    update_banner(ui, palette, &release, install.as_ref(), actions);
+                }
+
+                let height = ui.min_rect().bottom() - window.top();
+                let rect = Rect::from_min_size(window.min, Vec2::new(window.width(), height));
+                let liquid = self.liquid.as_ref().map(|liquid| (liquid, 0));
+                let tint = glass_tint(palette, liquid.is_some());
+                bar.finish(ui.painter(), rect, glass::Edge::Top, list, tint, liquid);
+                if (height - self.panel.header_height).abs() > 0.5 {
+                    self.panel.header_height = height;
+                    ui.ctx().request_discard("顶部栏的高度变了");
+                }
+            });
+    }
+
+    /// 浮在列表下方的底部栏：暂停按钮、条目数与快捷键说明，背景与顶部栏一样是玻璃。
+    fn glass_footer(
+        &mut self,
+        ui: &mut Ui,
+        palette: &Palette,
+        window: Rect,
+        list: Option<&glass::Source>,
+        actions: &mut Vec<Action>,
+    ) {
+        egui::Area::new(ui.id().with("glass-footer"))
+            .order(egui::Order::Middle)
+            .pivot(Align2::LEFT_BOTTOM)
+            .fixed_pos(window.left_bottom())
+            .constrain(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_width(window.width());
+                let bar = glass::Bar::begin(ui.painter());
+                let last = Rect::from_min_max(
+                    window.left_bottom() - Vec2::new(0.0, self.panel.footer_height),
+                    window.right_bottom(),
+                );
+                drag_window(ui, last);
+                Frame::NONE
+                    .inner_margin(Margin {
+                        left: style::PAD,
+                        right: style::PAD,
+                        top: 4,
+                        bottom: 8,
+                    })
+                    .show(ui, |ui| self.footer(ui, palette, actions));
+                let height = ui.min_rect().height();
+                let rect = Rect::from_min_max(
+                    window.left_bottom() - Vec2::new(0.0, height),
+                    window.right_bottom(),
+                );
+                let liquid = self.liquid.as_ref().map(|liquid| (liquid, 1));
+                let tint = glass_tint(palette, liquid.is_some());
+                bar.finish(ui.painter(), rect, glass::Edge::Bottom, list, tint, liquid);
+                if (height - self.panel.footer_height).abs() > 0.5 {
+                    self.panel.footer_height = height;
+                    ui.ctx().request_discard("底部栏的高度变了");
+                }
+            });
+    }
+
     fn header(&mut self, ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action>) {
-        // 先注册拖动区域，后添加的控件会覆盖它，因此只有空白处能拖动窗口。
-        let drag = ui.interact(ui.max_rect(), ui.id().with("drag-window"), Sense::drag());
-        // macOS 由平台层自己发起拖动（winit 的实现可能用错起点，见 `panel::start_drag`）。
-        if drag.drag_started() && !native_panel::start_drag() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
         centered_row(ui, 30.0, |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let pinned = self.panel.pinned;
@@ -517,50 +630,44 @@ impl HubApp {
                             if response.clicked() {
                                 self.panel.set_filter(filter);
                             }
-                            egui::Popup::context_menu(&response).show(|ui| {
-                                menu::begin(ui, 180.0);
-                                if let Some(tab) = filter.tab() {
-                                    if menu::Item::new(Icon::EyeSlash, "隐藏此标签")
-                                        .ui(ui, palette)
-                                        .clicked()
-                                    {
-                                        actions.push(Action::HideTab(tab));
-                                    }
-                                }
-                                if menu::Item::new(Icon::Gear, "编辑分类标签…")
-                                    .ui(ui, palette)
-                                    .clicked()
-                                {
-                                    actions.push(Action::EditTabs);
-                                }
-                            });
+                            if response.secondary_clicked() {
+                                actions.push(Action::TabMenu(filter.tab()));
+                            }
                         }
                     });
                 });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let plus = icon_button(ui, Icon::Plus, false, palette).on_hover_text("新建列表");
-                egui::Popup::menu(&plus)
+                if std::mem::take(&mut self.panel.open_new_list) {
+                    egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&plus));
+                }
+                let shown = egui::Popup::menu(&plus)
                     // 点击输入框不关闭。
                     .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                     .show(|ui| {
                         menu::begin(ui, 220.0);
-                        menu::heading(ui, palette, "新建列表");
+                        let heading = if self.panel.new_list_item.is_some() {
+                            "新建列表并加入当前条目"
+                        } else {
+                            "新建列表"
+                        };
+                        menu::heading(ui, palette, heading);
                         if new_list_row(ui, &mut self.panel.new_list_name, palette, true) {
                             actions.push(Action::CreateList {
                                 name: std::mem::take(&mut self.panel.new_list_name),
-                                add_item: None,
+                                add_item: self.panel.new_list_item.take(),
                             });
                             ui.close();
                         }
                         menu::separator(ui, palette);
-                        if menu::Item::new(Icon::Gear, "编辑分类标签…")
-                            .ui(ui, palette)
-                            .clicked()
-                        {
+                        if menu::item(ui, palette, "编辑分类标签…").clicked() {
                             actions.push(Action::EditTabs);
                             ui.close();
                         }
                     });
+                if shown.is_none() {
+                    self.panel.new_list_item = None;
+                }
             });
         });
     }
@@ -628,9 +735,19 @@ impl HubApp {
             });
     }
 
-    fn card_list(&mut self, ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action>) {
+    /// 卡片列表。`top`、`bottom` 是浮在上面、下面的两个栏的高度：列表占满整个窗口，
+    /// 内容上下留出这两段空白；滚到栏下面的卡片不直接画（裁剪掉），露出栏的玻璃背景。
+    /// 返回卡片画在图层里的哪一段，没有原生玻璃时栏把它们读回去画成模糊的样子。
+    fn card_list(
+        &mut self,
+        ui: &mut Ui,
+        palette: &Palette,
+        actions: &mut Vec<Action>,
+        top: f32,
+        bottom: f32,
+    ) -> Option<glass::Source> {
         if self.panel.items.is_empty() {
-            ui.add_space(ui.available_height() * 0.28);
+            ui.add_space(top + (ui.available_height() - top - bottom) * 0.28);
             ui.vertical_centered(|ui| {
                 let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
                 icons::paint(ui.painter(), icon_rect, Icon::Document, palette.weak);
@@ -642,33 +759,62 @@ impl HubApp {
                 };
                 ui.label(RichText::new(text).color(palette.weak));
             });
-            return;
+            return None;
         }
 
-        ui.spacing_mut().item_spacing.y = CARD_GAP;
         let stride = CARD_HEIGHT + CARD_GAP;
+        let area = ui.max_rect();
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt("items")
-            .auto_shrink([false, false]);
+            .auto_shrink([false, false])
+            .scroll_bar_rect(Rect::from_min_max(
+                area.min + Vec2::new(0.0, top),
+                area.max - Vec2::new(0.0, bottom),
+            ));
         if std::mem::take(&mut self.panel.scroll_to_selected) {
-            let top = self.panel.selected as f32 * stride;
-            let bottom = top + CARD_HEIGHT;
-            let view = self.panel.viewport_height.max(CARD_HEIGHT);
-            if top < self.panel.scroll_offset {
-                scroll = scroll.vertical_scroll_offset(top);
-            } else if bottom > self.panel.scroll_offset + view {
-                scroll = scroll.vertical_scroll_offset(bottom - view + CARD_GAP);
+            // 卡片在内容里的位置；可见范围是视口去掉顶部栏挡住的部分。
+            let card_top = top + self.panel.selected as f32 * stride;
+            let card_bottom = card_top + CARD_HEIGHT;
+            let view = (self.panel.viewport_height - bottom).max(top + CARD_HEIGHT);
+            if card_top - top < self.panel.scroll_offset {
+                scroll = scroll.vertical_scroll_offset(card_top - top);
+            } else if card_bottom > self.panel.scroll_offset + view {
+                scroll = scroll.vertical_scroll_offset(card_bottom - view + CARD_GAP);
             }
         }
         let count = self.panel.items.len();
-        let output = scroll.show_rows(ui, CARD_HEIGHT, count, |ui, range| {
-            for index in range {
+        let mut list = None;
+        let output = scroll.show_viewport(ui, |ui, viewport| {
+            ui.set_min_height(top + count as f32 * stride + bottom);
+            let clip = ui.clip_rect().intersect(Rect::from_min_max(
+                egui::pos2(f32::NEG_INFINITY, area.top() + top),
+                egui::pos2(f32::INFINITY, area.bottom() - bottom),
+            ));
+            ui.set_clip_rect(clip);
+            let layer = ui.layer_id();
+            let start = glass::Source::shape_count(ui.ctx(), layer);
+            let origin = ui.max_rect().min;
+            let first = ((viewport.top() - top) / stride).floor().max(0.0) as usize;
+            let last = (((viewport.bottom() - top) / stride).ceil().max(0.0) as usize).min(count);
+            for index in first..last {
                 let item = self.panel.items[index].clone();
-                self.card(ui, index, &item, palette, actions);
+                let rect = Rect::from_min_size(
+                    origin + Vec2::new(0.0, top + index as f32 * stride),
+                    Vec2::new(ui.max_rect().width(), CARD_HEIGHT),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    self.card(ui, index, &item, palette, actions)
+                });
             }
+            let end = glass::Source::shape_count(ui.ctx(), layer);
+            list = Some(glass::Source {
+                layer,
+                shapes: start..end,
+            });
         });
         self.panel.scroll_offset = output.state.offset.y;
         self.panel.viewport_height = output.inner_rect.height();
+        list
     }
 
     fn card(
@@ -687,7 +833,7 @@ impl HubApp {
             self.panel.selected = index;
         }
         if response.secondary_clicked() {
-            self.panel.menu_lists = false;
+            actions.push(Action::ItemMenu(item.id));
         }
         if response.double_clicked() {
             actions.push(Action::Paste(item.id, PasteMode::Original));
@@ -834,145 +980,117 @@ impl HubApp {
                 } else {
                     item.title.as_str()
                 };
-                let galley = wrapped(ui, text, 13.5, color, content.width(), 2);
+                // 从 IDE 复制的代码按富文本里的高亮显示。
+                let galley = match self.code.get(&self.store, item) {
+                    Some(runs) => ui.painter().layout_job(code_text::card_job(
+                        &runs,
+                        palette,
+                        12.5,
+                        content.width(),
+                        2,
+                    )),
+                    None => wrapped(ui, text, 13.5, color, content.width(), 2),
+                };
                 let pos = egui::pos2(content.left(), content.center().y - galley.size().y / 2.0);
                 painter.galley(pos, galley, color);
             }
         }
-
-        egui::Popup::context_menu(&response)
-            // 菜单里有翻页和输入框，点击菜单内部不自动关闭，选中菜单项后由 `item_menu` 关闭。
-            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| self.item_menu(ui, item, palette, actions));
     }
 
-    fn item_menu(
-        &mut self,
-        ui: &mut Ui,
-        item: &ClipItem,
-        palette: &Palette,
-        actions: &mut Vec<Action>,
-    ) {
-        menu::begin(ui, 220.0);
-        let chosen = if self.panel.menu_lists {
-            self.list_menu(ui, item, palette)
-        } else {
-            self.main_menu(ui, item, palette)
-        };
-        if let Some(action) = chosen {
-            actions.push(action);
-            ui.close();
-        }
-    }
-
-    fn main_menu(&mut self, ui: &mut Ui, item: &ClipItem, palette: &Palette) -> Option<Action> {
-        let mut chosen = None;
+    /// 条目的右键菜单，参照 PasteNow：只有文字，右侧是快捷键。
+    pub(super) fn item_menu(&self, item: &ClipItem) -> Vec<Entry<Action>> {
+        let id = item.id;
         let target = native_panel::previous_app_name()
-            .map_or_else(|| "粘贴".to_string(), |app| format!("粘贴到 {app}"));
-        let entries = [
-            (
-                Icon::Clipboard,
-                target.as_str(),
-                &[keys::RETURN][..],
-                PasteMode::Original,
+            .map_or_else(|| "粘贴".to_string(), |app| format!("粘贴到“{app}”"));
+        let mut lists: Vec<Entry<Action>> = self
+            .panel
+            .lists
+            .iter()
+            .map(|list| {
+                let member = item.in_list(list.id);
+                Entry::Check {
+                    label: list.name.clone(),
+                    checked: member,
+                    action: Action::SetInList {
+                        item: id,
+                        list: list.id,
+                        member: !member,
+                    },
+                }
+            })
+            .collect();
+        lists.push(Entry::Separator);
+        lists.push(Entry::item(
+            "新建列表…",
+            Action::NewList { add_item: Some(id) },
+        ));
+
+        let mut entries = vec![
+            Entry::shortcut(
+                target,
+                native_menu::NONE,
+                Code::Enter,
+                Action::Paste(id, PasteMode::Original),
             ),
-            (
-                Icon::Text,
+            Entry::shortcut(
                 "以纯文本粘贴",
-                &[keys::SHIFT, keys::RETURN],
-                PasteMode::PlainText,
+                native_menu::SHIFT,
+                Code::Enter,
+                Action::Paste(id, PasteMode::PlainText),
             ),
-            (
-                Icon::Copy,
+            Entry::shortcut(
                 "仅复制",
-                &[keys::COMMAND, keys::RETURN],
-                PasteMode::CopyOnly,
+                native_menu::COMMAND,
+                Code::Enter,
+                Action::Paste(id, PasteMode::CopyOnly),
             ),
+            Entry::Separator,
+            Entry::Submenu {
+                label: "添加到列表".into(),
+                entries: lists,
+            },
         ];
-        for (icon, label, shortcut, mode) in entries {
-            if menu::Item::new(icon, label)
-                .shortcut(shortcut)
-                .ui(ui, palette)
-                .clicked()
-            {
-                chosen = Some(Action::Paste(item.id, mode));
-            }
-        }
-        if menu::Item::new(Icon::Eye, "预览")
-            .shortcut(&[keys::COMMAND, "Y"])
-            .ui(ui, palette)
-            .clicked()
-        {
-            chosen = Some(Action::TogglePreview);
-        }
-        menu::separator(ui, palette);
-        if menu::Item::new(Icon::List, "添加到列表")
-            .chevron()
-            .ui(ui, palette)
-            .clicked()
-        {
-            self.panel.menu_lists = true;
-        }
         if item.kind == ContentKind::Files {
             let first_path = self
                 .store
-                .text(item.id)
+                .text(id)
                 .ok()
                 .flatten()
                 .and_then(|text| text.lines().next().map(str::to_string));
             if let Some(path) = first_path {
                 let label = format!("在{}中显示", platform::FILE_MANAGER);
-                if menu::Item::new(Icon::Folder, label)
-                    .ui(ui, palette)
-                    .clicked()
-                {
-                    chosen = Some(Action::Reveal(path));
-                }
+                entries.push(Entry::item(label, Action::Reveal(path)));
             }
         }
-        menu::separator(ui, palette);
-        if menu::Item::new(Icon::Trash, "删除")
-            .shortcut(&[keys::COMMAND, keys::DELETE])
-            .danger()
-            .ui(ui, palette)
-            .clicked()
-        {
-            chosen = Some(Action::Delete(item.id));
-        }
-        chosen
+        entries.extend([
+            Entry::Separator,
+            Entry::shortcut(
+                "删除",
+                native_menu::COMMAND,
+                Code::Backspace,
+                Action::Delete(id),
+            ),
+            Entry::Separator,
+            Entry::shortcut(
+                "预览",
+                native_menu::COMMAND,
+                Code::KeyY,
+                Action::TogglePreview,
+            ),
+        ]);
+        entries
     }
 
-    /// “添加到列表”页：已加入的列表打勾，点击切换；底部新建列表并把条目加进去。
-    fn list_menu(&mut self, ui: &mut Ui, item: &ClipItem, palette: &Palette) -> Option<Action> {
-        let mut chosen = None;
-        if menu::Item::new(Icon::Back, "添加到列表")
-            .ui(ui, palette)
-            .clicked()
-        {
-            self.panel.menu_lists = false;
+    /// 在原生右键菜单里选中了一项。
+    pub(super) fn menu_command(&mut self, id: &str) {
+        let action = self
+            .panel
+            .context_menu
+            .as_mut()
+            .and_then(|menu| menu.take(id));
+        if let Some(action) = action {
+            self.apply_actions(vec![action]);
         }
-        menu::separator(ui, palette);
-        for list in &self.panel.lists {
-            let member = item.in_list(list.id);
-            if menu::Item::new(member.then_some(Icon::Check), &list.name)
-                .ui(ui, palette)
-                .clicked()
-            {
-                chosen = Some(Action::SetInList {
-                    item: item.id,
-                    list: list.id,
-                    member: !member,
-                });
-            }
-        }
-        menu::separator(ui, palette);
-        if new_list_row(ui, &mut self.panel.new_list_name, palette, false) {
-            chosen = Some(Action::CreateList {
-                name: std::mem::take(&mut self.panel.new_list_name),
-                add_item: Some(item.id),
-            });
-        }
-        chosen
     }
 
     fn preview_ui(&mut self, ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action>) {
@@ -1126,10 +1244,18 @@ impl HubApp {
                                     .id_salt("preview-text")
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
-                                        let text = RichText::new(&preview.text)
-                                            .monospace()
-                                            .size(12.5)
-                                            .color(palette.text);
+                                        let text: egui::WidgetText =
+                                            match self.code.get(&self.store, &item) {
+                                                Some(runs) => {
+                                                    code_text::preview_job(&runs, palette, 12.5)
+                                                        .into()
+                                                }
+                                                None => RichText::new(&preview.text)
+                                                    .monospace()
+                                                    .size(12.5)
+                                                    .color(palette.text)
+                                                    .into(),
+                                            };
                                         ui.add(egui::Label::new(text).extend());
                                         if preview.truncated {
                                             let note =
@@ -1165,7 +1291,7 @@ impl HubApp {
         }
     }
 
-    fn apply_actions(&mut self, actions: Vec<Action>) {
+    pub(super) fn apply_actions(&mut self, actions: Vec<Action>) {
         for action in actions {
             match action {
                 Action::Paste(id, mode) => self.paste(id, mode),
@@ -1174,6 +1300,7 @@ impl HubApp {
                         self.show_toast(format!("删除失败：{err:#}"));
                     }
                     self.textures.forget(id);
+                    self.code.forget(id);
                     self.panel.needs_reload = true;
                 }
                 Action::SetInList { item, list, member } => {
@@ -1222,6 +1349,17 @@ impl HubApp {
                     self.show_toast("已隐藏，可在设置的“分类标签”中恢复".to_string());
                 }
                 Action::EditTabs => self.reveal_tabs(),
+                Action::ItemMenu(id) => {
+                    let item = self.panel.items.iter().find(|item| item.id == id).cloned();
+                    if let Some(item) = item {
+                        self.panel.context_menu = NativeMenu::popup(self.item_menu(&item));
+                    }
+                }
+                Action::TabMenu(tab) => self.panel.context_menu = NativeMenu::popup(tab_menu(tab)),
+                Action::NewList { add_item } => {
+                    self.panel.new_list_item = add_item;
+                    self.panel.open_new_list = true;
+                }
                 Action::OpenSettings => {
                     self.settings_view.refresh(&self.store);
                     self.page = super::Page::Settings;
@@ -1251,6 +1389,39 @@ impl HubApp {
     }
 }
 
+/// 栏的空白处可以拖动窗口。先于栏里的控件注册，后添加的控件会覆盖它。
+pub(super) fn drag_window(ui: &mut Ui, rect: Rect) {
+    let drag = ui.interact(rect, ui.id().with("drag-window"), Sense::drag());
+    // macOS 由平台层自己发起拖动（winit 的实现可能用错起点，见 `panel::start_drag`）。
+    if drag.drag_started() && !native_panel::start_drag() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+}
+
+/// 栏的底色。液态玻璃时是一层与窗口底色同色的薄底色，压在模糊的内容上；
+/// 模拟玻璃时是窗口底色调淡，再提一点亮。
+pub(super) fn glass_tint(palette: &Palette, liquid: bool) -> Color32 {
+    let dark = palette.text.r() > 128;
+    if liquid {
+        let [r, g, b, _] = palette.background.to_srgba_unmultiplied();
+        return Color32::from_rgba_unmultiplied(r, g, b, if dark { 50 } else { 80 });
+    }
+    let [r, g, b, _] = palette.background.to_srgba_unmultiplied();
+    let lift = |c: u8| c.saturating_add(if dark { 10 } else { 4 });
+    let alpha = (f32::from(palette.background.a()) * 0.4).round() as u8;
+    Color32::from_rgba_unmultiplied(lift(r), lift(g), lift(b), alpha)
+}
+
+/// 分类标签的右键菜单。
+pub(super) fn tab_menu(tab: Option<Tab>) -> Vec<Entry<Action>> {
+    let mut entries = Vec::new();
+    if let Some(tab) = tab {
+        entries.push(Entry::item("隐藏此标签", Action::HideTab(tab)));
+    }
+    entries.push(Entry::item("编辑分类标签…", Action::EditTabs));
+    entries
+}
+
 /// 新建列表的输入框和按钮（菜单里用），回车或点“新建”提交，返回是否提交。
 fn new_list_row(ui: &mut Ui, name: &mut String, palette: &Palette, autofocus: bool) -> bool {
     Frame::NONE
@@ -1263,10 +1434,11 @@ fn new_list_row(ui: &mut Ui, name: &mut String, palette: &Palette, autofocus: bo
                         .background_color(palette.field)
                         .desired_width(146.0),
                 );
+                // 先判断回车：回车会让输入框失去焦点，之后才重新抢回焦点。
+                let submit = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 if autofocus {
                     edit.request_focus();
                 }
-                let submit = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 let valid = !name.trim().is_empty();
                 let create = egui::Button::new(RichText::new("新建").color(Color32::WHITE))
                     .fill(palette.accent)

@@ -3,11 +3,12 @@
 //! 采用 macOS 偏好设置常见的“左侧标签、右侧控件”行布局，布尔项使用开关。
 
 use devtools_clipboard::{ClipList, ExcludedApp, SourceApp, Store, StoreStats, FAVORITES_LIST_ID};
-use egui::{Align, Color32, Key, Layout, Response, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Align, Color32, Key, Layout, Rect, Response, RichText, Sense, Stroke, Ui, Vec2};
 
 use super::fonts;
+use super::glass;
 use super::icons::{self, Icon};
-use super::panel::{centered_row, icon_button, keycaps, tab_label};
+use super::panel::{centered_row, drag_window, glass_tint, icon_button, keycaps, tab_label};
 use super::style::{self, Palette};
 use super::{HubApp, Page};
 use crate::platform::{keyboard, login_item, panel::Placement, workspace, Backdrop};
@@ -31,6 +32,8 @@ pub struct SettingsView {
     pub reveal_update: bool,
     /// 下一帧滚动到“分类标签”分组（从面板的“编辑分类标签…”打开设置时）。
     pub reveal_tabs: bool,
+    /// 浮在内容上面的标题栏的高度（上一帧量出来的）。
+    header_height: f32,
 }
 
 impl SettingsView {
@@ -49,25 +52,25 @@ impl HubApp {
         let palette = self.palette(ui.ctx());
         let escape = !self.settings_view.recording_hotkey
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
-        centered_row(ui, 30.0, |ui| {
-            if icon_button(ui, Icon::Back, false, &palette).clicked() || escape {
-                self.cancel_hotkey_recording();
-                self.page = Page::Panel;
-                self.panel.reset_for_show();
-            }
-            ui.label(
-                RichText::new("设置")
-                    .size(15.0)
-                    .family(egui::FontFamily::Name(fonts::SEMIBOLD.into()))
-                    .color(palette.text),
-            );
-        });
-
+        // 标题栏浮在内容上面（与面板的顶部栏一样是玻璃，见 `glass`）：内容从窗口顶部开始，
+        // 上面留出标题栏的高度（上一帧量出来的），滚到标题栏下面的部分不直接画。
+        let window = ui.max_rect().expand(f32::from(style::PAD));
+        let top = self.settings_view.header_height;
+        let area = ui.max_rect();
         let mut settings = self.settings.clone();
         let mut open_url = None;
+        let mut source = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .scroll_bar_rect(area.with_min_y(window.top() + top))
             .show(ui, |ui| {
+                let clip = ui
+                    .clip_rect()
+                    .intersect(Rect::everything_below(window.top() + top));
+                ui.set_clip_rect(clip);
+                let layer = ui.layer_id();
+                let start = glass::Source::shape_count(ui.ctx(), layer);
+                ui.add_space((top - (area.top() - window.top()) - 12.0).max(0.0));
                 section(ui, &palette, "通用", |ui| {
                     self.general_section(ui, &palette, &mut settings)
                 });
@@ -92,7 +95,9 @@ impl HubApp {
                     self.tabs_section(ui, &palette, &mut settings)
                 });
                 if std::mem::take(&mut self.settings_view.reveal_tabs) {
-                    tabs.scroll_to_me(Some(Align::Min));
+                    // 滚到标题栏下面露出来的位置，而不是被标题栏挡住的视口顶部。
+                    let rect = tabs.rect.with_min_y(tabs.rect.top() - top - 8.0);
+                    ui.scroll_to_rect(rect, Some(Align::Min));
                 }
                 section(ui, &palette, "列表", |ui| {
                     self.lists_section(ui, &palette)
@@ -110,7 +115,16 @@ impl HubApp {
                 if std::mem::take(&mut self.settings_view.reveal_update) {
                     about.response.scroll_to_me(Some(Align::Max));
                 }
+                let end = glass::Source::shape_count(ui.ctx(), layer);
+                source = Some(glass::Source {
+                    layer,
+                    shapes: start..end,
+                });
             });
+        if let Some(liquid) = &self.liquid {
+            liquid.capture(ui.ctx(), source.as_ref(), window, palette.background);
+        }
+        self.settings_header(ui, &palette, window, source.as_ref(), escape);
         if let Some(url) = open_url {
             // 面板浮在其他窗口之上，打开浏览器后收起，免得挡住网页。
             workspace::open_url(&url);
@@ -126,6 +140,61 @@ impl HubApp {
             self.persist_settings();
             self.sync_middle_click();
         }
+    }
+
+    /// 浮在内容上面的标题栏：返回按钮与“设置”。
+    fn settings_header(
+        &mut self,
+        ui: &mut Ui,
+        palette: &Palette,
+        window: Rect,
+        source: Option<&glass::Source>,
+        escape: bool,
+    ) {
+        egui::Area::new(ui.id().with("settings-header"))
+            .order(egui::Order::Middle)
+            .fixed_pos(window.min)
+            .constrain(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_width(window.width());
+                let bar = glass::Bar::begin(ui.painter());
+                let last = Rect::from_min_size(
+                    window.min,
+                    Vec2::new(window.width(), self.settings_view.header_height),
+                );
+                drag_window(ui, last);
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin {
+                        left: style::PAD,
+                        right: style::PAD,
+                        top: style::PAD,
+                        bottom: 6,
+                    })
+                    .show(ui, |ui| {
+                        centered_row(ui, 30.0, |ui| {
+                            if icon_button(ui, Icon::Back, false, palette).clicked() || escape {
+                                self.cancel_hotkey_recording();
+                                self.page = Page::Panel;
+                                self.panel.reset_for_show();
+                            }
+                            ui.label(
+                                RichText::new("设置")
+                                    .size(15.0)
+                                    .family(egui::FontFamily::Name(fonts::SEMIBOLD.into()))
+                                    .color(palette.text),
+                            );
+                        });
+                    });
+                let height = ui.min_rect().bottom() - window.top();
+                let rect = Rect::from_min_size(window.min, Vec2::new(window.width(), height));
+                let liquid = self.liquid.as_ref().map(|liquid| (liquid, 0));
+                let tint = glass_tint(palette, liquid.is_some());
+                bar.finish(ui.painter(), rect, glass::Edge::Top, source, tint, liquid);
+                if (height - self.settings_view.header_height).abs() > 0.5 {
+                    self.settings_view.header_height = height;
+                    ui.ctx().request_discard("标题栏的高度变了");
+                }
+            });
     }
 
     /// 离开设置页时若仍在录制，恢复原快捷键的注册。

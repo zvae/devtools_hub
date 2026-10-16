@@ -285,6 +285,17 @@ pub fn hide(restore_focus: bool) {
     });
 }
 
+/// 在鼠标位置弹出原生右键菜单，菜单关闭后才返回；返回是否选中了菜单项。
+pub fn popup_menu(menu: &tray_icon::menu::Menu) -> bool {
+    use tray_icon::menu::ContextMenu as _;
+    // 先取出视图再弹出：菜单跟踪期间会继续绘制界面，不能一直借用着 PANEL。
+    let Some(view) = with_panel(|_, window| window.contentView()).flatten() else {
+        return false;
+    };
+    // SAFETY: view 是面板窗口的内容视图，这里持有它的引用，菜单弹出期间一直有效。
+    unsafe { menu.show_context_menu_for_nsview(Retained::as_ptr(&view).cast(), None) }
+}
+
 /// 之前的前台应用名称（面板标题里显示“粘贴到 xxx”）。
 pub fn previous_app_name() -> Option<String> {
     PREVIOUS_APP.with(|prev| {

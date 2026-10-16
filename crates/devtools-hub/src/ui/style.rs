@@ -187,8 +187,6 @@ pub struct Palette {
     pub track: Color32,
     pub warn: Color32,
     pub ok: Color32,
-    /// 删除等破坏性操作（macOS 的 systemRed）。
-    pub danger: Color32,
 }
 
 impl Palette {
@@ -216,7 +214,6 @@ impl Palette {
                 track: Color32::from_gray(78),
                 warn: Color32::from_rgb(0xff, 0xb3, 0x40),
                 ok: Color32::from_rgb(0x34, 0xc7, 0x59),
-                danger: Color32::from_rgb(0xff, 0x45, 0x3a),
             }
         } else {
             Self {
@@ -232,7 +229,6 @@ impl Palette {
                 track: Color32::from_gray(214),
                 warn: Color32::from_rgb(0xc2, 0x6a, 0x00),
                 ok: Color32::from_rgb(0x28, 0xa7, 0x45),
-                danger: Color32::from_rgb(0xff, 0x3b, 0x30),
             }
         }
     }

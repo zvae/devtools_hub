@@ -10,14 +10,16 @@ use std::path::PathBuf;
 
 use devtools_clipboard::store::now_ms;
 use devtools_clipboard::{
-    thumbnail, uti, Capture, Representation, Snapshot, SourceApp, Store, FAVORITES_LIST_ID,
+    thumbnail, uti, Capture, ContentKind, Representation, Snapshot, SourceApp, Store,
+    FAVORITES_LIST_ID,
 };
 use egui::{Key, Modifiers};
-use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use image::{ImageFormat, Rgba, RgbaImage};
 
-use super::{style, HubApp, Page};
+use super::native_menu::Entry;
+use super::panel::{tab_menu, Action};
+use super::{style, HubApp, Page, PasteMode};
 use crate::platform::Backdrop;
 use crate::selection::Selection;
 use crate::settings::{Settings, Tab, TabSetting};
@@ -109,11 +111,15 @@ fn seed(store: &mut Store) {
         source("com.apple.Safari", "Safari 浏览器"),
         12,
     );
+    // VS Code 复制代码时同时写入带语法高亮的 HTML（深色主题的配色）。
     let code = record(
         store,
-        Snapshot::from_text(
-            "fn main() {\n    let history = Store::open(dir)?;\n    println!(\"{} items\", history.len());\n}\n",
-        ),
+        Snapshot {
+            items: vec![vec![
+                Representation::new(uti::PLAIN_TEXT, CODE_TEXT.as_bytes()),
+                Representation::new(uti::HTML, CODE_HTML.as_bytes()),
+            ]],
+        },
         source("com.microsoft.VSCode", "Visual Studio Code"),
         3,
     );
@@ -132,6 +138,27 @@ fn seed(store: &mut Store) {
     );
     store.set_in_list(code, FAVORITES_LIST_ID, true).unwrap();
 }
+
+const CODE_TEXT: &str =
+    "fn main() {\n    let history = Store::open(dir)?;\n    println!(\"{} items\", history.len());\n}\n";
+const CODE_HTML: &str = concat!(
+    "<meta charset='utf-8'><div style=\"color: #cccccc;background-color: #1f1f1f;",
+    "font-family: Menlo, Monaco, 'Courier New', monospace;font-size: 12px;white-space: pre;\">",
+    "<div><span style=\"color: #569cd6;\">fn</span><span style=\"color: #cccccc;\"> </span>",
+    "<span style=\"color: #dcdcaa;\">main</span><span style=\"color: #cccccc;\">() {</span></div>",
+    "<div><span style=\"color: #cccccc;\">    </span><span style=\"color: #569cd6;\">let</span>",
+    "<span style=\"color: #cccccc;\"> </span><span style=\"color: #9cdcfe;\">history</span>",
+    "<span style=\"color: #cccccc;\"> = </span><span style=\"color: #4ec9b0;\">Store</span>",
+    "<span style=\"color: #cccccc;\">::</span><span style=\"color: #dcdcaa;\">open</span>",
+    "<span style=\"color: #cccccc;\">(</span><span style=\"color: #9cdcfe;\">dir</span>",
+    "<span style=\"color: #cccccc;\">)?;</span></div>",
+    "<div><span style=\"color: #cccccc;\">    </span><span style=\"color: #dcdcaa;\">println!</span>",
+    "<span style=\"color: #cccccc;\">(</span><span style=\"color: #ce9178;\">&quot;{} items&quot;</span>",
+    "<span style=\"color: #cccccc;\">, </span><span style=\"color: #9cdcfe;\">history</span>",
+    "<span style=\"color: #cccccc;\">.</span><span style=\"color: #dcdcaa;\">len</span>",
+    "<span style=\"color: #cccccc;\">());</span></div>",
+    "<div><span style=\"color: #cccccc;\">}</span></div></div>",
+);
 
 fn output_dir() -> PathBuf {
     let dir = std::env::var_os("UI_SNAPSHOT_DIR")
@@ -308,58 +335,200 @@ fn harness_for(
 
 #[test]
 #[ignore = "需要 GPU 离屏渲染，手动运行"]
-fn snapshot_context_menu() {
+fn snapshot_code() {
     let dir = tempfile::tempdir().unwrap();
     seed(&mut Store::open(dir.path()).unwrap());
     for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
         let mut harness = harness_for(dir.path(), theme, egui::vec2(380.0, 640.0), |app| {
             app.panel.reset_for_show();
         });
-        // 右键最后一条（文件）：菜单里多出“在访达中显示”。
+        // 第二条是从 VS Code 复制的代码：卡片和大预览都按高亮显示。
+        harness.key_press(Key::ArrowDown);
+        harness.run_steps(2);
+        let item = &harness.state().panel.items[1];
+        assert_eq!(item.kind, ContentKind::RichText);
+        harness.key_press(Key::Space);
+        harness.run_steps(4);
+        assert!(harness.state().panel.preview_open);
+        save(&mut harness, &format!("preview-code-{suffix}"));
+    }
+}
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_glass_header() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(&mut Store::open(dir.path()).unwrap());
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(380.0, 520.0), |app| {
+            app.panel.reset_for_show();
+            // 不显示授权提示，顶部栏只有搜索框和分类标签。
+            app.accessibility_ok = true;
+        });
+        harness.run_steps(3);
+        // 往下滚：卡片滚到顶部栏下面，透过玻璃模糊地显示出来。
+        harness.hover_at(egui::pos2(190.0, 300.0));
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(10);
+        save(&mut harness, &format!("glass-header-{suffix}"));
+    }
+}
+
+/// 条目与分类标签的右键菜单是原生菜单，测试里不弹出，只检查菜单内容和选中后的操作。
+#[test]
+fn context_menu_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(&mut Store::open(dir.path()).unwrap());
+    let settings = Settings::default();
+    let mut app = HubApp::build(
+        egui::Context::default(),
+        Shared::new(&settings),
+        Store::open(dir.path()).unwrap(),
+        dir.path().to_path_buf(),
+        settings,
+    );
+    app.panel.reset_for_show();
+    app.reload_items();
+    let files = app
+        .panel
+        .items
+        .iter()
+        .find(|item| item.kind == ContentKind::Files)
+        .cloned()
+        .unwrap();
+
+    // 只有文字，与 PasteNow 一致；文件多出“在访达中显示”。
+    let entries = app.item_menu(&files);
+    let reveal = format!("在{}中显示", crate::platform::FILE_MANAGER);
+    assert_eq!(
+        labels(&entries),
+        [
+            "粘贴",
+            "以纯文本粘贴",
+            "仅复制",
+            "—",
+            "添加到列表",
+            reveal.as_str(),
+            "—",
+            "删除",
+            "—",
+            "预览"
+        ]
+    );
+    let Some(Entry::Submenu { entries: lists, .. }) = entries
+        .iter()
+        .find(|entry| entry.label() == Some("添加到列表"))
+    else {
+        panic!("应有“添加到列表”子菜单");
+    };
+    assert_eq!(labels(lists), ["收藏", "—", "新建列表…"]);
+    assert!(matches!(lists[0], Entry::Check { checked: false, .. }));
+
+    // 选中“收藏”：条目加入收藏，菜单里随之打勾。
+    let favorite = take(entries, &["添加到列表", "收藏"]);
+    assert_eq!(
+        favorite,
+        Action::SetInList {
+            item: files.id,
+            list: FAVORITES_LIST_ID,
+            member: true,
+        }
+    );
+    app.apply_actions(vec![favorite]);
+    app.reload_items();
+    let files = app
+        .panel
+        .items
+        .iter()
+        .find(|item| item.id == files.id)
+        .unwrap();
+    assert!(files.in_list(FAVORITES_LIST_ID));
+    let entries = app.item_menu(files);
+    assert_eq!(
+        take(entries, &["粘贴"]),
+        Action::Paste(files.id, PasteMode::Original)
+    );
+
+    // 分类标签：“全部”只能编辑；其它标签可以隐藏，隐藏后不再显示。
+    assert_eq!(labels(&tab_menu(None)), ["编辑分类标签…"]);
+    let entries = tab_menu(Some(Tab::Link));
+    assert_eq!(labels(&entries), ["隐藏此标签", "编辑分类标签…"]);
+    app.apply_actions(vec![take(entries, &["隐藏此标签"])]);
+    assert!(app.settings.tabs.contains(&TabSetting {
+        tab: Tab::Link,
+        visible: false,
+    }));
+}
+
+/// 菜单项的文字，分隔线写成“—”。
+fn labels<A>(entries: &[Entry<A>]) -> Vec<&str> {
+    entries
+        .iter()
+        .map(|entry| entry.label().unwrap_or("—"))
+        .collect()
+}
+
+/// 按文字路径（子菜单名、菜单项名）取出菜单项对应的操作。
+fn take(entries: Vec<Entry<Action>>, path: &[&str]) -> Action {
+    let (first, rest) = path.split_first().unwrap();
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.label() == Some(first))
+        .unwrap_or_else(|| panic!("找不到菜单项“{first}”"));
+    match entry {
+        Entry::Item { action, .. } | Entry::Check { action, .. } if rest.is_empty() => action,
+        Entry::Submenu { entries, .. } => take(entries, rest),
+        _ => panic!("菜单项“{first}”不能选中"),
+    }
+}
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_new_list_for_item() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(&mut Store::open(dir.path()).unwrap());
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(380.0, 640.0), |app| {
+            app.panel.reset_for_show();
+        });
+        // 右键最后一条（文件）：选中它。
         click_at(
             &mut harness,
             egui::pos2(190.0, MENU_CARD_Y),
             egui::PointerButton::Secondary,
         );
         assert_eq!(harness.state().panel.selected, 5);
-        save(&mut harness, &format!("menu-{suffix}"));
+        let id = harness.state().panel.items[5].id;
 
-        // 悬停“删除”：红底白字。
-        harness.get_by_label("删除").hover();
+        // 菜单里的“新建列表…”：打开右上角的新建列表弹窗，输入框自动获得焦点。
+        // 空格、回车不触发面板的预览与粘贴；回车新建列表并把这一条加进去。
+        harness
+            .state_mut()
+            .apply_actions(vec![Action::NewList { add_item: Some(id) }]);
         harness.run_steps(4);
-        save(&mut harness, &format!("menu-delete-{suffix}"));
-
-        // 点击“添加到列表”：在菜单内翻到列表页，已加入的列表打勾。
-        harness.get_by_label("添加到列表").click();
-        harness.run_steps(4);
-        assert!(harness.query_by_label("新建").is_some());
-        save(&mut harness, &format!("menu-lists-{suffix}"));
-
-        // 在菜单的输入框里打字：空格、回车不触发面板的预览与粘贴，回车新建列表并加入条目。
-        // 第一个输入框是搜索框，菜单里的输入框在后面。
-        let field = |harness: &Harness<'_, HubApp>| {
-            let fields: Vec<_> = harness
-                .get_all_by_role(egui::accesskit::Role::TextInput)
-                .collect();
-            assert_eq!(fields.len(), 2);
-            fields[1].rect().center()
-        };
-        let pos = field(&harness);
-        click_at(&mut harness, pos, egui::PointerButton::Primary);
+        assert!(egui::Popup::is_any_open(&harness.ctx));
         harness.event(egui::Event::Text("工作 笔记".into()));
         harness.run_steps(2);
         assert!(!harness.state().panel.preview_open);
-        save(&mut harness, &format!("menu-new-list-{suffix}"));
+        save(&mut harness, &format!("new-list-for-item-{suffix}"));
         harness.key_press(Key::Enter);
         harness.run_steps(4);
+        assert!(!egui::Popup::is_any_open(&harness.ctx), "新建后弹窗应关闭");
         let panel = &harness.state().panel;
-        assert!(!egui::Popup::is_any_open(&harness.ctx), "新建后菜单应关闭");
         let list = panel
             .lists
             .iter()
             .find(|l| l.name == "工作 笔记")
             .expect("应新建列表");
-        assert!(panel.items[5].in_list(list.id));
+        let item = panel.items.iter().find(|item| item.id == id).unwrap();
+        assert!(item.in_list(list.id));
+        // 下一个主题从头开始。
+        harness.state().store.delete_list(list.id).unwrap();
     }
 }
 
@@ -381,10 +550,10 @@ fn snapshot_tabs() {
         assert!(!egui::Popup::is_any_open(&harness.ctx));
         assert_eq!(harness.state().page, Page::Panel);
 
-        // 右键“链接”标签 → 隐藏此标签。
-        click_at(&mut harness, LINK_CHIP, egui::PointerButton::Secondary);
-        save(&mut harness, &format!("tab-menu-{suffix}"));
-        harness.get_by_label("隐藏此标签").click();
+        // 右键菜单里的“隐藏此标签”（隐藏“链接”）。
+        harness
+            .state_mut()
+            .apply_actions(vec![Action::HideTab(Tab::Link)]);
         harness.run_steps(4);
         let tabs = harness.state().settings.tabs.clone();
         assert!(tabs.contains(&TabSetting {
@@ -393,10 +562,9 @@ fn snapshot_tabs() {
         }));
         save(&mut harness, &format!("tabs-hidden-{suffix}"));
 
-        // 右键“全部” → 编辑分类标签…：打开设置页并滚动到“分类标签”分组。
-        click_at(&mut harness, ALL_CHIP, egui::PointerButton::Secondary);
-        harness.get_by_label("编辑分类标签…").click();
-        harness.run_steps(5);
+        // 右键菜单里的“编辑分类标签…”：打开设置页并滚动到“分类标签”分组。
+        harness.state_mut().apply_actions(vec![Action::EditTabs]);
+        harness.run_steps(12);
         assert_eq!(harness.state().page, Page::Settings);
         save(&mut harness, &format!("settings-tabs-{suffix}"));
 
@@ -446,9 +614,7 @@ fn click_at(harness: &mut Harness<'_, HubApp>, pos: egui::Pos2, button: egui::Po
     harness.run_steps(4);
 }
 
-/// 380×640 的面板里，分类标签一行的控件位置。
-const ALL_CHIP: egui::Pos2 = egui::pos2(39.0, 68.0);
-const LINK_CHIP: egui::Pos2 = egui::pos2(139.0, 68.0);
+/// 380×640 的面板里右上角“+”的位置。
 const PLUS_BUTTON: egui::Pos2 = egui::pos2(350.0, 68.0);
 /// 设置页滚动到“分类标签”分组后，“收藏”一行的上移按钮与“链接”一行的开关。
 const FAVORITES_UP: egui::Pos2 = egui::pos2(264.0, 295.0);
