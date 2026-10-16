@@ -1,0 +1,19 @@
+[package]
+name = "devtools-clipboard"
+description = "剪贴板历史的数据模型、过滤规则与 SQLite 存储"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

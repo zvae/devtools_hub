@@ -1,5 +1,5 @@
 [workspace]
-members = []
+members = ["crates/devtools-clipboard", "crates/devtools-hub"]
 resolver = "2"
 
 [workspace.package]
@@ -10,26 +10,83 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
-arboard = "3.4"
-base64 = "0.22"
-crossbeam-channel = "0.5"
-directories = "5.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+directories = "6.0"
 eframe = "0.36"
 egui = "0.36"
-libc = "0.2"
-global-hotkey = "0.6"
-rdev = "0.5"
-rusqlite = { version = "0.31", features = ["bundled"] }
+global-hotkey = "0.8"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "gif", "bmp", "webp"] }
+objc2 = "0.6"
+# 只启用用到的类：默认特性会编译整个 AppKit（单个 rlib 近 180 MB）。
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "libc",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
+    "NSPasteboard",
+    "NSPasteboardItem",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSView",
+    "NSVisualEffectView",
+    "NSWindow",
+    "NSWorkspace",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGImage"] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSGeometry",
+    "NSString",
+    "NSURL",
+] }
+raw-window-handle = "0.6"
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-thiserror = "1.0"
-time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
-tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "sync", "time"] }
-toml = "0.8"
-tray-icon = "0.24"
+tempfile = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1.10", features = ["v4"] }
-wasmtime = "25.0"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
+tray-icon = "0.26"
+winit = { version = "0.30", default-features = false }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+zstd = "0.13"
+
+devtools-clipboard = { path = "crates/devtools-clipboard" }
+
+# macOS 上 dev 默认 split-debuginfo = "unpacked"：每次增量编译都会在 target/debug/deps
+# 留下一批新的 .o 文件且不会被清理，几次构建后就是数 GB。这里改为打包调试信息，
+# 并且只给本项目代码保留行号信息，依赖不生成调试信息（同时开启优化，egui 在 debug 下更流畅）。
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "packed"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+[profile.release]
+strip = true
