@@ -1,0 +1,185 @@
+name: Release Draft
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-draft-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    runs-on: macos-15
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Find or create draft release
+        id: release
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+
+            let release = releases.find((item) => item.draft);
+            const manifest = fs.readFileSync('Cargo.toml', 'utf8');
+            // 版本号始终以 Cargo.toml 为准，不能用草稿的 tag_name 推导：
+            // 网页端手动创建的草稿会带 GitHub 自动生成的 `untagged-xxxx` 占位标签名。
+            const version = manifest.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? '0.1.0';
+            const tagName = `v${version}`;
+            const latestPublished = releases.find((item) => !item.draft && !item.prerelease);
+
+            if (!release) {
+              const created = await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tagName,
+                target_commitish: context.sha,
+                name: `DevTools Hub ${tagName}`,
+                body: '正在提取更新内容并准备构建产物。',
+                draft: true,
+                prerelease: false,
+              });
+              release = created.data;
+              core.info(`Created draft release ${release.id} (${tagName})`);
+            } else {
+              core.info(`Using existing draft release ${release.id} (tag: ${release.tag_name})`);
+            }
+
+            let commits;
+            if (latestPublished) {
+              const comparison = await github.rest.repos.compareCommits({
+                owner,
+                repo,
+                base: latestPublished.tag_name,
+                head: context.sha,
+              });
+              commits = comparison.data.commits;
+            } else {
+              commits = await github.paginate(github.rest.repos.listCommits, {
+                owner,
+                repo,
+                sha: context.sha,
+                per_page: 100,
+              });
+            }
+
+            const changeLines = commits
+              .slice(0, 100)
+              .map((commit) => {
+                const title = commit.commit.message.split('\n')[0].trim();
+                const shortSha = commit.sha.slice(0, 7);
+                return `- ${title} ([${shortSha}](${commit.html_url}))`;
+              });
+            const changes = changeLines.length > 0
+              ? changeLines.join('\n')
+              : '- 本次提交未发现可提取的变更记录。';
+            const body = [
+              '## 更新内容',
+              changes,
+              '',
+              '## 构建产物',
+              `- macOS arm64: \`DevTools-Hub-${version}-macos-arm64.dmg\``,
+              `- Windows x64: \`DevTools-Hub-${version}-windows-x64.exe\``,
+            ].join('\n');
+
+            const updated = await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.id,
+              // 草稿状态下可改写标签名，把 `untagged-xxxx` 占位草稿修正为当前版本标签。
+              tag_name: tagName,
+              target_commitish: context.sha,
+              name: (!release.name || release.tag_name.startsWith('untagged'))
+                ? `DevTools Hub ${tagName}`
+                : release.name,
+              body,
+              draft: true,
+            });
+
+            core.setOutput('release_id', String(updated.data.id));
+            core.setOutput('upload_url', updated.data.upload_url);
+            core.setOutput('tag_name', tagName);
+            core.setOutput('version', version);
+
+            // 清理修复前残留的 untagged-* 产物，避免发布时混入错误命名的资产。
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner,
+              repo,
+              release_id: updated.data.id,
+              per_page: 100,
+            });
+            for (const asset of assets) {
+              if (asset.name.includes('untagged')) {
+                await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: asset.id });
+                core.info(`Deleted stale asset ${asset.name}`);
+              }
+            }
+
+  build-macos-arm64:
+    needs: [prepare-release]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build macOS application
+        run: zsh scripts/bundle-macos.sh
+      - name: Archive macOS application
+        env:
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          staging_dir="$(mktemp -d)"
+          trap 'rm -rf "$staging_dir"' EXIT
+          ditto "target/release/DevTools Hub.app" "$staging_dir/DevTools Hub.app"
+          ln -s /Applications "$staging_dir/Applications"
+          hdiutil create \
+            -volname "DevTools Hub" \
+            -srcfolder "$staging_dir" \
+            -ov \
+            -format UDZO \
+            "DevTools-Hub-${RELEASE_VERSION}-macos-arm64.dmg"
+      - name: Upload macOS asset to draft
+        uses: shogo82148/actions-upload-release-asset@v1.10.6
+        with:
+          upload_url: ${{ needs.prepare-release.outputs.upload_url }}
+          asset_path: DevTools-Hub-${{ needs.prepare-release.outputs.version }}-macos-arm64.dmg
+          overwrite: true
+
+  build-windows-x64:
+    needs: [prepare-release]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Windows application
+        run: cargo build --release -p devtools-hub
+      - name: Archive Windows application
+        env:
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+        shell: pwsh
+        run: |
+          Copy-Item target/release/devtools-hub.exe "DevTools-Hub-$env:RELEASE_VERSION-windows-x64.exe"
+      - name: Upload Windows asset to draft
+        uses: shogo82148/actions-upload-release-asset@v1.10.6
+        with:
+          upload_url: ${{ needs.prepare-release.outputs.upload_url }}
+          asset_path: DevTools-Hub-${{ needs.prepare-release.outputs.version }}-windows-x64.exe
+          overwrite: true
