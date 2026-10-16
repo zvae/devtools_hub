@@ -1,4 +1,4 @@
-//! Windows 平台能力：剪贴板、来源程序、模拟 Ctrl+V、窗口控制、程序图标、开机启动。
+//! Windows 平台能力：剪贴板、来源程序、模拟 Ctrl+V / Ctrl+C、鼠标中键监听、窗口控制、程序图标、开机启动。
 //!
 //! 与 `platform/macos` 提供相同的模块和函数；剪贴板格式与 UTI 的转换在
 //! `devtools_clipboard::windows_formats` 中，这里只负责调用 Win32 API。
@@ -6,6 +6,7 @@
 pub mod icons;
 pub mod keyboard;
 pub mod login_item;
+pub mod mouse;
 pub mod panel;
 pub mod pasteboard;
 pub mod workspace;

@@ -22,6 +22,11 @@ pub fn describe(app: &NSRunningApplication) -> SourceApp {
     }
 }
 
+/// 本应用是否在前台（例如正在使用 JSON 编辑器）。可以在任意线程调用。
+pub fn is_self_active() -> bool {
+    autoreleasepool(|_| NSRunningApplication::currentApplication().isActive())
+}
+
 /// 当前前台应用（排除自己），用于粘贴前把焦点还给它。
 pub fn frontmost_other_app() -> Option<Retained<NSRunningApplication>> {
     let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;

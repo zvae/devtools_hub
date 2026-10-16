@@ -2,7 +2,9 @@
 
 DevTools Hub 是一个剪贴板历史管理器，支持 macOS 和 Windows，用 Rust + egui 编写，功能和实现思路参考 PasteNow。
 
-PasteNow 的实现分析和证据见 [docs/PasteNow实现分析.md](docs/PasteNow实现分析.md)。
+另外参照 uTools 实现了鼠标中键快捷面板：在任意应用中选中 JSON 后按鼠标中键，可以直接用内置的 JSON 编辑器格式化。
+
+PasteNow 的实现分析和证据见 [docs/PasteNow实现分析.md](docs/PasteNow实现分析.md)，uTools 鼠标中键面板的实现分析和证据见 [docs/uTools鼠标中键面板实现分析.md](docs/uTools鼠标中键面板实现分析.md)。
 
 ## 功能
 
@@ -16,6 +18,8 @@ PasteNow 的实现分析和证据见 [docs/PasteNow实现分析.md](docs/PasteNo
 - **历史清理**：按保留时长（1 天到 1 年，或永久）和最大条数自动清理
 - **菜单栏 / 托盘图标**：左键弹出 / 收起面板，右键打开菜单（暂停记录、设置、打开数据目录、退出）；不显示 Dock 图标或任务栏按钮
 - **开机启动**：macOS 通过 LaunchAgent，Windows 通过注册表 `Run` 项
+- **鼠标中键快捷面板**（参照 uTools）：在其他应用中按鼠标中键，在鼠标处弹出面板。选中了文字时，模拟一次复制读出选中的内容（读完把剪贴板恢复原样，也不会记进历史），标题显示“选中的文本 N 个”，下面列出能处理它的功能；没有选中时列出常用功能。中键点击本身会被拦截，不再传给前台应用；可以在设置中关闭
+- **JSON 编辑器**：选中 JSON（或在访达 / 资源管理器中选中一个 `.json` 文件）后从中键面板打开，自动格式化。数字的写法（`2.0`、超长整数）、键的顺序和注释都原样保留；转义过的 JSON（`{\"a\":1}`）会先去掉转义。带行号与语法高亮，格式错误时显示行列号并标出出错行，点击跳过去。支持重新格式化、去除注释、去除转义、复制、压缩复制、转义复制，缩进可选 2 / 4 / Tab，以及路径过滤（`.key.subkey`、`[0][1]`、`[-1]`、`.list[].name`）
 
 ### 两个平台的差异
 
@@ -27,6 +31,8 @@ PasteNow 的实现分析和证据见 [docs/PasteNow实现分析.md](docs/PasteNo
 | 字体 | SF Pro + 苹方，等宽 SF Mono | Segoe UI + 微软雅黑 UI，等宽 Cascadia Mono / Consolas |
 | 快捷键写法 | ⌘ ⇧ ↩ 等符号 | Ctrl、Shift、Enter 等文字 |
 | 自动粘贴 | 需要“辅助功能”权限 | 不需要额外权限 |
+| 鼠标中键监听 | `CGEventTap`，需要“辅助功能”权限 | 低级鼠标钩子 `WH_MOUSE_LL` |
+| 读取选中内容 | 模拟 ⌘C | 模拟 Ctrl+C；控制台程序用 Ctrl+Insert，避免中断正在运行的命令 |
 | 来源应用标识 | Bundle ID | 程序路径（排除规则可以只写文件名，如 `KeePass.exe`） |
 | 数据目录 | `~/Library/Application Support/DevToolsHub/` | `%LOCALAPPDATA%\DevToolsHub\` |
 
@@ -50,6 +56,21 @@ macOS 用 `⌘`，Windows 用 `Ctrl`：
 | `esc` | 依次关闭预览、清空搜索、关闭面板 |
 
 右键条目还可以把它加入任意列表、在访达 / 资源管理器中显示文件等。面板左上角的 📌 可以固定窗口，固定后点击其他应用也不会隐藏；底部 ⏸ 可以暂停记录，⌨ 上悬停会显示全部快捷键。
+
+## 鼠标中键快捷面板与 JSON 编辑器
+
+快捷面板中：`↑` `↓` 选择，`↩` 或数字键 `1`–`9` 执行，`esc` 或点击别处关闭。
+
+JSON 编辑器中（快捷键与 uTools 的 JSON 编辑器插件一致）：
+
+| 按键 | 作用 |
+| --- | --- |
+| `⌥F` / `Alt+F` | 重新格式化 |
+| `⌥C` / `Alt+C` | 压缩成一行并复制 |
+| `⌥\` / `Alt+\` | 压缩、转义后复制 |
+| `esc` | 关闭（回到之前的应用） |
+
+编辑器左上角的 📌 可以固定窗口。uTools 本身也能用中键唤出面板，两者同时开启时，后启动的那个会先收到中键；请在其中一个里关掉（uTools：设置 › 超级面板，关闭“启用超级面板”，或把“鼠标按键弹出”改成其他按键）。
 
 ## 运行
 
@@ -88,6 +109,8 @@ zsh scripts/bundle-macos.sh
 
 自动粘贴要模拟 ⌘V，需要在“系统设置 › 隐私与安全性 › 辅助功能”中授权。未授权时，选中条目只会复制到剪贴板，面板顶部会出现“去授权”按钮。
 
+鼠标中键快捷面板同样需要这项权限（监听并拦截中键、模拟 ⌘C）。授权后几秒内自动生效，不用重启。
+
 - 用 `cargo run` 启动时，系统会把权限算在启动它的终端上
 - 打包成 .app 后，权限授予的是这个应用。ad-hoc 签名在每次重新打包后会变化，可能需要重新勾选
 
@@ -125,6 +148,9 @@ crates/
 │   └── thumbnail.rs          图片缩略图
 └── devtools-hub/             应用（macOS / Windows）
     ├── monitor.rs            剪贴板监听线程
+    ├── middle_click.rs       鼠标中键快捷面板的触发
+    ├── selection.rs          模拟复制读取选中的内容，读完恢复剪贴板
+    ├── tools/                中键面板里的功能：按选中内容匹配；json.rs 是 JSON 格式化、压缩、转义、路径过滤
     ├── hotkey.rs             全局快捷键
     ├── keys.rs               按键在界面上的写法（⌘ / Ctrl）
     ├── tray.rs               菜单栏 / 托盘图标
@@ -132,12 +158,12 @@ crates/
     ├── settings.rs           设置与数据目录
     ├── platform/
     │   ├── mod.rs            公共类型（面板位置、托盘区域）与平台文案
-    │   ├── macos/            NSPasteboard、前台应用、CGEvent ⌘V、窗口与毛玻璃、LaunchAgent
-    │   └── windows/          Win32 剪贴板、来源程序、SendInput Ctrl+V、窗口定位、图标提取、注册表开机启动
-    └── ui/                   egui 面板、设置页、字体、矢量图标与样式
+    │   ├── macos/            NSPasteboard、前台应用、CGEvent ⌘V / ⌘C、中键 CGEventTap、窗口与毛玻璃、LaunchAgent
+    │   └── windows/          Win32 剪贴板、来源程序、SendInput Ctrl+V / Ctrl+C、中键鼠标钩子、窗口定位、图标提取、注册表开机启动
+    └── ui/                   egui 面板、设置页、中键快捷面板、JSON 编辑器、字体、矢量图标与样式
 ```
 
-两个平台的 `platform` 模块对外提供相同的模块和函数（`pasteboard`、`workspace`、`keyboard`、`panel`、`icons`、`login_item`），编译时按目标系统选择其一。
+两个平台的 `platform` 模块对外提供相同的模块和函数（`pasteboard`、`workspace`、`keyboard`、`mouse`、`panel`、`icons`、`login_item`），编译时按目标系统选择其一。剪贴板面板、设置页、中键快捷面板和 JSON 编辑器共用同一个窗口，切换时由 `panel::show` 调整窗口大小和位置。
 
 ## 测试
 
@@ -146,6 +172,7 @@ cargo test --workspace
 ```
 
 - 核心库的单元测试，包括 Windows 剪贴板格式转换（纯 Rust，任何平台都能运行）
+- JSON 处理（格式化、保留数字与注释、错误位置、转义、路径过滤）与中键面板功能匹配的单元测试；macOS 上还在私有命名剪贴板上验证“模拟复制 → 读取 → 恢复剪贴板”
 - macOS 上还有在私有命名剪贴板上的端到端测试：监听线程的记录、去重、隐私过滤、跳过本应用自己写入的内容、暂停。这些测试不会碰系统剪贴板
 - Windows 上有程序图标提取的测试；剪贴板读写的往返测试会改写系统剪贴板，默认跳过：
 
@@ -165,11 +192,14 @@ cargo check -p devtools-hub --features windows-typecheck
 cargo test -p devtools-hub snapshot -- --ignored
 ```
 
-它会用示例数据渲染面板和设置页（深色、浅色两套），截图输出到 `target/ui-snapshots/`，同时验证键盘选择、搜索、分类切换和打开设置。
+它会用示例数据渲染面板、设置页、中键快捷面板和 JSON 编辑器（深色、浅色两套），截图输出到 `target/ui-snapshots/`，同时验证键盘选择、搜索、分类切换、打开设置，以及从快捷面板打开 JSON 编辑器、自动格式化、⌥C 压缩复制和关闭。
 
 ## 当前限制
 
 - 只支持 macOS 和 Windows；在其他平台上编译后，运行只会输出提示
 - Windows 版本只在 macOS 上做过类型检查，还没有在真实的 Windows 机器上运行验证
 - 没有 iCloud 同步、智能列表的自定义规则、条目编辑、Quick Look
-- 面板是 eframe 的普通窗口：弹出时会激活本应用，粘贴前再把焦点还给原来的应用
+- 面板是 eframe 的普通窗口：弹出时会激活本应用，粘贴前再把焦点还给原来的应用。也因为这样，中键快捷面板要先读完选中内容再显示，没有选中内容时约 0.3 秒后才弹出（uTools 先不抢焦点地显示面板，再读取）
+- 中键快捷面板开启后会拦截所有中键点击（与 uTools 相同），浏览器里中键打开新标签页等操作会失效；还没有按应用排除的设置
+- 读取选中内容靠模拟复制：VS Code 等编辑器在没有选中时 ⌘C 会复制整行，这时会被当成选中了这一行
+- JSON 编辑器还没有折叠 / 展开、转 XML / TypeScript，以及 URL Params、XML、YAML 自动转换

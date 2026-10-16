@@ -4,8 +4,11 @@
 //! - `monitor`：后台线程轮询剪贴板序号（macOS 的 changeCount / Windows 的
 //!   GetClipboardSequenceNumber），按规则记录到 SQLite；
 //! - `hotkey` / `tray`：全局快捷键与菜单栏 / 托盘图标，唤起面板；
+//! - `middle_click` / `selection` / `tools`：鼠标中键快捷面板（参照 uTools）：读取其他应用中
+//!   选中的内容，列出能处理它的功能（目前是 JSON 编辑器）；
 //! - `ui`：egui 面板（搜索、分类、预览、键盘操作）与设置页；
-//! - `platform`：各平台的原生能力（剪贴板读写、模拟粘贴、窗口控制、程序图标、开机启动）。
+//! - `platform`：各平台的原生能力（剪贴板读写、模拟粘贴 / 复制、鼠标中键监听、窗口控制、
+//!   程序图标、开机启动）。
 
 // Windows 发布版不弹出控制台窗口；调试版保留控制台以便查看日志。
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -16,13 +19,19 @@ mod controller;
 mod hotkey;
 mod keys;
 #[cfg(any(target_os = "macos", windows))]
+mod middle_click;
+#[cfg(any(target_os = "macos", windows))]
 mod monitor;
 #[cfg(any(target_os = "macos", windows))]
 mod platform;
 #[cfg(any(target_os = "macos", windows))]
+mod selection;
+#[cfg(any(target_os = "macos", windows))]
 mod settings;
 #[cfg(any(target_os = "macos", windows))]
 mod shared;
+#[cfg(any(target_os = "macos", windows))]
+mod tools;
 #[cfg(any(target_os = "macos", windows))]
 mod tray;
 #[cfg(any(target_os = "macos", windows))]
@@ -126,7 +135,8 @@ fn main() -> anyhow::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_title("DevTools Hub")
         .with_inner_size(settings.window_size)
-        .with_min_inner_size([320.0, 400.0])
+        // 同一个窗口也用作鼠标中键快捷面板，最小尺寸要容得下它。
+        .with_min_inner_size([240.0, 120.0])
         .with_decorations(false)
         .with_resizable(true)
         .with_visible(false)

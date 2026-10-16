@@ -18,6 +18,8 @@ pub enum AppEvent {
     TogglePanel,
     OpenSettings,
     PauseChanged,
+    /// 在其他应用中按下了鼠标中键：读取选中内容并弹出快捷面板。
+    MiddleClick,
 }
 
 /// 监听线程需要的配置快照。
@@ -38,8 +40,13 @@ pub struct Shared {
     /// 每记录一条就加一，UI 据此判断是否需要刷新列表。
     pub revision: AtomicU64,
     pub stop: AtomicBool,
+    /// 鼠标中键快捷面板是否开启（监听线程据此决定是否拦截中键）。
+    pub middle_click: AtomicBool,
     config: Mutex<MonitorConfig>,
     placement: Mutex<Placement>,
+    /// 剪贴板面板的大小（逻辑像素）。窗口也用作快捷面板和 JSON 编辑器，
+    /// 快捷键和托盘弹出面板时据此恢复大小。
+    panel_size: Mutex<[f32; 2]>,
     events: Mutex<VecDeque<AppEvent>>,
     ctx: OnceLock<egui::Context>,
 }
@@ -53,12 +60,14 @@ impl Shared {
             writing: AtomicBool::new(false),
             revision: AtomicU64::new(0),
             stop: AtomicBool::new(false),
+            middle_click: AtomicBool::new(settings.middle_click),
             config: Mutex::new(MonitorConfig {
                 rules: settings.rules.clone(),
                 retention_ms: settings.retention.millis(),
                 max_items: settings.max_items(),
             }),
             placement: Mutex::new(settings.placement),
+            panel_size: Mutex::new(settings.window_size),
             events: Mutex::new(VecDeque::new()),
             ctx: OnceLock::new(),
         })
@@ -75,6 +84,9 @@ impl Shared {
             max_items: settings.max_items(),
         };
         *self.placement.lock().unwrap() = settings.placement;
+        *self.panel_size.lock().unwrap() = settings.window_size;
+        self.middle_click
+            .store(settings.middle_click, Ordering::Relaxed);
     }
 
     pub fn config(&self) -> MonitorConfig {
@@ -83,6 +95,10 @@ impl Shared {
 
     pub fn placement(&self) -> Placement {
         *self.placement.lock().unwrap()
+    }
+
+    pub fn panel_size(&self) -> [f32; 2] {
+        *self.panel_size.lock().unwrap()
     }
 
     pub fn set_ctx(&self, ctx: egui::Context) {

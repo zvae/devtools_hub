@@ -22,7 +22,7 @@ use objc2_app_kit::{
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode,
 };
-use objc2_foundation::{NSPoint, NSRect};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 thread_local! {
@@ -178,12 +178,18 @@ pub fn start_drag() -> bool {
     .is_some()
 }
 
-pub fn show(anchor: Anchor) -> bool {
+/// 显示面板并激活本应用。`size` 是内容区大小（逻辑像素）：同一个窗口既用作剪贴板面板，
+/// 也用作鼠标中键快捷面板和 JSON 编辑器，各自大小不同。
+/// 窗口原本隐藏、或者大小有变化时，按 `anchor` 重新定位。
+pub fn show(anchor: Anchor, size: [f32; 2]) -> bool {
     with_panel(|mtm, window| {
-        if !window.isVisible() {
+        let visible = window.isVisible();
+        if !visible {
             if let Some(app) = workspace::frontmost_other_app() {
                 PREVIOUS_APP.with(|prev| *prev.borrow_mut() = Some(app));
             }
+        }
+        if resize(window, size) || !visible {
             match anchor {
                 Anchor::Placement(placement) => position(mtm, window, placement),
                 Anchor::StatusItem(_) => position_below_status_item(mtm, window),
@@ -206,6 +212,20 @@ pub fn show(anchor: Anchor) -> bool {
         );
     })
     .is_some()
+}
+
+/// 把内容区改成 `size`（逻辑像素），左上角不动。返回大小是否有变化。
+fn resize(window: &NSWindow, size: [f32; 2]) -> bool {
+    let frame = window.frame();
+    let content = window.contentRectForFrameRect(frame);
+    let (width, height) = (f64::from(size[0]), f64::from(size[1]));
+    if (content.size.width - width).abs() < 0.5 && (content.size.height - height).abs() < 0.5 {
+        return false;
+    }
+    let top = frame.origin.y + frame.size.height;
+    window.setContentSize(NSSize::new(width, height));
+    window.setFrameTopLeftPoint(NSPoint::new(frame.origin.x, top));
+    true
 }
 
 /// 隐藏面板；`restore_focus` 为 true 时激活弹出面板之前的前台应用。
@@ -295,7 +315,7 @@ fn position_below_status_item(mtm: MainThreadMarker, window: &NSWindow) {
         let mouse = NSEvent::mouseLocation();
         NSRect::new(
             NSPoint::new(mouse.x - 12.0, mouse.y - 12.0),
-            objc2_foundation::NSSize::new(24.0, 24.0),
+            NSSize::new(24.0, 24.0),
         )
     });
     tracing::debug!(

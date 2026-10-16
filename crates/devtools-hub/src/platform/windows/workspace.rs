@@ -19,8 +19,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible, GWL_EXSTYLE, SW_SHOWNORMAL, WS_EX_TOOLWINDOW,
+    GetForegroundWindow, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    GWL_EXSTYLE, SW_SHOWNORMAL, WS_EX_TOOLWINDOW,
 };
 
 use super::wide;
@@ -58,6 +58,25 @@ pub fn describe_window(window: HWND) -> SourceApp {
         bundle_id: Some(path),
         name: Some(name),
     }
+}
+
+/// 前台窗口所属程序的文件名（如 `WindowsTerminal.exe`）。
+pub fn foreground_exe_name() -> Option<String> {
+    let mut pid = 0u32;
+    // SAFETY: 只读查询；pid 指向有效的栈变量。
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), &mut pid) };
+    let path = process_path(pid)?;
+    Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// 本程序是否在前台（例如正在使用 JSON 编辑器）。可以在任意线程调用。
+pub fn is_self_active() -> bool {
+    let mut pid = 0u32;
+    // SAFETY: 只读查询；pid 指向有效的栈变量。
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), &mut pid) };
+    pid == std::process::id()
 }
 
 fn process_path(pid: u32) -> Option<String> {

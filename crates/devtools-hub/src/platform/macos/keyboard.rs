@@ -1,9 +1,10 @@
-//! 模拟 ⌘V 粘贴。
+//! 模拟 ⌘V 粘贴、⌘C 复制。
 //!
 //! PasteNow 导入了 `CGEventSourceCreate` / `CGEventCreateKeyboardEvent` /
 //! `CGEventSetFlags` / `CGEventPost`，并用 `AXIsProcessTrustedWithOptions` 申请辅助功能权限；
 //! 用 `TISCopyCurrentASCIICapableKeyboardLayoutInputSource` + `UCKeyTranslate` 找到当前键盘布局下
 //! 字母 V 的键码（日志 “Simulate paste item: no avaiable key code”）。这里是同样的实现。
+//! 鼠标中键快捷面板读取选中文本时，与 uTools 一样模拟 ⌘C（`simulateKeyboardTap("c","command")`）。
 
 use std::ffi::c_void;
 use std::ptr;
@@ -64,8 +65,9 @@ const K_CG_SESSION_EVENT_TAP: u32 = 1;
 const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
 const K_UC_KEY_ACTION_DISPLAY: u16 = 3;
 const K_UC_KEY_TRANSLATE_NO_DEAD_KEYS: u32 = 1;
-/// ANSI 布局下 V 的键码（kVK_ANSI_V）。
+/// ANSI 布局下 V、C 的键码（kVK_ANSI_V、kVK_ANSI_C）。
 const KVK_ANSI_V: u16 = 9;
+const KVK_ANSI_C: u16 = 8;
 
 /// 是否已获得“辅助功能”权限；`prompt` 为 true 时若未授权会弹出系统授权提示。
 pub fn accessibility_trusted(prompt: bool) -> bool {
@@ -102,10 +104,19 @@ pub fn open_accessibility_settings() {
 ///
 /// 必须在主线程调用：新版 macOS 上 TIS 系列函数在后台线程调用会触发断言。
 pub fn paste_keycode() -> u16 {
+    keycode_for(b'v', KVK_ANSI_V)
+}
+
+/// 当前键盘布局下产生字母 `c` 的键码（模拟复制以读取选中的内容）。必须在主线程调用。
+pub fn copy_keycode() -> u16 {
+    keycode_for(b'c', KVK_ANSI_C)
+}
+
+fn keycode_for(letter: u8, fallback: u16) -> u16 {
     unsafe {
         let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
         if source.is_null() {
-            return KVK_ANSI_V;
+            return fallback;
         }
         let layout_data = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData);
         let found = if layout_data.is_null() {
@@ -129,16 +140,26 @@ pub fn paste_keycode() -> u16 {
                     &mut length,
                     chars.as_mut_ptr(),
                 );
-                status == 0 && length == 1 && chars[0] == u16::from(b'v')
+                status == 0 && length == 1 && chars[0] == u16::from(letter)
             })
         };
         CFRelease(source);
-        found.unwrap_or(KVK_ANSI_V)
+        found.unwrap_or(fallback)
     }
 }
 
 /// 向当前前台应用发送 ⌘V。可以在任意线程调用。
 pub fn post_paste(keycode: u16) {
+    post_command(keycode);
+}
+
+/// 向当前前台应用发送 ⌘C。可以在任意线程调用。
+pub fn post_copy(keycode: u16) {
+    post_command(keycode);
+}
+
+/// 发送 ⌘ + `keycode`。
+fn post_command(keycode: u16) {
     unsafe {
         let source = CGEventSourceCreate(K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION);
         for key_down in [true, false] {
