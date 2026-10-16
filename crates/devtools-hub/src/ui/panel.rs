@@ -18,6 +18,7 @@ use super::icons::{self, Icon};
 use super::style::{self, kind_color, kind_icon, Palette};
 use super::{HubApp, PasteMode};
 use crate::platform::{keyboard, panel as native_panel, workspace};
+use crate::update::{self, Install, Release};
 use crate::{hotkey, keys, platform};
 
 const CARD_HEIGHT: f32 = 74.0;
@@ -161,6 +162,9 @@ enum Action {
     OpenUrl(String),
     Reveal(String),
     RequestAccessibility,
+    DismissUpdate(String),
+    InstallUpdate,
+    ShowUpdate,
 }
 
 impl HubApp {
@@ -207,6 +211,13 @@ impl HubApp {
                 }
                 if self.settings.paste_to_active_app && !self.accessibility_ok {
                     accessibility_banner(ui, &palette, &mut actions);
+                }
+                if let Some(release) = self
+                    .pending_update()
+                    .filter(|release| self.update_dismissed.as_ref() != Some(&release.version))
+                {
+                    let install = self.shared.update_state().install;
+                    update_banner(ui, &palette, &release, install.as_ref(), &mut actions);
                 }
                 if self.panel.preview_open && !self.panel.items.is_empty() {
                     self.preview_ui(ui, &palette, &mut actions);
@@ -1103,6 +1114,12 @@ impl HubApp {
                     keyboard::open_accessibility_settings();
                     self.hide_panel(false);
                 }
+                Action::DismissUpdate(version) => self.update_dismissed = Some(version),
+                Action::InstallUpdate => {
+                    update::install(&self.shared);
+                    self.reveal_update();
+                }
+                Action::ShowUpdate => self.reveal_update(),
             }
         }
     }
@@ -1253,6 +1270,81 @@ fn accessibility_banner(ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.link(RichText::new("去授权").size(12.0)).clicked() {
                             actions.push(Action::RequestAccessibility);
+                        }
+                    });
+                });
+            },
+        );
+    });
+}
+
+/// 发现新版本的提示：更新（应用内安装，进度在设置页底部显示）或下载，也可以关掉（本次运行不再在面板上提示）。
+fn update_banner(
+    ui: &mut Ui,
+    palette: &Palette,
+    release: &Release,
+    install: Option<&Install>,
+    actions: &mut Vec<Action>,
+) {
+    let version = &release.version;
+    let (text, link, action) = match install {
+        Some(Install::Downloading { received, total }) => {
+            let percent = (*received * 100).checked_div(*total).unwrap_or(0);
+            let text = format!("正在下载 v{version} · {percent}%");
+            (text, "查看", Action::ShowUpdate)
+        }
+        Some(Install::Installing | Install::Installed(_)) => {
+            (format!("正在安装 v{version}…"), "查看", Action::ShowUpdate)
+        }
+        Some(Install::Failed(_)) => (
+            format!("v{version} 自动更新失败"),
+            "查看",
+            Action::ShowUpdate,
+        ),
+        None if update::can_install(release) => (
+            format!("发现新版本 v{version}"),
+            "更新",
+            Action::InstallUpdate,
+        ),
+        None => {
+            let url = release.download_or_page().to_string();
+            (
+                format!("发现新版本 v{version}"),
+                "下载",
+                Action::OpenUrl(url),
+            )
+        }
+    };
+    let margin = Margin {
+        left: style::PAD,
+        right: style::PAD,
+        top: 0,
+        bottom: 8,
+    };
+    Frame::NONE.outer_margin(margin).show(ui, |ui| {
+        style::continuous_frame(
+            ui,
+            style::CARD_RADIUS,
+            palette.accent.gamma_multiply(0.14),
+            Stroke::NONE,
+            Margin::symmetric(12, 6),
+            |ui| {
+                centered_row(ui, 20.0, |ui| {
+                    ui.label(RichText::new(text).color(palette.accent).size(12.0));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let (rect, close) =
+                            ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
+                        let color = if close.hovered() {
+                            palette.text
+                        } else {
+                            palette.weak
+                        };
+                        icons::paint_centered(ui.painter(), rect, 10.0, Icon::Close, color);
+                        if close.on_hover_text("不再在面板上提示").clicked() {
+                            actions.push(Action::DismissUpdate(release.version.clone()));
+                        }
+                        if ui.link(RichText::new(link).size(12.0)).clicked() {
+                            actions.push(action);
                         }
                     });
                 });

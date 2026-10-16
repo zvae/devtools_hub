@@ -1,7 +1,7 @@
-//! 平台能力：剪贴板、来源应用、模拟粘贴、窗口控制、应用图标、开机启动。
+//! 平台能力：剪贴板、来源应用、模拟粘贴、窗口控制、应用图标、开机启动、安装更新。
 //!
 //! macOS 与 Windows 各有一套实现，对外提供相同的模块和函数：
-//! `pasteboard`、`workspace`、`keyboard`、`panel`、`icons`、`login_item`。
+//! `pasteboard`、`workspace`、`keyboard`、`panel`、`icons`、`login_item`、`updater`。
 
 #[cfg(target_os = "macos")]
 mod macos;

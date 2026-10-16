@@ -18,6 +18,7 @@ PasteNow 的实现分析和证据见 [docs/PasteNow实现分析.md](docs/PasteNo
 - **历史清理**：按保留时长（1 天到 1 年，或永久）和最大条数自动清理
 - **菜单栏 / 托盘图标**：左键弹出 / 收起面板，右键打开菜单（暂停记录、设置、打开数据目录、退出）；不显示 Dock 图标或任务栏按钮
 - **开机启动**：macOS 通过 LaunchAgent，Windows 通过注册表 `Run` 项
+- **检查与安装更新**：启动时和之后每天查询一次 GitHub Releases 上最新的正式版本，有新版本时在面板顶部和菜单栏 / 托盘菜单中提示；点击“更新”在应用内下载、校验并替换旧版本，完成后自动重新启动。设置页底部可以手动检查，也可以跳过某个版本或关闭自动检查（见下文“检查更新与发布”）
 - **鼠标中键快捷面板**（参照 uTools）：在其他应用中按鼠标中键，在鼠标处弹出面板。选中了文字时，模拟一次复制读出选中的内容（读完把剪贴板恢复原样，也不会记进历史），标题显示“选中的文本 N 个”，下面列出能处理它的功能；没有选中时列出常用功能。中键点击本身会被拦截，不再传给前台应用；可以在设置中关闭
 - **JSON 编辑器**：选中 JSON（或在访达 / 资源管理器中选中一个 `.json` 文件）后从中键面板打开，自动格式化。数字的写法（`2.0`、超长整数）、键的顺序和注释都原样保留；转义过的 JSON（`{\"a\":1}`）会先去掉转义。带行号与语法高亮，格式错误时显示行列号并标出出错行，点击跳过去。支持重新格式化、去除注释、去除转义、复制、压缩复制、转义复制，缩进可选 2 / 4 / Tab，以及路径过滤（`.key.subkey`、`[0][1]`、`[-1]`、`.list[].name`）
 
@@ -124,6 +125,39 @@ python3 scripts/generate-icons.py
 
 全局快捷键在 macOS 上使用 Carbon `RegisterEventHotKey`，在 Windows 上使用 `RegisterHotKey`，都不需要额外权限。
 
+## 检查更新与发布
+
+应用通过 GitHub 接口 `GET /repos/zvae/devtools_hub/releases/latest` 获取最新的正式版本（草稿和预发布不会返回），把 `tag_name`（如 `v0.2.0`）与编译时的版本号（`Cargo.toml` 中的 `version`）比较：
+
+- **自动检查**：启动 10 秒后检查一次，之后每天一次；按墙上时间判断是否到期，电脑睡眠过也会补上。自动检查失败时不提示，一小时后重试。可以在设置 › 通用中关闭
+- **手动检查**：设置页底部的“检查更新”按钮，失败时显示原因
+- **提示**：面板顶部出现“发现新版本”提示条（可以关掉，本次运行不再提示）；菜单栏 / 托盘菜单最上面出现“发现新版本 vX.Y.Z…”，点击打开设置页底部的更新信息，可以立即更新、查看更新说明或跳过此版本
+- **网络**：使用系统自带的 TLS 与根证书（macOS Security.framework、Windows SChannel）；支持 `HTTPS_PROXY` 等环境变量，Windows 上还会读取系统代理设置
+
+### 应用内安装
+
+在 Release 的附件中按文件名结尾找当前平台的安装包（`-macos-arm64.dmg`、`-windows-x64.exe`），下载到临时目录，核对大小和 GitHub 记录的 SHA-256（附件的 `digest` 字段），然后：
+
+| | macOS | Windows |
+| --- | --- | --- |
+| 替换 | `hdiutil attach` 挂载 dmg，核对 Bundle ID、版本号，`codesign --verify` 检查签名完整；`ditto` 复制到旧版本旁边，再把旧版本改名为 `.DevTools Hub.app.old`、新版本改名到原位置 | 正在运行的 exe 可以改名但不能覆盖：把它改名为 `devtools-hub.exe.old`，再把新版本写到原路径 |
+| 重启 | shell 脚本等当前进程退出后 `open` 新版本（应用还在运行时 `open` 只会激活它） | 直接启动新版本 |
+| 清理 | 新版本启动时删除 `.old` 和临时目录 | 同左 |
+
+- 新版本带 `--after-update` 启动：等旧进程释放单实例锁，沿用同一个数据目录，启动后打开设置页并提示“已更新到 x.y.z”
+- 下载可以取消；失败时显示原因，可以重试或改用浏览器下载
+- 以下情况不支持应用内安装，“更新”按钮会变成在浏览器中下载：用 `cargo run` 等方式启动、不在 .app 里的程序；从下载目录直接打开、被系统移到只读位置运行（App Translocation）的应用；Release 中没有当前平台的安装包
+- macOS 包用的是临时签名，系统按签名识别应用，更新后可能需要在“辅助功能”中重新勾选（设置页会提示）。正式签名并公证后不会有这个问题
+- 自己下载的文件不带隔离属性 / “来自网络”的标记，打开新版本时不会弹出 Gatekeeper 或 SmartScreen 提示
+
+发布新版本：
+
+1. 修改根目录 `Cargo.toml` 中的 `version`，合并到 `main`
+2. CI（`.github/workflows/release.yml`）会创建或更新 Release 草稿 `vX.Y.Z`，并上传 macOS 与 Windows 的安装包
+3. 在 GitHub 上检查草稿并点“发布”。发布后，已安装的旧版本会在下一次检查时提示升级
+
+注意：dmg 中 .app 的 `CFBundleShortVersionString` 必须与 Release 的标签一致（打包脚本从 `Cargo.toml` 读取），否则应用内安装会拒绝这个安装包。
+
 ## 构建产物与磁盘占用
 
 `target/` 是 Cargo 的构建缓存，可以随时用 `cargo clean` 删掉，下次构建会重新生成。工作区的 `Cargo.toml` 已经针对体积做了配置：
@@ -166,14 +200,15 @@ crates/
     ├── tray.rs               菜单栏 / 托盘图标
     ├── controller.rs         显示 / 切换面板
     ├── settings.rs           设置与数据目录
+    ├── update.rs             检查 GitHub Releases 上的新版本，下载并安装
     ├── platform/
     │   ├── mod.rs            公共类型（面板位置、托盘区域）与平台文案
-    │   ├── macos/            NSPasteboard、前台应用、CGEvent ⌘V / ⌘C、中键 CGEventTap、窗口与毛玻璃、LaunchAgent
-    │   └── windows/          Win32 剪贴板、来源程序、SendInput Ctrl+V / Ctrl+C、中键鼠标钩子、窗口定位、图标提取、注册表开机启动
+    │   ├── macos/            NSPasteboard、前台应用、CGEvent ⌘V / ⌘C、中键 CGEventTap、窗口与毛玻璃、LaunchAgent、替换 .app
+    │   └── windows/          Win32 剪贴板、来源程序、SendInput Ctrl+V / Ctrl+C、中键鼠标钩子、窗口定位、图标提取、注册表开机启动、替换 exe
     └── ui/                   egui 面板、设置页、中键快捷面板、JSON 编辑器、字体、矢量图标与样式
 ```
 
-两个平台的 `platform` 模块对外提供相同的模块和函数（`pasteboard`、`workspace`、`keyboard`、`mouse`、`panel`、`icons`、`login_item`），编译时按目标系统选择其一。剪贴板面板、设置页、中键快捷面板和 JSON 编辑器共用同一个窗口，切换时由 `panel::show` 调整窗口大小和位置。
+两个平台的 `platform` 模块对外提供相同的模块和函数（`pasteboard`、`workspace`、`keyboard`、`mouse`、`panel`、`icons`、`login_item`、`updater`），编译时按目标系统选择其一。剪贴板面板、设置页、中键快捷面板和 JSON 编辑器共用同一个窗口，切换时由 `panel::show` 调整窗口大小和位置。
 
 ## 测试
 
@@ -190,6 +225,12 @@ cargo test --workspace
   cargo test -p devtools-hub clipboard_round_trip -- --ignored
   ```
 
+检查更新的单元测试不联网；访问真实 GitHub 接口、下载并校验最新安装包的测试默认跳过：
+
+```bash
+cargo test -p devtools-hub update::tests -- --ignored --nocapture
+```
+
 在 macOS 上可以对 Windows 实现做类型检查（只检查、不链接，不需要安装任何交叉编译工具）：
 
 ```bash
@@ -202,7 +243,7 @@ cargo check -p devtools-hub --features windows-typecheck
 cargo test -p devtools-hub snapshot -- --ignored
 ```
 
-它会用示例数据渲染面板、设置页、中键快捷面板和 JSON 编辑器（深色、浅色两套），截图输出到 `target/ui-snapshots/`，同时验证键盘选择、搜索、分类切换、打开设置，以及从快捷面板打开 JSON 编辑器、自动格式化、⌥C 压缩复制和关闭。
+它会用示例数据渲染面板、设置页、新版本提示、中键快捷面板和 JSON 编辑器（深色、浅色两套），截图输出到 `target/ui-snapshots/`，同时验证键盘选择、搜索、分类切换、打开设置，以及从快捷面板打开 JSON 编辑器、自动格式化、⌥C 压缩复制和关闭。
 
 ## 当前限制
 

@@ -28,6 +28,7 @@ use crate::selection::{self, Selection};
 use crate::settings::Settings;
 use crate::shared::{AppEvent, Shared};
 use crate::tray::Tray;
+use crate::update::{self, Release};
 use crate::{controller, middle_click, Args};
 
 use json_editor::JsonEditorView;
@@ -91,6 +92,8 @@ pub struct HubApp {
     backdrop: Backdrop,
     /// 第一帧之后需要把被 eframe 自动显示的窗口收起来。
     startup_hide_pending: bool,
+    /// 在面板上关掉了提示的新版本（本次运行不再在面板上提示，菜单栏和设置页照常显示）。
+    update_dismissed: Option<String>,
 }
 
 impl HubApp {
@@ -110,7 +113,7 @@ impl HubApp {
             settings,
         );
         app.pasteboard_name = args.pasteboard.clone();
-        app.startup_hide_pending = !args.show;
+        app.startup_hide_pending = !args.show && !args.after_update;
         if let Err(err) = native_panel::attach(cc, app.startup_hide_pending) {
             tracing::warn!("无法设置面板窗口：{err:#}");
         }
@@ -133,7 +136,12 @@ impl HubApp {
         )
         .inspect_err(|err| tracing::warn!("无法创建菜单栏图标：{err:#}"))
         .ok();
-        if args.show {
+        if args.after_update {
+            // 应用内更新后重新启动：打开设置页底部，告诉用户已经是新版本（macOS 上可能还要重新授权）。
+            controller::show_panel(&shared, true);
+            shared.post(AppEvent::RevealUpdate);
+            app.show_toast(format!("已更新到 {}", update::CURRENT_VERSION));
+        } else if args.show {
             controller::show_panel(&shared, false);
         }
         Ok(app)
@@ -172,6 +180,7 @@ impl HubApp {
             was_focused: false,
             backdrop: Backdrop::Opaque,
             startup_hide_pending: false,
+            update_dismissed: None,
         }
     }
 
@@ -194,6 +203,11 @@ impl HubApp {
                     self.persist_settings();
                 }
                 AppEvent::MiddleClick => self.on_middle_click(),
+                AppEvent::UpdateChanged => {
+                    self.sync_update_prompt();
+                    update::restart_if_installed(&self.shared, &self.relaunch_args());
+                }
+                AppEvent::RevealUpdate => self.settings_view.reveal_update = true,
             }
         }
         let revision = self.shared.revision.load(Ordering::Relaxed);
@@ -247,6 +261,40 @@ impl HubApp {
         }
         if let Err(err) = self.settings.save(&self.data_dir) {
             self.show_toast(format!("保存设置失败：{err:#}"));
+        }
+        self.sync_update_prompt();
+    }
+
+    /// 需要提醒的新版本（用户跳过的版本不提醒）。
+    fn pending_update(&self) -> Option<Release> {
+        let state = self.shared.update_state();
+        state
+            .available()
+            .filter(|release| self.settings.skipped_version.as_ref() != Some(&release.version))
+            .cloned()
+    }
+
+    /// 应用内更新后重新启动时传给新版本的参数：沿用同一个数据目录和剪贴板。
+    fn relaunch_args(&self) -> Vec<std::ffi::OsString> {
+        let mut args = vec!["--data-dir".into(), self.data_dir.clone().into_os_string()];
+        if let Some(name) = &self.pasteboard_name {
+            args.extend(["--pasteboard".into(), name.into()]);
+        }
+        args
+    }
+
+    /// 在当前窗口中打开设置页，并滚动到底部的更新信息。
+    fn reveal_update(&mut self) {
+        self.settings_view.refresh(&self.store);
+        self.page = Page::Settings;
+        self.settings_view.reveal_update = true;
+    }
+
+    /// 同步菜单栏 / 托盘菜单里的新版本提示。
+    fn sync_update_prompt(&mut self) {
+        let pending = self.pending_update();
+        if let Some(tray) = &mut self.tray {
+            tray.set_update(pending.as_ref().map(|release| release.version.as_str()));
         }
     }
 

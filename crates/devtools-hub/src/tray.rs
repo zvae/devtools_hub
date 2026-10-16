@@ -2,6 +2,7 @@
 //!
 //! 与 PasteNow 一致：左键点击在图标旁弹出/收起面板，右键显示菜单。
 //! 图标是彩色的，菜单栏 / 任务栏明暗主题下都按原色显示。
+//! 发现新版本时，菜单最上面多出一项“发现新版本”，点击打开设置页底部的更新信息。
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -24,8 +25,13 @@ const CLICK_STATE: MouseButtonState = if cfg!(windows) {
 
 pub struct Tray {
     _icon: TrayIcon,
+    menu: Menu,
     pause: CheckMenuItem,
     show: MenuItem,
+    update: MenuItem,
+    update_separator: PredefinedMenuItem,
+    /// 菜单里正在提示的新版本。
+    update_version: Option<String>,
 }
 
 impl Tray {
@@ -51,6 +57,8 @@ impl Tray {
         let settings = MenuItem::with_id("settings", "设置…", true, None);
         let data = MenuItem::with_id("data", "打开数据目录", true, None);
         let quit = MenuItem::with_id("quit", "退出 DevTools Hub", true, None);
+        // 发现新版本时才插入菜单。
+        let update = MenuItem::with_id("update", "发现新版本", true, None);
         let menu = Menu::with_items(&[
             &show,
             &pause,
@@ -89,12 +97,16 @@ impl Tray {
             }
             "settings" => controller::show_panel(&shared, true),
             "data" => crate::platform::workspace::open_path(&data_dir),
+            "update" => {
+                controller::show_panel(&shared, true);
+                shared.post(AppEvent::RevealUpdate);
+            }
             "quit" => std::process::exit(0),
             _ => {}
         }));
 
         let builder = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
+            .with_menu(Box::new(menu.clone()))
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(true)
             .with_tooltip("DevTools Hub 剪贴板历史");
@@ -106,8 +118,12 @@ impl Tray {
         let icon = builder.with_icon(icon(size)?).build()?;
         Ok(Self {
             _icon: icon,
+            menu,
             pause,
             show,
+            update,
+            update_separator: PredefinedMenuItem::separator(),
+            update_version: None,
         })
     }
 
@@ -115,6 +131,32 @@ impl Tray {
         self.pause.set_checked(paused);
         self.show
             .set_text(format!("打开剪贴板历史    {hotkey_label}"));
+    }
+
+    /// 有需要提醒的新版本时在菜单最上面显示“发现新版本”，没有时移除。
+    pub fn set_update(&mut self, version: Option<&str>) {
+        if self.update_version.as_deref() == version {
+            return;
+        }
+        let result = match version {
+            Some(version) => {
+                self.update.set_text(format!("发现新版本 v{version}…"));
+                if self.update_version.is_some() {
+                    Ok(())
+                } else {
+                    self.menu
+                        .insert_items(&[&self.update, &self.update_separator], 0)
+                }
+            }
+            None => self
+                .menu
+                .remove(&self.update)
+                .and_then(|()| self.menu.remove(&self.update_separator)),
+        };
+        if let Err(err) = result {
+            tracing::warn!("更新菜单栏菜单失败：{err}");
+        }
+        self.update_version = version.map(str::to_owned);
     }
 }
 

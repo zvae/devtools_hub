@@ -7,6 +7,7 @@
 //! - `middle_click` / `selection` / `tools`：鼠标中键快捷面板（参照 uTools）：读取其他应用中
 //!   选中的内容，列出能处理它的功能（目前是 JSON 编辑器）；
 //! - `ui`：egui 面板（搜索、分类、预览、键盘操作）与设置页；
+//! - `update`：检查 GitHub Releases 上的新版本，提示升级并在应用内安装；
 //! - `platform`：各平台的原生能力（剪贴板读写、模拟粘贴 / 复制、鼠标中键监听、窗口控制、
 //!   程序图标、开机启动）。
 
@@ -36,6 +37,8 @@ mod tools;
 mod tray;
 #[cfg(any(target_os = "macos", windows))]
 mod ui;
+#[cfg(any(target_os = "macos", windows))]
+mod update;
 
 use std::path::PathBuf;
 
@@ -47,6 +50,8 @@ pub struct Args {
     pub data_dir: Option<PathBuf>,
     /// 监听指定名称的私有剪贴板而不是系统剪贴板（调试用）。
     pub pasteboard: Option<String>,
+    /// 由旧版本在应用内更新后启动：等旧进程退出，启动后显示设置页底部的版本信息。
+    pub after_update: bool,
 }
 
 const HELP: &str = "DevTools Hub 剪贴板历史
@@ -74,6 +79,8 @@ impl Args {
                 "--pasteboard" => {
                     args.pasteboard = Some(iter.next().ok_or("--pasteboard 需要一个名称")?)
                 }
+                // 内部参数，不在帮助中列出。
+                "--after-update" => args.after_update = true,
                 "-h" | "--help" => return Ok(None),
                 // Finder/launchd 启动 .app 时可能附带 -psn_ 参数
                 other if other.starts_with("-psn_") => {}
@@ -92,6 +99,8 @@ fn main() {
 
 #[cfg(any(target_os = "macos", windows))]
 fn main() -> anyhow::Result<()> {
+    use std::time::{Duration, Instant};
+
     use anyhow::{anyhow, Context};
     use tracing_subscriber::EnvFilter;
 
@@ -116,14 +125,25 @@ fn main() -> anyhow::Result<()> {
 
     let data_dir = settings::resolve_data_dir(args.data_dir.clone())?;
     // 同一数据目录只允许一个实例，否则会重复记录、重复注册快捷键。
+    // 应用内更新后由旧版本启动时，旧进程可能还没退出，稍等它释放锁。
     let lock_file = std::fs::File::create(data_dir.join(".lock")).context("创建锁文件失败")?;
-    if lock_file.try_lock().is_err() {
-        eprintln!(
-            "DevTools Hub 已经在运行（数据目录 {}）。",
-            data_dir.display()
-        );
-        return Ok(());
+    let wait = if args.after_update {
+        Duration::from_secs(15)
+    } else {
+        Duration::ZERO
+    };
+    let deadline = Instant::now() + wait;
+    while lock_file.try_lock().is_err() {
+        if Instant::now() >= deadline {
+            eprintln!(
+                "DevTools Hub 已经在运行（数据目录 {}）。",
+                data_dir.display()
+            );
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
+    update::cleanup();
 
     controller::init_main_thread();
     let settings = settings::Settings::load(&data_dir);
@@ -131,6 +151,7 @@ fn main() -> anyhow::Result<()> {
     let monitor_store =
         devtools_clipboard::Store::open(&data_dir).context("打开剪贴板数据库失败")?;
     let _monitor = monitor::spawn(shared.clone(), monitor_store, args.pasteboard.clone());
+    update::spawn(shared.clone());
 
     let viewport = egui::ViewportBuilder::default()
         .with_title("DevTools Hub")

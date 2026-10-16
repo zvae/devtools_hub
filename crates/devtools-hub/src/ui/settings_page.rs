@@ -12,6 +12,7 @@ use super::style::{self, Palette};
 use super::{HubApp, Page};
 use crate::platform::{keyboard, login_item, panel::Placement, workspace, Backdrop};
 use crate::settings::{Retention, Settings, POLL_INTERVALS};
+use crate::update::{self, Install, Release, Status, REPOSITORY};
 use crate::{hotkey, keys, platform};
 
 #[derive(Default)]
@@ -26,6 +27,8 @@ pub struct SettingsView {
     lists: Vec<ClipList>,
     launch_at_login: bool,
     message: Option<String>,
+    /// 下一帧滚动到底部的更新信息（从菜单栏的“发现新版本”打开设置时）。
+    pub reveal_update: bool,
 }
 
 impl SettingsView {
@@ -59,7 +62,7 @@ impl HubApp {
         });
 
         let mut settings = self.settings.clone();
-        let mut open_repo = false;
+        let mut open_url = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -88,27 +91,21 @@ impl HubApp {
                 });
                 section(ui, &palette, "数据", |ui| self.data_section(ui, &palette));
                 ui.add_space(10.0);
-                // 与分组标题左对齐。
-                let margin = egui::Margin {
-                    left: 12,
-                    ..Default::default()
-                };
-                egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
-                    hint(
-                        ui,
-                        &palette,
-                        &format!(
-                            "DevTools Hub {} · 实现思路参考 PasteNow",
-                            env!("CARGO_PKG_VERSION")
-                        ),
-                    );
-                    let link = RichText::new(format!("GitHub 仓库：{}", repo_label())).size(11.5);
-                    open_repo = ui.link(link).on_hover_text(REPOSITORY).clicked();
-                });
+                // 版本信息在页面底部居中。
+                let about = egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(12, 0))
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            open_url = self.about_section(ui, &palette, &mut settings);
+                        });
+                    });
+                if std::mem::take(&mut self.settings_view.reveal_update) {
+                    about.response.scroll_to_me(Some(Align::Max));
+                }
             });
-        if open_repo {
+        if let Some(url) = open_url {
             // 面板浮在其他窗口之上，打开浏览器后收起，免得挡住网页。
-            workspace::open_url(REPOSITORY);
+            workspace::open_url(&url);
             self.hide_panel(false);
         }
 
@@ -229,6 +226,190 @@ impl HubApp {
                 Ok(()) => self.settings_view.launch_at_login = launch,
                 Err(err) => self.settings_view.message = Some(format!("{err:#}")),
             }
+        }
+        divider(ui, palette);
+        switch_row(
+            ui,
+            palette,
+            "自动检查更新",
+            &mut settings.auto_check_updates,
+        );
+        hint(
+            ui,
+            palette,
+            "启动时和之后每天检查一次 GitHub 上是否有新版本",
+        );
+    }
+
+    /// 设置页底部：版本号、检查更新与仓库地址。返回要在浏览器中打开的地址。
+    fn about_section(
+        &self,
+        ui: &mut Ui,
+        palette: &Palette,
+        settings: &mut Settings,
+    ) -> Option<String> {
+        let mut open = None;
+        let state = self.shared.update_state();
+        centered_line(ui, "version", 26.0, |ui| {
+            hint(
+                ui,
+                palette,
+                &format!("DevTools Hub {}", update::CURRENT_VERSION),
+            );
+            ui.add_space(4.0);
+            if ui
+                .add_enabled(!state.checking, egui::Button::new("检查更新"))
+                .clicked()
+            {
+                update::check_now(&self.shared);
+            }
+            if state.checking {
+                ui.add(egui::Spinner::new().size(12.0).color(palette.weak));
+            }
+        });
+        match &state.status {
+            Status::Unknown => {}
+            Status::UpToDate => {
+                let checked = state
+                    .checked_at
+                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|since| {
+                        let now = devtools_clipboard::store::now_ms();
+                        format!(
+                            " · 检查于 {}",
+                            style::card_time(since.as_millis() as i64, now)
+                        )
+                    })
+                    .unwrap_or_default();
+                hint(ui, palette, &format!("已是最新版本{checked}"));
+            }
+            Status::Failed(error) => {
+                ui.label(
+                    RichText::new(format!("检查更新失败：{error}"))
+                        .size(11.5)
+                        .color(palette.warn),
+                );
+            }
+            Status::Available(release) => {
+                ui.label(
+                    RichText::new(format!("发现新版本 v{}", release.version))
+                        .size(12.5)
+                        .color(palette.accent),
+                );
+                let install = state.install.as_ref();
+                self.release_actions(ui, palette, release, install, settings, &mut open);
+            }
+        }
+        let link = RichText::new(format!("GitHub 仓库：{}", repo_label())).size(11.5);
+        if ui.link(link).on_hover_text(REPOSITORY).clicked() {
+            open = Some(REPOSITORY.to_string());
+        }
+        open
+    }
+
+    /// 新版本的操作：应用内更新（下载进度、取消、失败重试），不支持时用浏览器下载；更新说明、跳过此版本。
+    fn release_actions(
+        &self,
+        ui: &mut Ui,
+        palette: &Palette,
+        release: &Release,
+        install: Option<&Install>,
+        settings: &mut Settings,
+        open: &mut Option<String>,
+    ) {
+        match install {
+            Some(Install::Downloading { received, total }) => {
+                centered_row(ui, 26.0, |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("取消").clicked() {
+                            update::cancel_install(&self.shared);
+                        }
+                        let progress = if *total > 0 {
+                            *received as f32 / *total as f32
+                        } else {
+                            0.0
+                        };
+                        ui.add(
+                            egui::ProgressBar::new(progress)
+                                .desired_width(ui.available_width() - 4.0)
+                                .desired_height(6.0)
+                                .fill(palette.accent),
+                        );
+                    });
+                });
+                let size = |bytes: u64| style::byte_size(bytes);
+                hint(
+                    ui,
+                    palette,
+                    &format!("正在下载 {} / {}", size(*received), size(*total)),
+                );
+                return;
+            }
+            Some(Install::Installing | Install::Installed(_)) => {
+                centered_line(ui, "installing", 26.0, |ui| {
+                    ui.add(egui::Spinner::new().size(12.0).color(palette.weak));
+                    hint(ui, palette, "正在安装，完成后自动重新启动…");
+                });
+                return;
+            }
+            Some(Install::Failed(error)) => {
+                ui.label(
+                    RichText::new(format!("自动更新失败：{error}"))
+                        .size(11.5)
+                        .color(palette.warn),
+                );
+            }
+            None => {}
+        }
+        let failed = install.is_some();
+        let installable = update::can_install(release);
+        let url = release.download_or_page();
+        centered_line(ui, "release-actions", 26.0, |ui| {
+            if installable {
+                let label = if failed { "重试" } else { "立即更新" };
+                let button = ui
+                    .button(label)
+                    .on_hover_text("下载并安装，完成后自动重新启动");
+                if button.clicked() {
+                    update::install(&self.shared);
+                }
+                if failed
+                    && ui
+                        .link(RichText::new("用浏览器下载").size(11.5))
+                        .on_hover_text(url)
+                        .clicked()
+                {
+                    *open = Some(url.to_string());
+                }
+            } else {
+                let reason = match (&release.asset, update::install_target()) {
+                    (None, _) => "Release 中没有当前平台的安装包，打开 Release 页面".to_string(),
+                    (Some(_), Err(reason)) => format!("{reason}，用浏览器下载"),
+                    (Some(_), Ok(_)) => url.to_string(),
+                };
+                if ui.button("下载").on_hover_text(reason).clicked() {
+                    *open = Some(url.to_string());
+                }
+            }
+            let notes = ui
+                .link(RichText::new("更新说明").size(11.5))
+                .on_hover_text(&release.page_url);
+            if notes.clicked() {
+                *open = Some(release.page_url.clone());
+            }
+            if settings.skipped_version.as_ref() == Some(&release.version) {
+                hint(ui, palette, "已跳过此版本");
+            } else if ui.link(RichText::new("跳过此版本").size(11.5)).clicked() {
+                settings.skipped_version = Some(release.version.clone());
+            }
+        });
+        // 打包脚本用的是临时签名：系统按签名识别应用，新版本的签名和旧版本不同。
+        if installable && platform::PASTE_NEEDS_PERMISSION {
+            hint(
+                ui,
+                palette,
+                "更新后可能需要在“辅助功能”中重新勾选本应用（应用使用临时签名）",
+            );
         }
     }
 
@@ -602,9 +783,6 @@ fn appearance_section(ui: &mut Ui, palette: &Palette, settings: &mut Settings) {
     );
 }
 
-/// 源代码仓库地址（来自 Cargo.toml 的 `repository`）。
-const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
-
 /// 仓库地址去掉协议前缀，显示得短一些。
 fn repo_label() -> &'static str {
     REPOSITORY.trim_start_matches("https://")
@@ -642,6 +820,24 @@ fn row(ui: &mut Ui, label: &str, add_control: impl FnOnce(&mut Ui)) {
     centered_row(ui, 30.0, |ui| {
         ui.label(label);
         ui.with_layout(Layout::right_to_left(Align::Center), add_control);
+    });
+}
+
+/// 水平居中的一行。egui 的水平布局不能把一组控件整体居中：按上一帧量出的内容宽度在左边留白，
+/// 宽度变了就丢弃这一帧重新布局，不会先偏一下再居中。
+fn centered_line(ui: &mut Ui, id_salt: &str, height: f32, add_contents: impl FnOnce(&mut Ui)) {
+    let id = ui.id().with(id_salt);
+    let available = ui.available_width();
+    let width = ui.ctx().data(|data| data.get_temp::<f32>(id));
+    centered_row(ui, height, |ui| {
+        ui.add_space(((available - width.unwrap_or(available)) / 2.0).max(0.0));
+        let start = ui.cursor().left();
+        add_contents(ui);
+        let measured = ui.min_rect().right() - start;
+        if width.is_none_or(|width| (width - measured).abs() > 0.5) {
+            ui.ctx().data_mut(|data| data.insert_temp(id, measured));
+            ui.ctx().request_discard("居中的一行宽度变了");
+        }
     });
 }
 

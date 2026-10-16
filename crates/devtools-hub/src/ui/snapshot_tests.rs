@@ -20,8 +20,9 @@ use super::{style, HubApp, Page};
 use crate::platform::Backdrop;
 use crate::selection::Selection;
 use crate::settings::Settings;
-use crate::shared::Shared;
+use crate::shared::{AppEvent, Shared};
 use crate::tools::QuickAction;
+use crate::update::{Asset, Install, Release, Status};
 
 fn source(bundle_id: &str, name: &str) -> SourceApp {
     SourceApp {
@@ -399,5 +400,89 @@ fn snapshot_quick_panel_and_json_editor() {
         harness.key_press(Key::Escape);
         harness.run_steps(2);
         assert_eq!(harness.state().page, Page::Panel);
+    }
+}
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_update_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(&mut Store::open(dir.path()).unwrap());
+    let release = Release {
+        version: "0.2.0".into(),
+        page_url: "https://github.com/zvae/devtools_hub/releases/tag/v0.2.0".into(),
+        asset: Some(Asset {
+            name: "DevTools-Hub-0.2.0-macos-arm64.dmg".into(),
+            url: "https://github.com/zvae/devtools_hub/releases/download/v0.2.0/DevTools-Hub-0.2.0-macos-arm64.dmg".into(),
+            size: 10_485_760,
+            sha256: None,
+        }),
+    };
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        // 发现新版本：面板顶部显示提示。
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(380.0, 640.0), |app| {
+            app.shared.modify_update(|state| {
+                state.status = Status::Available(release.clone());
+                state.checked_at = Some(std::time::SystemTime::now());
+            });
+            app.panel.reset_for_show();
+        });
+        assert_eq!(harness.state().pending_update(), Some(release.clone()));
+        save(&mut harness, &format!("update-panel-{suffix}"));
+
+        // 菜单栏的“发现新版本”：打开设置页并滚动到底部的更新信息。
+        // （测试程序不在 .app 里，不支持应用内安装，显示的是浏览器下载。）
+        harness.state_mut().on_shown(Page::Settings);
+        harness.state().shared.post(AppEvent::RevealUpdate);
+        harness.run_steps(4);
+        assert!(!harness.state().settings_view.reveal_update);
+        save(&mut harness, &format!("update-settings-{suffix}"));
+
+        // 正在下载：设置页显示进度条与取消按钮，面板提示条显示百分比。
+        harness.state().shared.modify_update(|state| {
+            state.install = Some(Install::Downloading {
+                received: 3_565_158,
+                total: 10_485_760,
+            })
+        });
+        harness.run_steps(3);
+        save(&mut harness, &format!("update-downloading-{suffix}"));
+        harness.state_mut().page = Page::Panel;
+        harness.run_steps(3);
+        save(&mut harness, &format!("update-panel-downloading-{suffix}"));
+
+        // 安装失败：显示原因，可以改用浏览器下载。
+        harness.state().shared.modify_update(|state| {
+            state.install = Some(Install::Failed(
+                "复制新版本失败，请确认对 /Applications 有写入权限".into(),
+            ))
+        });
+        harness.state_mut().reveal_update();
+        harness.run_steps(4);
+        save(&mut harness, &format!("update-install-failed-{suffix}"));
+        harness
+            .state()
+            .shared
+            .modify_update(|state| state.install = None);
+
+        // 跳过此版本：面板与菜单栏不再提示，设置页仍显示下载按钮。
+        harness.state_mut().settings.skipped_version = Some("0.2.0".into());
+        harness.run_steps(2);
+        assert_eq!(harness.state().pending_update(), None);
+        save(&mut harness, &format!("update-skipped-{suffix}"));
+
+        // 已是最新版本 / 手动检查失败。
+        harness
+            .state()
+            .shared
+            .modify_update(|state| state.status = Status::UpToDate);
+        harness.run_steps(3);
+        save(&mut harness, &format!("update-latest-{suffix}"));
+        harness.state().shared.modify_update(|state| {
+            state.status = Status::Failed("无法连接 GitHub，请检查网络".into());
+            state.checking = true;
+        });
+        harness.run_steps(3);
+        save(&mut harness, &format!("update-failed-{suffix}"));
     }
 }

@@ -120,6 +120,10 @@ pub struct Settings {
     pub json_indent: Indent,
     /// 面板底色的透明度（0–100）。窗口背景是液态玻璃 / 毛玻璃时生效，越大越能透出背后的内容。
     pub panel_transparency: u8,
+    /// 自动检查 GitHub Releases 上的新版本（启动时和之后每天一次）。
+    pub auto_check_updates: bool,
+    /// 用户选择跳过的版本：不再自动提醒；发布了更新的版本时照常提醒。
+    pub skipped_version: Option<String>,
 }
 
 impl Default for Settings {
@@ -140,6 +144,8 @@ impl Default for Settings {
             json_editor_size: [760.0, 560.0],
             json_indent: Indent::default(),
             panel_transparency: 60,
+            auto_check_updates: true,
+            skipped_version: None,
         }
     }
 }

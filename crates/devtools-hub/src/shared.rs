@@ -8,6 +8,7 @@ use devtools_clipboard::CaptureRules;
 
 use crate::platform::panel::Placement;
 use crate::settings::Settings;
+use crate::update::UpdateState;
 
 /// 从热键、菜单栏发往 UI 的事件。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +21,10 @@ pub enum AppEvent {
     PauseChanged,
     /// 在其他应用中按下了鼠标中键：读取选中内容并弹出快捷面板。
     MiddleClick,
+    /// 检查更新的状态变了：刷新托盘菜单与面板上的新版本提示。
+    UpdateChanged,
+    /// 点击了托盘菜单的“发现新版本”：设置页滚动到底部的更新信息。
+    RevealUpdate,
 }
 
 /// 监听线程需要的配置快照。
@@ -42,11 +47,14 @@ pub struct Shared {
     pub stop: AtomicBool,
     /// 鼠标中键快捷面板是否开启（监听线程据此决定是否拦截中键）。
     pub middle_click: AtomicBool,
+    /// 是否定时检查更新（检查更新线程据此决定是否检查）。
+    pub auto_check_updates: AtomicBool,
     config: Mutex<MonitorConfig>,
     placement: Mutex<Placement>,
     /// 剪贴板面板的大小（逻辑像素）。窗口也用作快捷面板和 JSON 编辑器，
     /// 快捷键和托盘弹出面板时据此恢复大小。
     panel_size: Mutex<[f32; 2]>,
+    update: Mutex<UpdateState>,
     events: Mutex<VecDeque<AppEvent>>,
     ctx: OnceLock<egui::Context>,
 }
@@ -61,6 +69,7 @@ impl Shared {
             revision: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             middle_click: AtomicBool::new(settings.middle_click),
+            auto_check_updates: AtomicBool::new(settings.auto_check_updates),
             config: Mutex::new(MonitorConfig {
                 rules: settings.rules.clone(),
                 retention_ms: settings.retention.millis(),
@@ -68,6 +77,7 @@ impl Shared {
             }),
             placement: Mutex::new(settings.placement),
             panel_size: Mutex::new(settings.window_size),
+            update: Mutex::new(UpdateState::default()),
             events: Mutex::new(VecDeque::new()),
             ctx: OnceLock::new(),
         })
@@ -87,6 +97,8 @@ impl Shared {
         *self.panel_size.lock().unwrap() = settings.window_size;
         self.middle_click
             .store(settings.middle_click, Ordering::Relaxed);
+        self.auto_check_updates
+            .store(settings.auto_check_updates, Ordering::Relaxed);
     }
 
     pub fn config(&self) -> MonitorConfig {
@@ -99,6 +111,17 @@ impl Shared {
 
     pub fn panel_size(&self) -> [f32; 2] {
         *self.panel_size.lock().unwrap()
+    }
+
+    pub fn update_state(&self) -> UpdateState {
+        self.update.lock().unwrap().clone()
+    }
+
+    /// 修改检查更新的状态，并通知 UI 刷新提示。
+    pub fn modify_update<R>(&self, modify: impl FnOnce(&mut UpdateState) -> R) -> R {
+        let result = modify(&mut self.update.lock().unwrap());
+        self.post(AppEvent::UpdateChanged);
+        result
     }
 
     pub fn set_ctx(&self, ctx: egui::Context) {
