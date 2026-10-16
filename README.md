@@ -104,7 +104,11 @@ cargo run -p devtools-hub -- --show --data-dir /tmp/dth-dev
 zsh scripts/bundle-macos.sh
 ```
 
-会生成 `target/release/DevTools Hub.app`（`LSUIElement`、ad-hoc 签名）。
+会生成 `target/release/DevTools Hub.app`（`LSUIElement`）。默认是临时（ad-hoc）签名；设置 `MACOS_SIGN_IDENTITY` 后用证书签名，见下文“macOS 签名”：
+
+```bash
+MACOS_SIGN_IDENTITY="DevTools Hub Self-Signed" zsh scripts/bundle-macos.sh
+```
 
 ### 图标
 
@@ -121,9 +125,65 @@ python3 scripts/generate-icons.py
 鼠标中键快捷面板同样需要这项权限（监听并拦截中键、模拟 ⌘C）。授权后几秒内自动生效，不用重启。
 
 - 用 `cargo run` 启动时，系统会把权限算在启动它的终端上
-- 打包成 .app 后，权限授予的是这个应用。ad-hoc 签名在每次重新打包后会变化，可能需要重新勾选
+- 打包成 .app 后，权限授予的是这个应用，系统按签名识别它：
+  - 临时签名：只认这一次构建的代码哈希（cdhash）。重新打包、更新后就对不上了
+  - 证书签名：认“Bundle ID + 证书”，重新打包、更新后权限仍然有效（见下文“macOS 签名”）
+
+**系统设置里已经打开，应用却一直显示未授权**：授权记录属于签名不同的另一份构建（例如本地打的包和 dmg 里的包），两份的名字和 Bundle ID 一样，列表里只显示一项。这时点“去授权”，开关又会变成关闭。处理方法：在“辅助功能”列表中选中 DevTools Hub，点“−”删掉，再点“去授权”（或“+”添加 `/Applications/DevTools Hub.app`）重新打开。也可以先清掉这条记录：
+
+```bash
+tccutil reset Accessibility dev.devtoolshub.app
+```
+
+日志里能看到原因（zsh 自带一个同名的 `log` 命令，要写全路径）：`/usr/bin/log show --last 1h --predicate 'process == "tccd"' | grep -A2 "Failed to match existing code requirement"`，下面两行分别是记录里的和当前应用的 cdhash。
 
 全局快捷键在 macOS 上使用 Carbon `RegisterEventHotKey`，在 Windows 上使用 `RegisterHotKey`，都不需要额外权限。
+
+### macOS 签名
+
+用一张固定的自签名证书签名，就不用每次更新后重新授权。证书只需要生成一次；换了证书，用户要重新授权一次，应用内更新也会拒绝签名证书不同的安装包。
+
+1. 生成证书（用系统自带的 LibreSSL，有效期 20 年）：
+
+   ```bash
+   zsh scripts/create-signing-cert.sh
+   ```
+
+   默认输出到仓库外的 `~/.devtools-hub-signing/`：`devtools-hub-signing.p12`（证书和私钥）、`devtools-hub-signing.p12.b64`（base64）、`password.txt`（.p12 的密码）。这些文件包含私钥，请备份到密码管理器等安全的地方，不要提交到仓库
+
+2. 在 GitHub 仓库的 Settings › Secrets and variables › Actions 中添加两个 Repository secret：
+
+   | 名称 | 内容 |
+   | --- | --- |
+   | `MACOS_CERTIFICATE_P12` | `devtools-hub-signing.p12.b64` 的内容 |
+   | `MACOS_CERTIFICATE_PASSWORD` | `password.txt` 的内容 |
+
+   ```bash
+   pbcopy < ~/.devtools-hub-signing/devtools-hub-signing.p12.b64
+   ```
+
+   发布流程会把证书导入一个临时钥匙串，用它签名，构建完删除钥匙串。没有配置这两个 Secret 时退回临时签名，并在构建日志中给出警告
+
+3. 本地打包也想用同一张证书时，导入登录钥匙串（第一次签名时系统会询问是否允许 codesign 使用这把私钥，选“始终允许”）：
+
+   ```bash
+   security import ~/.devtools-hub-signing/devtools-hub-signing.p12 -k ~/Library/Keychains/login.keychain-db \
+     -P "$(cat ~/.devtools-hub-signing/password.txt)" -T /usr/bin/codesign
+   MACOS_SIGN_IDENTITY="DevTools Hub Self-Signed" zsh scripts/bundle-macos.sh
+   ```
+
+   生成证书时加 `--import` 可以一步完成导入
+
+签名后可以这样检查，`designated =>` 一行应该是 `identifier "dev.devtoolshub.app" and certificate leaf = H"…"`，而不是 `cdhash H"…"`：
+
+```bash
+codesign --display --requirements - "/Applications/DevTools Hub.app"
+```
+
+说明：
+
+- 从临时签名换成证书签名后的第一个版本，用户还要按上面的方法删掉旧记录、重新授权一次，之后的更新就不用了
+- 自签名证书不受系统信任，没有经过苹果公证，第一次打开下载的 dmg 时仍会提示“无法验证开发者”，需要在“系统设置 › 隐私与安全性”中点“仍要打开”。要去掉这个提示需要 Apple Developer ID 证书并公证
 
 ## 检查更新与发布
 
@@ -147,12 +207,12 @@ python3 scripts/generate-icons.py
 - 新版本带 `--after-update` 启动：等旧进程释放单实例锁，沿用同一个数据目录，启动后打开设置页并提示“已更新到 x.y.z”
 - 下载可以取消；失败时显示原因，可以重试或改用浏览器下载
 - 以下情况不支持应用内安装，“更新”按钮会变成在浏览器中下载：用 `cargo run` 等方式启动、不在 .app 里的程序；从下载目录直接打开、被系统移到只读位置运行（App Translocation）的应用；Release 中没有当前平台的安装包
-- macOS 包用的是临时签名，系统按签名识别应用，更新后可能需要在“辅助功能”中重新勾选（设置页会提示）。正式签名并公证后不会有这个问题
+- macOS 上当前版本是证书签名时，新版本必须满足同样的签名要求（同一张证书），否则拒绝安装：换了证书，系统会把新版本当作另一个应用，“辅助功能”权限失效。当前版本是临时签名时不检查，设置页会提示更新后需要重新授权
 - 自己下载的文件不带隔离属性 / “来自网络”的标记，打开新版本时不会弹出 Gatekeeper 或 SmartScreen 提示
 
 发布新版本：
 
-1. 修改根目录 `Cargo.toml` 中的 `version`，合并到 `main`
+1. 修改根目录 `Cargo.toml` 中的 `version`，合并到 `main`（第一次发布前先按“macOS 签名”配置好证书）
 2. CI（`.github/workflows/release.yml`）会创建或更新 Release 草稿 `vX.Y.Z`，并上传 macOS 与 Windows 的安装包
 3. 在 GitHub 上检查草稿并点“发布”。发布后，已安装的旧版本会在下一次检查时提示升级
 

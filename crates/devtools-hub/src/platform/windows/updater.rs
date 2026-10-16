@@ -45,6 +45,11 @@ pub fn relaunch(target: &Path, args: &[OsString]) -> Result<()> {
     Ok(())
 }
 
+/// 更新后系统权限是否会失效。Windows 上模拟按键、鼠标钩子都不需要授权。
+pub fn permission_lost_on_update() -> bool {
+    false
+}
+
 /// 新版本启动时删除上次更新移开的旧版本。
 pub fn cleanup() {
     let Ok(target) = install_target() else {

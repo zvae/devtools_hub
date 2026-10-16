@@ -140,8 +140,42 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # 用固定的证书签名：系统按“Bundle ID + 证书”识别应用，更新后“辅助功能”权限仍然有效。
+      # 证书由 scripts/create-signing-cert.sh 生成；没有配置 Secrets 时退回临时签名。
+      - name: Import signing certificate
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE_P12" ]; then
+            echo "::warning::没有配置 MACOS_CERTIFICATE_P12，使用临时签名：用户每次更新后都要重新授予“辅助功能”权限"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/signing.p12"
+          # 允许 codesign 直接使用私钥，不弹授权框。
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          # codesign 只在搜索列表里的钥匙串中找证书。
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -p codesigning "$keychain" | grep -Eo '[0-9A-F]{40}' | head -1)"
+          if [ -z "$identity" ]; then
+            echo "::error::钥匙串中没有找到代码签名证书"
+            exit 1
+          fi
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
       - name: Build macOS application
         run: zsh scripts/bundle-macos.sh
+      - name: Remove signing keychain
+        if: always() && env.SIGNING_KEYCHAIN != ''
+        run: security delete-keychain "$SIGNING_KEYCHAIN"
       - name: Archive macOS application
         env:
           RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}

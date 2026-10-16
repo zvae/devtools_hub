@@ -403,12 +403,12 @@ impl HubApp {
                 settings.skipped_version = Some(release.version.clone());
             }
         });
-        // 打包脚本用的是临时签名：系统按签名识别应用，新版本的签名和旧版本不同。
-        if installable && platform::PASTE_NEEDS_PERMISSION {
+        // 临时签名时系统按代码哈希识别应用，每个版本都不同；用证书签名时权限保留。
+        if installable && update::update_resets_permission() {
             hint(
                 ui,
                 palette,
-                "更新后可能需要在“辅助功能”中重新勾选本应用（应用使用临时签名）",
+                "当前版本使用临时签名：更新后需要在“辅助功能”中删掉本应用再重新添加",
             );
         }
     }
@@ -443,6 +443,15 @@ impl HubApp {
                     keyboard::open_accessibility_settings();
                 }
             });
+            if !trusted {
+                // 系统按签名识别应用：授权记录属于签名不同的旧版本时，开关显示已打开但不生效。
+                hint(
+                    ui,
+                    palette,
+                    "系统设置里已经打开却仍显示未授权：在“辅助功能”列表中选中 DevTools Hub，\
+                     点“−”删掉，再点“去授权”重新添加",
+                );
+            }
         }
         divider(ui, palette);
         switch_row(

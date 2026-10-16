@@ -1,7 +1,8 @@
 //! 安装更新：用下载好的 dmg 替换正在运行的 .app，再启动新版本。
 //!
 //! 1. `hdiutil attach` 挂载 dmg（不在访达中显示），找到里面的 .app；
-//! 2. 核对 Bundle ID 与版本号，`codesign --verify` 检查包是否完整；
+//! 2. 核对 Bundle ID 与版本号，`codesign --verify` 检查包是否完整；当前版本用证书签名时，
+//!    新版本必须满足同样的签名要求（同一张证书），否则系统会把它当作另一个应用，“辅助功能”权限失效；
 //! 3. 用 `ditto` 复制到旧版本旁边（同一个卷，之后的改名是原子的），再把旧版本改名移开、新版本改名到原位置。
 //!    正在运行的 .app 可以改名，已经打开的文件不受影响；移开的旧版本由新版本启动时删除；
 //! 4. 当前进程退出后由一个 shell 脚本用 `open` 启动新版本：应用还在运行时 `open` 只会激活它。
@@ -75,6 +76,13 @@ fn install_from(mount: &Path, target: &Path, version: &str) -> Result<()> {
         .args(["--verify", "--deep", "--strict"])
         .arg(&source))
     .context("安装包中的应用签名无效")?;
+    if let Some(requirement) = designated_requirement(target)? {
+        run(Command::new("codesign")
+            .args(["--verify", "--strict", "--test-requirement"])
+            .arg(format!("={requirement}"))
+            .arg(&source))
+        .context("安装包的签名证书与当前应用不一致，装上后需要重新授予“辅助功能”权限")?;
+    }
 
     let staged = sibling(target, "new")?;
     let old = sibling(target, "old")?;
@@ -141,6 +149,43 @@ pub fn cleanup() {
     }
 }
 
+/// 更新后系统权限是否会失效：临时签名时系统按代码哈希识别应用，每个版本都不同。
+pub fn permission_lost_on_update() -> bool {
+    install_target()
+        .ok()
+        .and_then(|bundle| designated_requirement(&bundle).ok())
+        .is_none_or(|requirement| requirement.is_none())
+}
+
+/// 应用的签名要求（designated requirement），例如
+/// `identifier "dev.devtoolshub.app" and certificate leaf = H"…"`。
+/// 临时签名没有可以跨版本使用的要求（只有本次构建的代码哈希），返回 `None`。
+fn designated_requirement(bundle: &Path) -> Result<Option<String>> {
+    let output = Command::new("codesign")
+        .args(["--display", "--requirements", "-"])
+        .arg(bundle)
+        .output()
+        .context("运行 codesign 失败")?;
+    ensure!(
+        output.status.success(),
+        "读取 {} 的签名失败",
+        bundle.display()
+    );
+    // 不同系统版本输出到标准输出或标准错误，两个都看。
+    let text = [output.stdout, output.stderr].concat();
+    Ok(parse_requirement(&String::from_utf8_lossy(&text)))
+}
+
+/// 从 `codesign --display --requirements -` 的输出中取出签名要求。
+/// 临时签名输出的是注释掉的隐含要求：`# designated => cdhash H"…"`。
+fn parse_requirement(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("designated => "))
+        .filter(|requirement| !requirement.starts_with("cdhash "))
+        .map(str::to_owned)
+}
+
 /// `…/DevTools Hub.app` → `…/.DevTools Hub.app.<suffix>`（隐藏文件，不会出现在“应用程序”里）。
 fn sibling(target: &Path, suffix: &str) -> Result<PathBuf> {
     let name = target.file_name().context("无效的应用路径")?;
@@ -176,4 +221,48 @@ fn run(command: &mut Command) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_designated_requirement() {
+        let signed = "Executable=/Applications/DevTools Hub.app/Contents/MacOS/devtools-hub\n\
+                      designated => identifier \"dev.devtoolshub.app\" and certificate leaf = H\"39eb\"\n";
+        assert_eq!(
+            parse_requirement(signed).as_deref(),
+            Some(r#"identifier "dev.devtoolshub.app" and certificate leaf = H"39eb""#)
+        );
+        let ad_hoc = "Executable=/tmp/a\n# designated => cdhash H\"2ce458c3\"\n";
+        assert_eq!(parse_requirement(ad_hoc), None);
+        assert_eq!(parse_requirement(""), None);
+    }
+
+    #[test]
+    fn ad_hoc_bundle_has_no_stable_requirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Test.app");
+        fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        fs::copy("/usr/bin/true", bundle.join("Contents/MacOS/test")).unwrap();
+        fs::write(
+            bundle.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>dev.devtoolshub.test</string>
+<key>CFBundleExecutable</key><string>test</string>
+</dict></plist>"#,
+        )
+        .unwrap();
+        run(Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&bundle))
+        .unwrap();
+        assert_eq!(designated_requirement(&bundle).unwrap(), None);
+        assert_eq!(
+            bundle_value(&bundle, "CFBundleIdentifier").unwrap(),
+            "dev.devtoolshub.test"
+        );
+    }
 }

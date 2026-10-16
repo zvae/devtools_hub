@@ -1260,6 +1260,7 @@ fn accessibility_banner(ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action
             Stroke::NONE,
             Margin::symmetric(12, 6),
             |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
                 centered_row(ui, 20.0, |ui| {
                     let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
                     icons::paint(ui.painter(), icon_rect, Icon::Warning, palette.warn);
@@ -1272,6 +1273,14 @@ fn accessibility_banner(ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action
                             actions.push(Action::RequestAccessibility);
                         }
                     });
+                });
+                // 系统设置里的授权记录属于旧版本（签名不同）时，开关显示已打开但不生效。
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0 + ui.spacing().item_spacing.x);
+                    let text = RichText::new("已打开仍提示？在系统设置中删掉本应用再重新添加")
+                        .color(palette.warn.gamma_multiply(0.8))
+                        .size(11.0);
+                    ui.label(text);
                 });
             },
         );

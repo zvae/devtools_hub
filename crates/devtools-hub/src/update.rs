@@ -189,6 +189,12 @@ pub fn install_target() -> Result<&'static Path, &'static str> {
         .map_err(String::as_str)
 }
 
+/// 更新后是否要重新授予系统权限（macOS 上用临时签名打包时）。只检查一次。
+pub fn update_resets_permission() -> bool {
+    static RESETS: OnceLock<bool> = OnceLock::new();
+    *RESETS.get_or_init(updater::permission_lost_on_update)
+}
+
 /// 能否在应用内安装 `release`；不能时只能在浏览器中下载。
 pub fn can_install(release: &Release) -> bool {
     release.asset.is_some() && install_target().is_ok()
