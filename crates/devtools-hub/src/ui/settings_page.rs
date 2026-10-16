@@ -273,7 +273,7 @@ impl HubApp {
             }
         }
         if let Some(error) = &self.hotkey_error {
-            ui.label(RichText::new(error).color(palette.warn).size(11.5));
+            ui.label(hint_text(error.clone(), palette.warn));
         }
         divider(ui, palette);
         row(ui, "出现位置", |ui| {
@@ -361,11 +361,7 @@ impl HubApp {
                 hint(ui, palette, &format!("已是最新版本{checked}"));
             }
             Status::Failed(error) => {
-                ui.label(
-                    RichText::new(format!("检查更新失败：{error}"))
-                        .size(11.5)
-                        .color(palette.warn),
-                );
+                ui.label(hint_text(format!("检查更新失败：{error}"), palette.warn));
             }
             Status::Available(release) => {
                 ui.label(
@@ -430,11 +426,7 @@ impl HubApp {
                 return;
             }
             Some(Install::Failed(error)) => {
-                ui.label(
-                    RichText::new(format!("自动更新失败：{error}"))
-                        .size(11.5)
-                        .color(palette.warn),
-                );
+                ui.label(hint_text(format!("自动更新失败：{error}"), palette.warn));
             }
             None => {}
         }
@@ -745,11 +737,7 @@ impl HubApp {
                         icons::paint(ui.painter(), icon_rect, Icon::StarFilled, palette.weak);
                     }
                     ui.label(RichText::new(&list.name).color(palette.text));
-                    ui.label(
-                        RichText::new(format!("{} 条", list.item_count))
-                            .color(palette.weak)
-                            .size(11.5),
-                    );
+                    ui.label(hint_text(format!("{} 条", list.item_count), palette.weak));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if list.id != FAVORITES_LIST_ID
                             && icon_button(ui, Icon::Close, false, palette)
@@ -839,7 +827,7 @@ impl HubApp {
             hint(ui, palette, "清空后无法恢复；列表中的条目会保留");
         }
         if let Some(message) = &self.settings_view.message {
-            ui.label(RichText::new(message).color(palette.weak).size(11.5));
+            ui.label(hint_text(message.clone(), palette.weak));
         }
     }
 }
@@ -864,11 +852,10 @@ fn middle_click_section(ui: &mut Ui, palette: &Palette, settings: &mut Settings)
         if keyboard::accessibility_trusted(false) {
             hint(ui, palette, "开启后，中键点击不会再传给前台应用");
         } else {
-            ui.label(
-                RichText::new("需要“辅助功能”权限才能监听鼠标中键和读取选中的内容")
-                    .color(palette.warn)
-                    .size(11.5),
-            );
+            ui.label(hint_text(
+                "需要“辅助功能”权限才能监听鼠标中键和读取选中的内容",
+                palette.warn,
+            ));
         }
     }
 }
@@ -957,7 +944,14 @@ fn section(
             ..Default::default()
         })
         .show(ui, |ui| {
-            ui.label(RichText::new(title).size(12.0).color(palette.weak));
+            // 分组标题用小号中粗：与行标题（13、常规、主文字色）拉开层次，
+            // 和系统设置里分组标题的写法一致。
+            ui.label(
+                RichText::new(title)
+                    .size(style::TEXT_SECTION)
+                    .family(egui::FontFamily::Name(fonts::SEMIBOLD.into()))
+                    .color(palette.weak),
+            );
         })
         .response;
     ui.add_space(2.0);
@@ -1012,8 +1006,16 @@ fn switch_row(ui: &mut Ui, palette: &Palette, label: &str, value: &mut bool) -> 
     changed
 }
 
+/// 说明文字：比正文小一号，行距放宽（中文换行时更舒展）。
 fn hint(ui: &mut Ui, palette: &Palette, text: &str) {
-    ui.label(RichText::new(text).size(11.5).color(palette.weak));
+    ui.label(hint_text(text, palette.weak));
+}
+
+fn hint_text(text: impl Into<String>, color: Color32) -> RichText {
+    RichText::new(text)
+        .size(style::TEXT_HINT)
+        .line_height(Some(style::HINT_LINE_HEIGHT))
+        .color(color)
 }
 
 fn divider(ui: &mut Ui, palette: &Palette) {

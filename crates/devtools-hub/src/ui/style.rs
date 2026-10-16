@@ -28,6 +28,19 @@ pub const MENU_MARGIN: i8 = 4;
 /// 键帽、功能徽标、缩略图、复选框等小元素。
 pub const SMALL_RADIUS: u8 = 6;
 
+// 字号规范，全应用只用下面几档：
+// - 页面标题 15（`FontFamily::Name(SEMIBOLD)`），分组标题 12；
+// - 行标题与正文 13（`TextStyle::Body`）；
+// - 说明文字与链接 11.5。
+/// 分组标题（设置页各分组的“通用”“粘贴”等）。
+pub const TEXT_SECTION: f32 = 12.0;
+/// 说明文字与链接。
+pub const TEXT_HINT: f32 = 11.5;
+/// 说明文字的行距。egui 按字体族的主字体（SF Pro，约 1.18em）逐个行框排行，
+/// 中文字形比西文高（苹方约 1.4em），默认行距下中文换行会挤在一起；
+/// 这里给到 11.5 × 1.4 ≈ 16，与系统界面的中文行距接近。
+pub const HINT_LINE_HEIGHT: f32 = 16.0;
+
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts::definitions());
     for theme in [Theme::Light, Theme::Dark] {
@@ -79,6 +92,10 @@ pub fn install(ctx: &egui::Context) {
                 &mut visuals.widgets.noninteractive,
             ] {
                 widget.corner_radius = CAPSULE.into();
+                // 文字一律用配色里的主文字色。egui 默认给的是普通文字 gray(140)、
+                // 按钮文字 gray(180)（浅色模式下 gray(80)、gray(60)），比配色里的
+                // 说明文字（`Palette::weak`）还淡，行标题会比说明文字更弱，层级颠倒。
+                widget.fg_stroke.color = palette.text;
             }
         });
     }
