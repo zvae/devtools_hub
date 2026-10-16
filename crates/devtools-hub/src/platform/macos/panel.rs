@@ -18,9 +18,9 @@ use objc2::runtime::AnyObject;
 use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSAutoresizingMaskOptions, NSEvent,
-    NSRunningApplication, NSScreen, NSStatusWindowLevel, NSView, NSVisualEffectBlendingMode,
-    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowOrderingMode,
+    NSEventModifierFlags, NSEventType, NSRunningApplication, NSScreen, NSStatusWindowLevel, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode,
 };
 use objc2_foundation::{NSPoint, NSRect};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -132,6 +132,50 @@ pub fn is_active() -> bool {
 
 pub fn is_visible() -> bool {
     with_panel(|_, window| window.isVisible()).unwrap_or(false)
+}
+
+/// 从标题栏空白处开始拖动面板。返回 false 表示面板尚未绑定，由调用方交给 winit。
+///
+/// winit 的 `drag_window` 直接把 `NSApp.currentEvent` 交给 `performWindowDragWithEvent:`，
+/// 系统按这个事件在窗口中的位置计算拖动起点。从菜单栏图标弹出面板后第一次点击面板时，
+/// 当前事件可能是窗口激活产生的系统事件而不是这次按下，起点算错，窗口就跳到了鼠标处。
+/// 这里只在当前事件确实是本窗口的左键按下 / 拖动时直接使用，否则按鼠标的实际位置构造一个按下事件；
+/// 鼠标已经松开（只是单击）时不拖动。
+pub fn start_drag() -> bool {
+    with_panel(|mtm, window| {
+        let current = NSApplication::sharedApplication(mtm).currentEvent();
+        let usable = current.as_deref().filter(|event| {
+            let kind = event.r#type();
+            (kind == NSEventType::LeftMouseDown || kind == NSEventType::LeftMouseDragged)
+                && event.windowNumber() == window.windowNumber()
+        });
+        if let Some(event) = usable {
+            window.performWindowDragWithEvent(event);
+            return;
+        }
+        tracing::debug!(
+            "拖动面板：当前事件 {:?} 不是本窗口的鼠标按下，按鼠标位置重建",
+            current.as_ref().map(|event| event.r#type())
+        );
+        if NSEvent::pressedMouseButtons() & 1 == 0 {
+            return;
+        }
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            NSEventType::LeftMouseDown,
+            window.mouseLocationOutsideOfEventStream(),
+            NSEventModifierFlags::empty(),
+            current.map_or(0.0, |event| event.timestamp()),
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        );
+        if let Some(event) = event {
+            window.performWindowDragWithEvent(&event);
+        }
+    })
+    .is_some()
 }
 
 pub fn show(anchor: Anchor) -> bool {

@@ -3,11 +3,11 @@
 //! 与 PasteNow 一致：不依赖剪贴板变化通知（macOS 没有公开的通知），
 //! 而是定时比较 `changeCount`，变化后读取所有 item 的所有类型。
 
-use devtools_clipboard::{Representation, Snapshot};
+use devtools_clipboard::{uti, Representation, Snapshot};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
-use objc2_foundation::{NSArray, NSData, NSString};
+use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 
 pub struct Pasteboard {
     inner: Retained<NSPasteboard>,
@@ -88,11 +88,13 @@ impl Pasteboard {
                         .zip(names)
                         .filter(|(_, name)| keep_dynamic || !should_skip(name))
                         .filter_map(|(ty, name)| {
-                            let data = item.dataForType(ty)?;
-                            Some(Representation {
-                                uti: name,
-                                data: data.to_vec(),
-                            })
+                            let data = item.dataForType(ty)?.to_vec();
+                            let data = if name == uti::FILE_URL {
+                                resolve_file_reference(data)
+                            } else {
+                                data
+                            };
+                            Some(Representation { uti: name, data })
                         })
                         .collect::<Vec<_>>()
                 })
@@ -135,10 +137,28 @@ fn should_skip(uti: &str) -> bool {
         || uti.starts_with("CorePasteboardFlavorType")
 }
 
+/// Finder 复制文件时写入的是文件引用 URL（`file:///.file/id=卷号.文件号`），这里换成真实路径的 URL：
+/// 与 PasteNow 一样显示实际路径，卷重新挂载或重启后也仍然有效。
+/// 不是文件引用、或者解析失败（文件已被删除）时保持原样。
+fn resolve_file_reference(data: Vec<u8>) -> Vec<u8> {
+    let Some(url) = std::str::from_utf8(&data)
+        .ok()
+        .and_then(|text| NSURL::URLWithString(&NSString::from_str(text.trim_end_matches('\0'))))
+    else {
+        return data;
+    };
+    if !url.isFileReferenceURL() {
+        return data;
+    }
+    match url.filePathURL().and_then(|path| path.absoluteString()) {
+        Some(resolved) => resolved.to_string().into_bytes(),
+        None => data,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devtools_clipboard::uti;
 
     #[test]
     fn write_then_read_round_trip_on_private_pasteboard() {
@@ -169,5 +189,40 @@ mod tests {
         ));
         assert!(should_skip("com.apple.pasteboard.promised-file-url"));
         assert!(!should_skip("public.utf8-plain-text"));
+    }
+
+    #[test]
+    fn resolves_finder_file_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("工作簿 1.xlsx");
+        std::fs::write(&path, b"x").unwrap();
+        let reference = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
+            .fileReferenceURL()
+            .and_then(|url| url.absoluteString())
+            .expect("应能生成文件引用 URL")
+            .to_string();
+        assert!(reference.starts_with("file:///.file/id="), "{reference}");
+
+        let pb = Pasteboard::unique();
+        pb.write(&Snapshot {
+            items: vec![vec![Representation::new(
+                uti::FILE_URL,
+                reference.into_bytes(),
+            )]],
+        });
+        let snapshot = pb.read();
+        pb.release();
+        let resolved = uti::file_url_to_path(&snapshot.items[0][0].data).expect("应解析出路径");
+        // 临时目录在 /var 下，系统解析出的是 /private/var，比较规范化后的路径。
+        assert_eq!(
+            std::fs::canonicalize(resolved).unwrap(),
+            std::fs::canonicalize(&path).unwrap()
+        );
+
+        // 普通的路径 URL 和无法解析的引用保持原样。
+        let plain = b"file:///tmp/a.txt".to_vec();
+        assert_eq!(resolve_file_reference(plain.clone()), plain);
+        let missing = b"file:///.file/id=1.1".to_vec();
+        assert_eq!(resolve_file_reference(missing.clone()), missing);
     }
 }

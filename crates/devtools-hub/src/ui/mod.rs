@@ -354,9 +354,9 @@ impl eframe::App for HubApp {
             }
         }
         self.handle_focus();
-        // 面板显示期间定时刷新：失焦不一定产生 repaint 事件（winit 的焦点状态可能已经不一致），
-        // 需要轮询才能发现焦点变化。隐藏时不排重绘，保持空闲。
-        if self.page == Page::Panel && native_panel::is_visible() {
+        // Windows 上面板显示期间定时刷新：失焦不一定产生 repaint 事件（winit 的焦点状态可能已经不一致），
+        // 需要轮询才能发现焦点变化。macOS 的失焦事件可靠，不需要轮询；隐藏时不排重绘，保持空闲。
+        if cfg!(windows) && self.page == Page::Panel && native_panel::is_visible() {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
         self.draw(ui);

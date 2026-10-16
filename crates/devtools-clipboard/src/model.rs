@@ -164,6 +164,8 @@ pub struct ClipItem {
     pub paste_count: i64,
     pub byte_size: i64,
     pub file_count: i64,
+    /// 文件条目中第一个文件的完整路径（列表中显示）；其他类型为 `None`。
+    pub first_path: Option<String>,
     pub image_size: Option<(u32, u32)>,
     pub has_thumbnail: bool,
     pub list_ids: Vec<i64>,

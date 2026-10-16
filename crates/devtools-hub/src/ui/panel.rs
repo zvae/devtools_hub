@@ -7,7 +7,7 @@ use devtools_clipboard::store::now_ms;
 use devtools_clipboard::{
     ClipItem, ClipList, ContentKind, ItemQuery, KindFilter, FAVORITES_LIST_ID,
 };
-use egui::text::{LayoutJob, TextWrapping};
+use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Key, Layout, Margin, Modifiers, Rect,
     Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
@@ -377,7 +377,8 @@ impl HubApp {
     fn header(&mut self, ui: &mut Ui, palette: &Palette, actions: &mut Vec<Action>) {
         // 先注册拖动区域，后添加的控件会覆盖它，因此只有空白处能拖动窗口。
         let drag = ui.interact(ui.max_rect(), ui.id().with("drag-window"), Sense::drag());
-        if drag.drag_started() {
+        // macOS 由平台层自己发起拖动（winit 的实现可能用错起点，见 `panel::start_drag`）。
+        if drag.drag_started() && !native_panel::start_drag() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
         centered_row(ui, 30.0, |ui| {
@@ -422,8 +423,14 @@ impl HubApp {
             egui::pos2(rect.left() + 30.0, rect.top()),
             egui::pos2(rect.right() - 8.0, rect.bottom()),
         );
-        let response = ui.put(
-            edit_rect,
+        // 用不推进布局光标的子 Ui 放输入框：`ui.put` 会把光标移到输入框右边缘（比外框靠左 8px），
+        // 右侧的设置按钮就会比左侧的固定按钮贴得更近。
+        let mut edit_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(edit_rect)
+                .layout(Layout::centered_and_justified(egui::Direction::TopDown)),
+        );
+        let response = edit_ui.add(
             egui::TextEdit::singleline(&mut self.panel.query)
                 .id(id)
                 .hint_text(RichText::new("输入开始搜索…").color(palette.weak))
@@ -718,33 +725,36 @@ impl HubApp {
             }
             ContentKind::Files => {
                 let text_left = content.left() + 20.0;
-                let title = wrapped(
-                    ui,
-                    &item.title,
-                    13.5,
-                    palette.text,
-                    content.right() - text_left,
-                    1,
-                );
-                let subtitle = if item.file_count > 1 {
-                    format!("{} 个文件", item.file_count)
-                } else {
-                    "文件".to_string()
+                let width = content.right() - text_left;
+                // 与 PasteNow 一样显示完整路径：单个文件最多两行；多个文件显示第一个，下面注明数量。
+                let multiple = item.file_count > 1;
+                let title = match &item.first_path {
+                    Some(path) => {
+                        path_galley(ui, path, palette, width, if multiple { 1 } else { 2 })
+                    }
+                    None => wrapped(ui, &item.title, 13.5, palette.text, width, 1),
                 };
-                let subtitle = wrapped(ui, &subtitle, 11.5, palette.weak, content.width(), 1);
+                let subtitle = multiple.then(|| {
+                    let text = format!("{} 个文件", item.file_count);
+                    wrapped(ui, &text, 11.5, palette.weak, width, 1)
+                });
                 let title_height = title.size().y;
-                let top = content.center().y - (title_height + 4.0 + subtitle.size().y) / 2.0;
+                let row_height = title_height / title.rows.len().max(1) as f32;
+                let total = title_height + subtitle.as_ref().map_or(0.0, |s| 4.0 + s.size().y);
+                let top = content.center().y - total / 2.0;
                 let icon = Rect::from_center_size(
-                    egui::pos2(content.left() + 7.0, top + title_height / 2.0),
+                    egui::pos2(content.left() + 7.0, top + row_height / 2.0),
                     Vec2::splat(14.0),
                 );
                 icons::paint(&painter, icon, Icon::Document, palette.weak);
                 painter.galley(egui::pos2(text_left, top), title, palette.text);
-                painter.galley(
-                    egui::pos2(text_left, top + title_height + 4.0),
-                    subtitle,
-                    palette.weak,
-                );
+                if let Some(subtitle) = subtitle {
+                    painter.galley(
+                        egui::pos2(text_left, top + title_height + 4.0),
+                        subtitle,
+                        palette.weak,
+                    );
+                }
             }
             kind => {
                 let color = if kind == ContentKind::Link {
@@ -1254,10 +1264,11 @@ fn files_preview(ui: &mut Ui, text: &str, palette: &Palette, actions: &mut Vec<A
                     let label = egui::Label::new(RichText::new(path).monospace().size(12.0))
                         .sense(Sense::click());
                     let hint = if exists {
-                        "点击在文件管理器中显示"
+                        &format!("点击在{}中显示", platform::FILE_MANAGER)
                     } else {
                         "文件已不存在"
                     };
+
                     if ui.add(label).on_hover_text(hint).clicked() && exists {
                         actions.push(Action::Reveal(path.to_string()));
                     }
@@ -1284,6 +1295,78 @@ fn wrapped(
         ..Default::default()
     };
     ui.painter().layout_job(job)
+}
+
+/// 文件路径：目录用弱色，文件名用正文色加粗；最多 `max_rows` 行。
+///
+/// 一行放得下就放一行；放不下时在最后一个分隔符处换行，目录占第一行、文件名占第二行，
+/// 目录太长就从左边逐级省略（`…/download/`），尽量不把文件名拆开。
+fn path_galley(
+    ui: &Ui,
+    path: &str,
+    palette: &Palette,
+    width: f32,
+    max_rows: usize,
+) -> std::sync::Arc<egui::Galley> {
+    const SEPARATORS: [char; 2] = ['/', '\\'];
+    let split = path
+        .trim_end_matches(SEPARATORS)
+        .rfind(SEPARATORS)
+        .map_or(0, |index| index + 1);
+    let (dir, name) = path.split_at(split);
+    let separator = dir.chars().last().unwrap_or('/');
+    let segments: Vec<&str> = dir.split_inclusive(SEPARATORS).collect();
+    let dir_len = dir.chars().count();
+    // 候选目录：完整目录，然后从左边逐级省略（只保留比原目录短的写法）。
+    let mut dirs = vec![dir.to_string()];
+    dirs.extend(
+        (1..=segments.len())
+            .map(|skip| format!("…{separator}{}", segments[skip..].concat()))
+            .filter(|shown| shown.chars().count() < dir_len),
+    );
+    let layout = |dir: &str, newline: bool| {
+        let dir_format = TextFormat::simple(FontId::proportional(13.5), palette.weak);
+        let mut job = LayoutJob::default();
+        job.append(dir, 0.0, dir_format.clone());
+        if newline && !dir.is_empty() {
+            job.append("\n", 0.0, dir_format);
+        }
+        job.append(
+            name,
+            0.0,
+            TextFormat::simple(
+                FontId::new(13.5, egui::FontFamily::Name(fonts::SEMIBOLD.into())),
+                palette.text,
+            ),
+        );
+        job.wrap = TextWrapping {
+            max_width: width,
+            max_rows,
+            break_anywhere: true,
+            ..Default::default()
+        };
+        ui.painter().layout_job(job)
+    };
+    let newline = max_rows > 1;
+    if newline {
+        let galley = layout(dir, false);
+        if galley.rows.len() == 1 {
+            return galley;
+        }
+    }
+    let mut last = None;
+    for shown in &dirs {
+        let galley = layout(shown, newline);
+        if !galley.elided {
+            return galley;
+        }
+        last = Some(galley);
+    }
+    if newline {
+        // 文件名本身就放不下一行：不显示目录，让文件名占满所有行。
+        return layout("", false);
+    }
+    last.unwrap_or_else(|| layout(dir, false))
 }
 
 fn fit(size: Vec2, bounds: Vec2) -> Vec2 {

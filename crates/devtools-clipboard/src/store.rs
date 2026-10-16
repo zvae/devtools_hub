@@ -250,12 +250,17 @@ impl Store {
     }
 
     pub fn items(&self, query: &ItemQuery) -> Result<Vec<ClipItem>> {
-        let mut sql = String::from(
+        // 文件条目的 search_text 是按行拼接的路径，只取第一行，不把整段文本读出来。
+        let mut sql = format!(
             "SELECT i.id, i.kind, i.title, i.source_bundle_id, i.source_name, i.created_at,
                     i.last_used_at, i.copy_count, i.paste_count, i.byte_size, i.file_count,
                     i.image_width, i.image_height, i.thumbnail IS NOT NULL,
-                    (SELECT group_concat(list_id) FROM list_items WHERE item_id = i.id)
+                    (SELECT group_concat(list_id) FROM list_items WHERE item_id = i.id),
+                    CASE WHEN i.kind = {files} THEN
+                        substr(i.search_text, 1, instr(i.search_text || char(10), char(10)) - 1)
+                    END
              FROM items i WHERE 1 = 1",
+            files = ContentKind::Files.as_i64(),
         );
         let (condition, mut values) = filter_clause(query);
         sql.push_str(&condition);
@@ -268,6 +273,7 @@ impl Store {
             let width: Option<u32> = row.get(11)?;
             let height: Option<u32> = row.get(12)?;
             let lists: Option<String> = row.get(14)?;
+            let first_path: Option<String> = row.get(15)?;
             Ok(ClipItem {
                 id: row.get(0)?,
                 kind: ContentKind::from_i64(row.get(1)?),
@@ -282,6 +288,7 @@ impl Store {
                 paste_count: row.get(8)?,
                 byte_size: row.get(9)?,
                 file_count: row.get(10)?,
+                first_path: first_path.filter(|path| !path.is_empty()),
                 image_size: width.zip(height),
                 has_thumbnail: row.get(13)?,
                 list_ids: lists
@@ -707,6 +714,37 @@ mod tests {
         assert_eq!(favorites.len(), 1);
         assert!(favorites[0].in_list(FAVORITES_LIST_ID));
         assert_eq!(store.lists().unwrap()[0].item_count, 1);
+    }
+
+    #[test]
+    fn lists_first_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let files = Snapshot {
+            items: vec![
+                vec![Representation::new(
+                    crate::uti::FILE_URL,
+                    b"file:///Volumes/E/download/%E5%B7%A5%E4%BD%9C%E7%B0%BF1.xlsx".to_vec(),
+                )],
+                vec![Representation::new(
+                    crate::uti::FILE_URL,
+                    b"file:///tmp/b.txt".to_vec(),
+                )],
+            ],
+        };
+        let capture = capture(files, 1);
+        store
+            .record(&capture, &analyze(&capture.snapshot), None)
+            .unwrap();
+        record_text(&mut store, "plain", 2);
+
+        let items = all(&store);
+        assert_eq!(items[0].first_path, None, "文本条目没有路径");
+        assert_eq!(items[1].file_count, 2);
+        assert_eq!(
+            items[1].first_path.as_deref(),
+            Some("/Volumes/E/download/工作簿1.xlsx")
+        );
     }
 
     #[test]

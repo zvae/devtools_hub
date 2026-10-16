@@ -97,6 +97,11 @@ pub fn is_visible() -> bool {
     !hwnd.is_null() && unsafe { IsWindowVisible(hwnd) } != 0
 }
 
+/// 拖动面板：Windows 上 winit 的 `drag_window` 可靠，返回 false 交给它处理。
+pub fn start_drag() -> bool {
+    false
+}
+
 /// 面板正在显示且处于前台。
 pub fn is_active() -> bool {
     let hwnd = window();
