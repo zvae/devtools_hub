@@ -38,6 +38,9 @@ pub const TRAY_NAME: &str = if cfg!(target_os = "macos") {
 /// 自动粘贴是否需要用户授予系统权限（macOS 的“辅助功能”；Windows 不需要）。
 pub const PASTE_NEEDS_PERMISSION: bool = cfg!(target_os = "macos");
 
+/// 是否支持通用剪贴板（从 iPhone / iPad 同步内容；Windows 没有）。
+pub const HAS_UNIVERSAL_CLIPBOARD: bool = cfg!(target_os = "macos");
+
 /// 面板出现的位置（对应 PasteNow 的 “Appear near Cursor / Appear at Last Position”）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Placement {

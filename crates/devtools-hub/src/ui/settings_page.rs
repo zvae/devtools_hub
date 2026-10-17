@@ -546,13 +546,15 @@ impl HubApp {
             &mut rules.ignore_auto_generated,
         );
         divider(ui, palette);
-        switch_row(
-            ui,
-            palette,
-            "忽略 iPhone / iPad 内容",
-            &mut rules.ignore_remote,
-        );
-        divider(ui, palette);
+        if platform::HAS_UNIVERSAL_CLIPBOARD {
+            switch_row(
+                ui,
+                palette,
+                "忽略 iPhone / iPad 内容",
+                &mut rules.ignore_remote,
+            );
+            divider(ui, palette);
+        }
         switch_row(ui, palette, "忽略空白文本", &mut rules.ignore_blank_text);
         divider(ui, palette);
         row(ui, "大小上限", |ui| {
