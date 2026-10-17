@@ -4,10 +4,14 @@
 //! 背景是 `NSVisualEffectView` 毛玻璃（这里在 macOS 26 起换成液态玻璃）；从菜单栏点开时贴在状态栏图标下方
 //! （日志 “The status item screen is: …, visible frame is: …”），用快捷键唤起时
 //! 根据 `NSEvent.mouseLocation` 找到鼠标所在的 `NSScreen` 定位。
-//! eframe 创建的是普通 `NSWindow`，这里直接通过原生 API 控制它：
-//! 显示时激活本应用并记住之前的前台应用，隐藏时把焦点还给它，再由调用方发送 ⌘V。
+//!
+//! 与 PasteNow 一致，面板不激活本应用（实测：从菜单栏弹出 PasteNow 面板时前台应用不变，
+//! 面板窗口层级是 101，即 `NSPopUpMenuWindowLevel`）。eframe 创建的是普通 `NSWindow`，
+//! 绑定时把它换成 `NSPanel` 子类并加上 `NonactivatingPanel` 样式：面板成为键盘窗口，
+//! 前台应用保持不变，收起面板后键盘焦点自然回到它，调用方直接发送 ⌘V 即可。
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use super::workspace;
@@ -15,20 +19,105 @@ pub use crate::platform::{Anchor, Backdrop, Placement};
 use anyhow::{bail, Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSAutoresizingMaskOptions, NSEvent,
-    NSEventModifierFlags, NSEventType, NSGlassEffectView, NSGlassEffectViewStyle,
-    NSRunningApplication, NSScreen, NSStatusWindowLevel, NSView, NSVisualEffectBlendingMode,
-    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowOrderingMode,
+    NSEventModifierFlags, NSEventType, NSGlassEffectView, NSGlassEffectViewStyle, NSPanel,
+    NSPopUpMenuWindowLevel, NSResponder, NSRunningApplication, NSScreen, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 thread_local! {
     static PANEL: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
     static PREVIOUS_APP: RefCell<Option<Retained<NSRunningApplication>>> = const { RefCell::new(None) };
+}
+
+/// 面板是否已换成不激活应用的 `NSPanel`。转换失败时退回到激活本应用的旧做法。
+static NONACTIVATING: AtomicBool = AtomicBool::new(false);
+
+/// 面板是否是键盘窗口。面板不激活本应用，后台线程（中键监听、剪贴板监听）
+/// 不能再用“本应用是否在前台”判断用户是否正在使用面板。
+static PANEL_KEY: AtomicBool = AtomicBool::new(false);
+
+define_class!(
+    /// 面板窗口的类：绑定时把 winit 的 `WinitWindow` 实例换成这个类（两者都没有实例变量）。
+    ///
+    /// SAFETY: `NSPanel` 可以被继承；这里没有实例变量，也不需要 `Drop`。
+    #[unsafe(super(NSPanel, NSWindow, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "DevToolsHubPanel"]
+    struct HubPanel;
+
+    impl HubPanel {
+        /// 无边框窗口默认不能成为键盘窗口（winit 的 `WinitWindow` 同样覆盖了这个方法）。
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn can_become_key_window(&self) -> bool {
+            true
+        }
+
+        /// 面板不做主窗口，与系统面板一致。
+        #[unsafe(method(canBecomeMainWindow))]
+        fn can_become_main_window(&self) -> bool {
+            false
+        }
+
+        #[unsafe(method(becomeKeyWindow))]
+        fn become_key_window(&self) {
+            PANEL_KEY.store(true, Ordering::Relaxed);
+            // SAFETY: 调用父类的同名方法，无参数、无返回值。
+            unsafe { msg_send![super(self), becomeKeyWindow] }
+        }
+
+        #[unsafe(method(resignKeyWindow))]
+        fn resign_key_window(&self) {
+            PANEL_KEY.store(false, Ordering::Relaxed);
+            // SAFETY: 同上。
+            unsafe { msg_send![super(self), resignKeyWindow] }
+        }
+    }
+);
+
+/// 面板是否是键盘窗口（用户正在面板里操作）。可以在任意线程调用。
+pub fn is_key() -> bool {
+    PANEL_KEY.load(Ordering::Relaxed)
+}
+
+/// 把 winit 创建的窗口换成 [`HubPanel`] 并设为不激活应用的面板。返回是否成功。
+fn make_nonactivating(window: &NSWindow) -> bool {
+    let from = window.class();
+    let to = HubPanel::class();
+    // 换类要求两个类的实例布局一致：都只有 NSWindow 的实例变量。
+    if from.instance_size() != to.instance_size() {
+        tracing::warn!(
+            "无法把面板换成 NSPanel：{} 实例大小 {}，{} 实例大小 {}",
+            from.name().to_string_lossy(),
+            from.instance_size(),
+            to.name().to_string_lossy(),
+            to.instance_size()
+        );
+        return false;
+    }
+    // SAFETY: 实例大小相同，WinitWindow 与 HubPanel 都没有自己的实例变量；
+    // HubPanel 覆盖的方法保留了 WinitWindow 依赖的行为（可以成为键盘窗口）。
+    unsafe { AnyObject::set_class(window, to) };
+    window.setStyleMask(window.styleMask() | NSWindowStyleMask::NonactivatingPanel);
+    // 只有 init 时带上 NonactivatingPanel，AppKit 才会设置窗口的“阻止激活”属性；
+    // 创建后再加这一位，样式里有了，点击面板却仍会激活本应用（实测 `_preventsActivation` 仍为 false）。
+    // 没有公开 API，用 NSPanel 初始化时调用的私有方法补上；旧系统上没有这个方法时只能接受点击激活。
+    let selector = sel!(_setPreventsActivation:);
+    // SAFETY: 先确认方法存在；参数是 BOOL。
+    unsafe {
+        let responds: bool = msg_send![window, respondsToSelector: selector];
+        if responds {
+            let _: () = msg_send![window, _setPreventsActivation: true];
+        } else {
+            tracing::warn!("系统没有 _setPreventsActivation:，点击面板会激活本应用");
+        }
+    }
+    true
 }
 
 /// 窗口圆角半径，与 UI 中背景的圆角一致。
@@ -51,13 +140,15 @@ pub fn attach(handle: &impl HasWindowHandle, start_hidden: bool) -> Result<()> {
     // SAFETY: eframe 保证句柄在窗口存活期间有效，NSView 指针来自 winit。
     let view: &NSView = unsafe { raw.ns_view.cast().as_ref() };
     let window = view.window().context("视图不在窗口中")?;
+    NONACTIVATING.store(make_nonactivating(&window), Ordering::Relaxed);
     // 出现在所有桌面（含全屏应用所在的桌面）之上，像系统面板一样。
     window.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary
             | NSWindowCollectionBehavior::IgnoresCycle,
     );
-    window.setLevel(NSStatusWindowLevel);
+    window.setLevel(NSPopUpMenuWindowLevel);
+    // NSPanel 默认在应用失去激活时隐藏；面板本来就不激活应用，必须关掉。
     window.setHidesOnDeactivate(false);
     if start_hidden {
         window.setAlphaValue(0.0);
@@ -66,8 +157,9 @@ pub fn attach(handle: &impl HasWindowHandle, start_hidden: bool) -> Result<()> {
     let backdrop = install_backdrop(mtm, &window);
     let _ = BACKDROP.set(backdrop);
     tracing::debug!(
-        "已绑定面板窗口 #{}，背景材质：{backdrop:?}",
-        window.windowNumber()
+        "已绑定面板窗口 #{}，背景材质：{backdrop:?}，不激活应用：{}",
+        window.windowNumber(),
+        NONACTIVATING.load(Ordering::Relaxed)
     );
     PANEL.with(|panel| *panel.borrow_mut() = Some(window));
     Ok(())
@@ -161,10 +253,9 @@ fn with_panel<R>(f: impl FnOnce(MainThreadMarker, &NSWindow) -> R) -> Option<R> 
     PANEL.with(|panel| panel.borrow().as_ref().map(|window| f(mtm, window)))
 }
 
-/// 面板是否正在显示且本应用处于前台。
+/// 面板是否正在显示且是键盘窗口（面板不激活本应用，不能看本应用是否在前台）。
 pub fn is_active() -> bool {
-    with_panel(|mtm, window| window.isVisible() && NSApplication::sharedApplication(mtm).isActive())
-        .unwrap_or(false)
+    with_panel(|_, window| window.isVisible() && window.isKeyWindow()).unwrap_or(false)
 }
 
 pub fn is_visible() -> bool {
@@ -215,16 +306,15 @@ pub fn start_drag() -> bool {
     .is_some()
 }
 
-/// 显示面板并激活本应用。`size` 是内容区大小（逻辑像素）：同一个窗口既用作剪贴板面板，
+/// 显示面板并让它成为键盘窗口（不激活本应用）。`size` 是内容区大小（逻辑像素）：同一个窗口既用作剪贴板面板，
 /// 也用作鼠标中键快捷面板和 JSON 编辑器，各自大小不同。
 /// 窗口原本隐藏、或者大小有变化时，按 `anchor` 重新定位。
 pub fn show(anchor: Anchor, size: [f32; 2]) -> bool {
     with_panel(|mtm, window| {
         let visible = window.isVisible();
-        if !visible {
-            if let Some(app) = workspace::frontmost_other_app() {
-                PREVIOUS_APP.with(|prev| *prev.borrow_mut() = Some(app));
-            }
+        // 面板不激活本应用，前台应用就是粘贴目标；面板固定显示时用户可能已经换了应用，每次都更新。
+        if let Some(app) = workspace::frontmost_other_app() {
+            PREVIOUS_APP.with(|prev| *prev.borrow_mut() = Some(app));
         }
         if resize(window, size) || !visible {
             match anchor {
@@ -233,9 +323,10 @@ pub fn show(anchor: Anchor, size: [f32; 2]) -> bool {
             }
         }
         window.setAlphaValue(1.0);
-        let app = NSApplication::sharedApplication(mtm);
-        #[allow(deprecated)]
-        app.activateIgnoringOtherApps(true);
+        if !NONACTIVATING.load(Ordering::Relaxed) {
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        }
         window.makeKeyAndOrderFront(None);
         window.orderFrontRegardless();
         let frame = window.frame();
@@ -265,16 +356,21 @@ fn resize(window: &NSWindow, size: [f32; 2]) -> bool {
     true
 }
 
-/// 隐藏面板；`restore_focus` 为 true 时激活弹出面板之前的前台应用。
+/// 隐藏面板；`restore_focus` 为 true 时确保弹出面板之前的前台应用拿回键盘焦点。
 pub fn hide(restore_focus: bool) {
     with_panel(|mtm, window| {
         window.orderOut(None);
+        PANEL_KEY.store(false, Ordering::Relaxed);
         let previous = PREVIOUS_APP.with(|prev| prev.borrow_mut().take());
-        tracing::debug!("隐藏面板，恢复焦点：{restore_focus}");
-        if !restore_focus {
+        let app = NSApplication::sharedApplication(mtm);
+        tracing::debug!(
+            "隐藏面板，恢复焦点：{restore_focus}，本应用在前台：{}",
+            app.isActive()
+        );
+        // 本应用没有被激活时，前台应用一直没变，面板收起后键盘焦点自动回到它。
+        if !restore_focus || !app.isActive() {
             return;
         }
-        let app = NSApplication::sharedApplication(mtm);
         match previous {
             Some(previous) if !previous.isTerminated() => {
                 previous.activateWithOptions(NSApplicationActivationOptions::empty());

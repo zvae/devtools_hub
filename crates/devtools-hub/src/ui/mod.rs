@@ -334,7 +334,7 @@ impl HubApp {
     }
 
     /// 选中条目后的粘贴流程：
-    /// 写回剪贴板 → 隐藏面板并激活之前的应用 → 稍等片刻发送 ⌘V。
+    /// 写回剪贴板 → 隐藏面板，焦点回到之前的应用 → 稍等片刻发送 ⌘V。
     pub(crate) fn paste(&mut self, id: i64, mode: PasteMode) {
         let snapshot = match self.snapshot_for(id, mode) {
             Ok(snapshot) => snapshot,
@@ -366,7 +366,7 @@ impl HubApp {
         let keycode = keyboard::paste_keycode();
         self.hide_panel(true);
         std::thread::spawn(move || {
-            // 等之前的应用重新成为前台，否则 ⌘V 会发给错误的窗口。
+            // 等焦点回到之前的应用，否则 ⌘V 会发给错误的窗口。
             std::thread::sleep(Duration::from_millis(150));
             keyboard::post_paste(keycode);
         });
@@ -374,7 +374,7 @@ impl HubApp {
 
     /// 鼠标中键：模拟复制读取选中的内容，然后在鼠标处弹出快捷面板。
     ///
-    /// 与 uTools 不同，读取期间不先显示面板：面板显示时会激活本应用，复制快捷键就发不到原来的应用了。
+    /// 与 uTools 不同，读取期间不先显示面板：面板显示时会拿走键盘焦点，复制快捷键就发不到原来的应用了。
     /// 读取一般只要几十毫秒，没有选中内容时最多等约 0.3 秒。
     fn on_middle_click(&mut self) {
         if !self.settings.middle_click || native_panel::is_active() {

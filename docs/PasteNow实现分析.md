@@ -51,6 +51,7 @@ macOS 没有公开的“剪贴板变化”通知，PasteNow 用定时器比较 `
 - 默认快捷键：偏好设置里 `shortcutkit-show-interface = {carbonKeyCode = 9; carbonModifiers = 768}`，即 `kVK_ANSI_V` 加 `cmdKey(256) | shiftKey(512)`，也就是 **⇧⌘V**
 - 键盘布局：导入了 `TISCopyCurrentASCIICapableKeyboardLayoutInputSource`、`UCKeyTranslate`、`kTISPropertyUnicodeKeyLayoutData`、`LMGetKbdType`，用来把键码换算成当前布局下的字符（显示快捷键、查找 V 键的键码；设置里还有 Dvorak 布局选项）
 - 面板：`FloatPanel` / `PasteFloatPanel`（`NSPanel` 子类）、`canBecomeKey`、`NSVisualEffectView`、`MovableGlassEffectContainerView`（macOS 26 的 Liquid Glass 效果）。定位用的是 `mouseLocation` 加 `NSScreen`，对应选项 “Appear near Cursor / Appear at Last Position”；偏好 `float-panel-size = {360, 787}` 记录面板大小
+- 不激活应用（运行时实测）：从菜单栏弹出面板期间前台应用保持不变，PasteNow 自己始终不是活跃应用，也没有任何激活通知；面板窗口层级是 101（`NSPopUpMenuWindowLevel`）
 - 键盘操作：`LocalEventMonitor` / `RunLoopLocalEventMonitor` 加 `addLocalMonitorForEventsMatchingMask:handler:`；支持 HJKL 导航；日志 `Assign key code %s to item` 对应数字键快速粘贴；`QuickPreviewController` 提供预览
 
 ## 6. 粘贴：写回剪贴板，再模拟 ⌘V
@@ -90,5 +91,5 @@ macOS 没有公开的“剪贴板变化”通知，PasteNow 用定时器比较 `
 
 - **iCloud 同步**：需要 Apple 开发者账号和 CloudKit 容器，没有实现
 - 智能列表的自定义谓词、文本和图片编辑、Quick Look、链接标题抓取、快捷指令 Intents、URL Scheme、音效，都没有实现
-- 面板窗口：eframe 创建的是普通 `NSWindow`，不是非激活的 `NSPanel`。弹出时会激活本应用并记住之前的前台应用，粘贴前再把焦点还给它，然后发送 ⌘V
+- 面板窗口：eframe 创建的是普通 `NSWindow`，绑定时换成 `NSPanel` 子类并加上 `NonactivatingPanel` 样式，再用私有的 `_setPreventsActivation:` 补上“阻止激活”属性（创建后再加样式时 AppKit 不会设置它，点击面板仍会激活应用）。效果与 PasteNow 一致：弹出和点击面板都不激活本应用，收起后键盘焦点回到前台应用，直接发送 ⌘V
 - 压缩算法用 zstd 代替 LZFSE，指纹用 SHA-256 代替 SHA1
