@@ -9,11 +9,13 @@ use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
 use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 
+/// 系统剪贴板（NSPasteboard）的读写。
 pub struct Pasteboard {
     inner: Retained<NSPasteboard>,
 }
 
 impl Pasteboard {
+    /// 系统通用剪贴板。
     pub fn general() -> Self {
         Self {
             inner: NSPasteboard::generalPasteboard(),
@@ -27,6 +29,7 @@ impl Pasteboard {
         }
     }
 
+    /// 新建一个私有剪贴板（测试用，不影响系统剪贴板）。
     #[cfg(test)]
     pub fn unique() -> Self {
         Self {
@@ -34,11 +37,13 @@ impl Pasteboard {
         }
     }
 
+    /// 剪贴板名，可以传给 `--pasteboard`。
     #[cfg(test)]
     pub fn name(&self) -> String {
         self.inner.name().to_string()
     }
 
+    /// 释放私有剪贴板。
     #[cfg(test)]
     pub fn release(&self) {
         // objc2-app-kit 没有生成这个方法的绑定。
@@ -48,6 +53,7 @@ impl Pasteboard {
         }
     }
 
+    /// 剪贴板的修改序号，每次写入都会变；监听线程据此发现新内容。
     pub fn change_count(&self) -> isize {
         self.inner.changeCount()
     }
@@ -72,6 +78,7 @@ impl Pasteboard {
         })
     }
 
+    /// 读取剪贴板上所有条目的所有类型。
     pub fn read(&self) -> Snapshot {
         autoreleasepool(|_| {
             let Some(items) = self.inner.pasteboardItems() else {

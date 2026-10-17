@@ -16,6 +16,7 @@ use crate::shared::Shared;
 /// 等待前台应用响应复制的最长时间。uTools 固定等 50 ms，
 /// 浏览器、Electron 应用偶尔更慢，这里轮询到有变化为止；没有选中内容时要等满这段时间。
 const TIMEOUT: Duration = Duration::from_millis(300);
+/// 等待期间检查剪贴板序号的间隔。
 const POLL: Duration = Duration::from_millis(10);
 /// 序号变化后再等一会儿：有的应用分几次写入剪贴板（先清空再写入各种格式）。
 const SETTLE: Duration = Duration::from_millis(30);
@@ -29,6 +30,7 @@ pub enum Selection {
 }
 
 impl Selection {
+    /// 从复制得到的剪贴板内容中取出选中的文件或文字；都没有时返回 `None`。
     fn from_snapshot(snapshot: &Snapshot) -> Option<Self> {
         let analysis = uti::analyze(snapshot);
         if !analysis.file_paths.is_empty() {

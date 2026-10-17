@@ -51,12 +51,14 @@ pub enum Placement {
 }
 
 impl Placement {
+    /// 设置里可选的全部位置。
     pub const ALL: [Placement; 3] = [
         Placement::NearCursor,
         Placement::ScreenCenter,
         Placement::LastPosition,
     ];
 
+    /// 界面上显示的名字。
     pub fn label(self) -> &'static str {
         match self {
             Placement::NearCursor => "鼠标附近",

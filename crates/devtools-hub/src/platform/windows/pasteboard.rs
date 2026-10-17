@@ -25,6 +25,7 @@ use super::wide;
 pub struct Pasteboard;
 
 impl Pasteboard {
+    /// 系统剪贴板。
     pub fn general() -> Self {
         Self
     }
@@ -35,6 +36,7 @@ impl Pasteboard {
         Self
     }
 
+    /// 剪贴板的修改序号，每次写入都会变；监听线程据此发现新内容。
     pub fn change_count(&self) -> isize {
         // SAFETY: 无参数的查询函数。
         unsafe { GetClipboardSequenceNumber() as isize }
@@ -48,6 +50,7 @@ impl Pasteboard {
         windows_formats::type_names(&enumerate(false))
     }
 
+    /// 读取剪贴板上的所有格式；剪贴板被占用时返回空内容。
     pub fn read(&self) -> Snapshot {
         let Some(_guard) = ClipboardGuard::open(null_mut()) else {
             tracing::debug!("剪贴板被其他程序占用，本次跳过");
@@ -79,6 +82,7 @@ impl Pasteboard {
 struct ClipboardGuard;
 
 impl ClipboardGuard {
+    /// 打开剪贴板，被占用时每隔一小段时间重试，最多 20 次。
     fn open(owner: HWND) -> Option<Self> {
         for _ in 0..20 {
             // SAFETY: owner 为面板窗口或空指针。

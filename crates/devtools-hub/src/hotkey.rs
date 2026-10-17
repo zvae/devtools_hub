@@ -13,6 +13,7 @@ use crate::controller;
 use crate::keys;
 use crate::shared::Shared;
 
+/// 注册唤起面板的全局快捷键，按下时切换面板。
 pub struct HotkeyService {
     manager: GlobalHotKeyManager,
     current: Option<HotKey>,
@@ -61,6 +62,7 @@ impl HotkeyService {
     }
 }
 
+/// 解析 `Cmd+Shift+V` 形式的快捷键，要求至少有一个修饰键。
 pub fn parse(spec: &str) -> Result<HotKey, String> {
     let hotkey = HotKey::from_str(spec).map_err(|err| format!("快捷键格式不正确：{err}"))?;
     if hotkey.mods.is_empty() {

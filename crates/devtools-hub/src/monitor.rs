@@ -19,6 +19,7 @@ use crate::platform::pasteboard::Pasteboard;
 use crate::platform::workspace;
 use crate::shared::Shared;
 
+/// 按保留时长与条数清理历史的间隔。
 const PRUNE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 /// 启动监听线程。`store` 由调用方在主线程打开（顺带完成数据库迁移），监听线程独占这个连接。
@@ -29,6 +30,7 @@ pub fn spawn(shared: Arc<Shared>, store: Store, pasteboard_name: Option<String>)
         .expect("无法创建监听线程")
 }
 
+/// 监听循环：剪贴板序号变化时读取并记录，定期清理过期的历史。
 fn run(shared: &Shared, mut store: Store, pasteboard_name: Option<&str>) {
     let pasteboard = pasteboard_name.map_or_else(Pasteboard::general, Pasteboard::named);
     // 启动时也记录一次当前剪贴板内容（若已存在只会更新时间）。
@@ -74,6 +76,7 @@ fn run(shared: &Shared, mut store: Store, pasteboard_name: Option<&str>) {
     }
 }
 
+/// 读取一次剪贴板并按规则记录；被规则跳过时返回 `None`。
 fn capture_once(
     shared: &Shared,
     pasteboard: &Pasteboard,
@@ -112,6 +115,7 @@ fn capture_once(
         .map(Some)
 }
 
+/// 按当前设置清理过期或超出条数的历史，有删除时通知 UI 刷新。
 fn prune(shared: &Shared, store: &mut Store) {
     let config = shared.config();
     match store.prune(now_ms(), config.retention_ms, config.max_items) {

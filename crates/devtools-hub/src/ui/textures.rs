@@ -7,14 +7,17 @@ use devtools_clipboard::Store;
 use crate::platform::icons;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 
+/// 缓存的纹理数上限，超过后整个清空重建。
 const MAX_ENTRIES: usize = 300;
 
+/// 图片条目的缩略图纹理，按条目 id 缓存（解码失败的也缓存为 `None`）。
 #[derive(Default)]
 pub struct Textures {
     map: HashMap<i64, Option<TextureHandle>>,
 }
 
 impl Textures {
+    /// 条目缩略图的纹理，第一次用到时从数据库读出并解码。
     pub fn get(&mut self, ctx: &egui::Context, store: &Store, id: i64) -> Option<TextureHandle> {
         if let Some(texture) = self.map.get(&id) {
             return texture.clone();
@@ -32,6 +35,7 @@ impl Textures {
         texture
     }
 
+    /// 条目被删除时释放纹理。
     pub fn forget(&mut self, id: i64) {
         self.map.remove(&id);
     }
@@ -44,6 +48,7 @@ pub struct AppIcons {
 }
 
 impl AppIcons {
+    /// 应用图标的纹理，第一次用到时向系统查询。
     pub fn get(&mut self, ctx: &egui::Context, bundle_id: &str) -> Option<TextureHandle> {
         if let Some(texture) = self.map.get(bundle_id) {
             return texture.clone();
@@ -58,6 +63,7 @@ impl AppIcons {
     }
 }
 
+/// 把 PNG 解码成 egui 的图片。
 fn decode(png: &[u8]) -> Option<ColorImage> {
     let image = image::load_from_memory(png).ok()?.to_rgba8();
     let size = [image.width() as usize, image.height() as usize];

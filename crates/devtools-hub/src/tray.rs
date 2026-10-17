@@ -23,6 +23,7 @@ const CLICK_STATE: MouseButtonState = if cfg!(windows) {
     MouseButtonState::Down
 };
 
+/// 菜单栏（macOS）/ 托盘（Windows）图标与它的菜单。
 pub struct Tray {
     _icon: TrayIcon,
     menu: Menu,
@@ -128,6 +129,7 @@ impl Tray {
         })
     }
 
+    /// 设置变化后同步菜单：“暂停记录”的勾选状态与快捷键提示。
     pub fn sync(&self, paused: bool, hotkey_label: &str) {
         self.pause.set_checked(paused);
         self.show

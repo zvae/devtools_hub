@@ -10,8 +10,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+/// LaunchAgent 的标签，也是 plist 的文件名。
 const LABEL: &str = "dev.devtoolshub.clipboard";
 
+/// `~/Library/LaunchAgents/<LABEL>.plist`
 fn plist_path() -> Result<PathBuf> {
     let home = directories::BaseDirs::new().context("找不到用户目录")?;
     Ok(home
@@ -20,10 +22,12 @@ fn plist_path() -> Result<PathBuf> {
         .join(format!("{LABEL}.plist")))
 }
 
+/// 是否已设置登录时启动（plist 存在）。
 pub fn is_enabled() -> bool {
     plist_path().map(|path| path.exists()).unwrap_or(false)
 }
 
+/// 开启时写入指向当前可执行文件的 plist，关闭时删除它。
 pub fn set_enabled(enabled: bool) -> Result<()> {
     let path = plist_path()?;
     if !enabled {
@@ -59,6 +63,7 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
     fs::write(&path, plist).with_context(|| format!("写入 {} 失败", path.display()))
 }
 
+/// 转义写进 plist 的文本（路径里可能有 `&` 等字符）。
 fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")

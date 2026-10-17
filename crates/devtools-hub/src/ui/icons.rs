@@ -6,6 +6,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 
+/// 界面里用到的矢量图标。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     Search,
@@ -41,6 +42,7 @@ struct Grid {
 }
 
 impl Grid {
+    /// 取 `rect` 中居中的正方形作为 16 × 16 的网格。
     fn new(rect: Rect) -> Self {
         let side = rect.width().min(rect.height());
         let square = Rect::from_center_size(rect.center(), Vec2::splat(side));
@@ -50,19 +52,23 @@ impl Grid {
         }
     }
 
+    /// 网格坐标转成屏幕坐标。
     fn p(&self, x: f32, y: f32) -> Pos2 {
         self.rect.min + Vec2::new(x, y) * self.scale
     }
 
+    /// 网格中的长度转成屏幕长度。
     fn r(&self, value: f32) -> f32 {
         value * self.scale
     }
 
+    /// 网格坐标表示的矩形。
     fn rect(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
         Rect::from_min_max(self.p(x0, y0), self.p(x1, y1))
     }
 }
 
+/// 在 `rect` 中画图标（按 16 × 16 的网格设计，缩放到 `rect` 的短边）。
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
     let g = Grid::new(rect);
     let stroke = Stroke::new(g.r(1.35).max(1.0), color);

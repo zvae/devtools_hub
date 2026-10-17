@@ -41,6 +41,7 @@ pub const TEXT_HINT: f32 = 11.5;
 /// 这里给到 11.5 × 1.4 ≈ 16，与系统界面的中文行距接近。
 pub const HINT_LINE_HEIGHT: f32 = 16.0;
 
+/// 安装字体，并为明暗两套主题设置字号、间距、圆角与控件颜色。
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts::definitions());
     for theme in [Theme::Light, Theme::Dark] {
@@ -283,6 +284,7 @@ pub fn group_digits(value: i64) -> String {
     out
 }
 
+/// 内容类型的代表色（没有来源应用图标时的类型徽标）。
 pub fn kind_color(kind: ContentKind) -> Color32 {
     match kind {
         ContentKind::Text => Color32::from_rgb(0x6b, 0x7c, 0x93),
@@ -294,6 +296,7 @@ pub fn kind_color(kind: ContentKind) -> Color32 {
     }
 }
 
+/// 内容类型的图标。
 pub fn kind_icon(kind: ContentKind) -> Icon {
     match kind {
         ContentKind::Text | ContentKind::RichText => Icon::Document,
@@ -304,14 +307,17 @@ pub fn kind_icon(kind: ContentKind) -> Icon {
     }
 }
 
+/// 本地时间，例如 `2024-05-01 09:30:00`（预览里的复制时间）。
 pub fn absolute_time(ms: i64) -> String {
     local(ms).map_or_else(String::new, |t| t.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
+/// 毫秒时间戳转成本地时区的时间。
 fn local(ms: i64) -> Option<chrono::DateTime<chrono::Local>> {
     chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(&chrono::Local))
 }
 
+/// 人类可读的大小，例如 `1.5 MB`。
 pub fn byte_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;

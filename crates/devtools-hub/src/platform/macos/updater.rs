@@ -55,6 +55,7 @@ pub fn install(package: &Path, target: &Path, version: &str) -> Result<()> {
     result
 }
 
+/// 从挂载好的 .dmg 中找到应用，核对后替换 `target`。
 fn install_from(mount: &Path, target: &Path, version: &str) -> Result<()> {
     let source = fs::read_dir(mount)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))

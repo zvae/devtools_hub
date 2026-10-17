@@ -32,6 +32,7 @@ pub fn accessibility_trusted(_prompt: bool) -> bool {
 /// Windows 没有对应的设置页。
 pub fn open_accessibility_settings() {}
 
+/// 粘贴用的按键（V）。
 pub fn paste_keycode() -> u16 {
     VK_V
 }
@@ -86,6 +87,7 @@ fn post_ctrl(keycode: u16) {
     }
 }
 
+/// 一次按下或松开的键盘输入。
 fn key(virtual_key: u16, up: bool) -> INPUT {
     // Insert 位于方向键区，属于扩展键；不带这个标志会被当成小键盘的 0（Ins）。
     let mut flags = if up { KEYEVENTF_KEYUP } else { 0 };

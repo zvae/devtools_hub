@@ -8,8 +8,10 @@ use anyhow::{bail, ensure, Context, Result};
 
 use crate::model::{Representation, Snapshot};
 
+/// 格式标识与版本号，格式变化时递增版本号。
 const MAGIC: &[u8; 4] = b"DTHS";
 const VERSION: u8 = 1;
+/// zstd 压缩级别：压缩率与速度的折中。
 const ZSTD_LEVEL: i32 = 3;
 
 /// 编码格式：
@@ -31,6 +33,7 @@ pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>> {
     zstd::bulk::compress(&raw, ZSTD_LEVEL).context("压缩剪贴板数据失败")
 }
 
+/// 解压并解析 [`encode`] 的输出，数据被截断或格式不对时报错。
 pub fn decode(compressed: &[u8]) -> Result<Snapshot> {
     let raw = zstd::stream::decode_all(compressed).context("解压剪贴板数据失败")?;
     let mut reader = Reader { buf: &raw, pos: 0 };
@@ -58,6 +61,7 @@ pub fn decode(compressed: &[u8]) -> Result<Snapshot> {
     Ok(Snapshot { items })
 }
 
+/// 按顺序读取字节的游标，越界时报错而不是 panic。
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,

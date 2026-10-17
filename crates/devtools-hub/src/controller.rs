@@ -11,7 +11,9 @@ use crate::platform::panel::{self, Anchor};
 use crate::platform::TrayRect;
 use crate::shared::{AppEvent, Shared};
 
+/// 主线程的 id，用来判断回调是否可以直接操作窗口。
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
+/// 面板上次因失焦自动隐藏的时间，见 [`note_auto_hide`]。
 static LAST_AUTO_HIDE: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// 在 `main` 中、启动事件循环之前调用，记录主线程。
@@ -19,6 +21,7 @@ pub fn init_main_thread() {
     let _ = MAIN_THREAD.set(std::thread::current().id());
 }
 
+/// 当前是否在主线程。
 fn on_main_thread() -> bool {
     MAIN_THREAD
         .get()
@@ -33,6 +36,7 @@ pub fn note_auto_hide() {
     *LAST_AUTO_HIDE.lock().unwrap() = Some(Instant::now());
 }
 
+/// 面板是否刚刚（400 毫秒内）因失焦自动隐藏。
 fn just_auto_hidden() -> bool {
     LAST_AUTO_HIDE
         .lock()
@@ -40,6 +44,7 @@ fn just_auto_hidden() -> bool {
         .is_some_and(|at| at.elapsed() < Duration::from_millis(400))
 }
 
+/// 快捷键：面板在前台则隐藏，否则按设置的位置显示。
 pub fn toggle_panel(shared: &Shared) {
     if !on_main_thread() {
         shared.post(AppEvent::TogglePanel);
@@ -52,6 +57,7 @@ pub fn toggle_panel(shared: &Shared) {
     }
 }
 
+/// 显示面板；`open_settings` 为 true 时直接打开设置页。
 pub fn show_panel(shared: &Shared, open_settings: bool) {
     if !on_main_thread() {
         shared.post(if open_settings {

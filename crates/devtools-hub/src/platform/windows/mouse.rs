@@ -18,8 +18,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WH_MOUSE_LL, WM_MBUTTONDOWN, WM_MBUTTONUP,
 };
 
+/// 中键按下时的回调，返回是否已处理。
 type Handler = Box<dyn Fn() -> bool + Send + Sync>;
 
+/// 低级鼠标钩子是全局回调，回调函数只能放在静态变量里。
 static ON_PRESS: OnceLock<Handler> = OnceLock::new();
 /// 这次中键按下已被处理（吞掉），对应的松开也一并吞掉。
 static SWALLOWING: AtomicBool = AtomicBool::new(false);

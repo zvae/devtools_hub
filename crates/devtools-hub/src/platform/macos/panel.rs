@@ -31,7 +31,9 @@ use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 thread_local! {
+    /// 面板窗口（eframe 创建的窗口，绑定后保存在这里，只在主线程访问）。
     static PANEL: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+    /// 弹出面板前的前台应用，收起面板时把焦点还给它。
     static PREVIOUS_APP: RefCell<Option<Retained<NSRunningApplication>>> = const { RefCell::new(None) };
 }
 
@@ -64,6 +66,7 @@ define_class!(
             false
         }
 
+        /// 记录面板成为 / 不再是键盘窗口（`is_active` 用）。
         #[unsafe(method(becomeKeyWindow))]
         fn become_key_window(&self) {
             PANEL_KEY.store(true, Ordering::Relaxed);
@@ -126,6 +129,7 @@ fn make_nonactivating(window: &NSWindow) -> bool {
 /// macOS 26 给这类窗口的圆角是 16pt（`NSWindow._cornerRadius`；带工具栏的窗口是 26pt）。
 pub const CORNER_RADIUS: f64 = 16.0;
 
+/// 绑定窗口时实际用上的背景材质。
 static BACKDROP: OnceLock<Backdrop> = OnceLock::new();
 
 /// 绑定 eframe 创建的窗口，并设置成浮动面板的行为。必须在主线程调用。
@@ -248,6 +252,7 @@ pub fn backdrop() -> Backdrop {
     BACKDROP.get().copied().unwrap_or_default()
 }
 
+/// 在主线程上对已绑定的面板窗口执行 `f`；不在主线程或还没绑定时返回 `None`。
 fn with_panel<R>(f: impl FnOnce(MainThreadMarker, &NSWindow) -> R) -> Option<R> {
     let mtm = MainThreadMarker::new()?;
     PANEL.with(|panel| panel.borrow().as_ref().map(|window| f(mtm, window)))
@@ -258,6 +263,7 @@ pub fn is_active() -> bool {
     with_panel(|_, window| window.isVisible() && window.isKeyWindow()).unwrap_or(false)
 }
 
+/// 面板窗口是否可见（不论是否有焦点）。
 pub fn is_visible() -> bool {
     with_panel(|_, window| window.isVisible()).unwrap_or(false)
 }
@@ -402,6 +408,8 @@ pub fn previous_app_name() -> Option<String> {
     })
 }
 
+/// 按出现位置摆放窗口，并限制在鼠标所在屏幕的可见区域内；
+/// “上次的位置”保持不动，只有窗口已不在任何屏幕上时才改到屏幕中央。
 fn position(mtm: MainThreadMarker, window: &NSWindow, placement: Placement) {
     let frame = window.frame();
     let mouse = NSEvent::mouseLocation();
@@ -500,6 +508,7 @@ fn position_below_status_item(mtm: MainThreadMarker, window: &NSWindow) {
     window.setFrameTopLeftPoint(NSPoint::new(x, top));
 }
 
+/// 点是否在矩形内（含边界）。
 fn contains(rect: NSRect, point: NSPoint) -> bool {
     point.x >= rect.origin.x
         && point.x <= rect.origin.x + rect.size.width
@@ -507,6 +516,7 @@ fn contains(rect: NSRect, point: NSPoint) -> bool {
         && point.y <= rect.origin.y + rect.size.height
 }
 
+/// 两个矩形是否相交。
 fn intersects(a: NSRect, b: NSRect) -> bool {
     a.origin.x < b.origin.x + b.size.width
         && b.origin.x < a.origin.x + a.size.width

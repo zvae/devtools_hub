@@ -13,6 +13,7 @@ use egui::{Color32, FontId, Rgba};
 
 use super::style::Palette;
 
+/// 缓存的条目数上限，超过后整个清空重建。
 const MAX_ENTRIES: usize = 300;
 /// 最多解析的字符数，与大预览的上限一致。
 const MAX_CHARS: usize = 20_000;
@@ -28,6 +29,7 @@ pub struct CodeStyles {
 }
 
 impl CodeStyles {
+    /// 富文本条目的代码样式（只解析一次，不是代码时也缓存为 `None`）。
     pub fn get(&mut self, store: &Store, item: &ClipItem) -> Option<Arc<Vec<StyledRun>>> {
         if item.kind != ContentKind::RichText {
             return None;
@@ -47,6 +49,7 @@ impl CodeStyles {
         runs
     }
 
+    /// 条目被删除时清掉缓存。
     pub fn forget(&mut self, id: i64) {
         self.map.remove(&id);
     }
@@ -103,6 +106,7 @@ pub fn preview_job(runs: &[StyledRun], palette: &Palette, size: f32) -> LayoutJo
     job
 }
 
+/// 一段代码的文字格式：等宽字体，颜色调整到在当前背景上看得清。
 fn format(run: &StyledRun, palette: &Palette, size: f32) -> TextFormat {
     TextFormat {
         font_id: FontId::monospace(size),
@@ -131,11 +135,13 @@ pub fn readable(color: Option<[u8; 3]>, palette: &Palette) -> Color32 {
         .unwrap_or(palette.text)
 }
 
+/// 相对亮度（WCAG 定义，按线性 RGB 计算）。
 fn luminance(color: Color32) -> f32 {
     let linear = Rgba::from(color);
     0.2126 * linear.r() + 0.7152 * linear.g() + 0.0722 * linear.b()
 }
 
+/// 两种颜色的对比度（WCAG 定义，1–21）。
 fn contrast(a: Color32, b: Color32) -> f32 {
     let (a, b) = (luminance(a), luminance(b));
     (a.max(b) + 0.05) / (a.min(b) + 0.05)

@@ -17,6 +17,7 @@ pub fn begin(ui: &mut Ui, min_width: f32) {
     ui.set_min_width(min_width);
 }
 
+/// 一个菜单项：整行可点，悬停时显示强调色底。
 pub fn item(ui: &mut Ui, palette: &Palette, label: &str) -> Response {
     let galley = ui.painter().layout_no_wrap(
         label.to_string(),

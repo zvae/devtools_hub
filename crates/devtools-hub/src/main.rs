@@ -54,6 +54,7 @@ pub struct Args {
     pub after_update: bool,
 }
 
+/// `--help` 的输出。
 const HELP: &str = "DevTools Hub 剪贴板历史
 
 用法: devtools-hub [选项]
@@ -67,6 +68,7 @@ const HELP: &str = "DevTools Hub 剪贴板历史
   -h, --help             显示帮助";
 
 impl Args {
+    /// 解析命令行参数；`--help` 时打印帮助并返回 `None`。
     fn parse() -> Result<Option<Self>, String> {
         let mut args = Args::default();
         let mut iter = std::env::args().skip(1);

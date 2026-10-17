@@ -174,7 +174,7 @@ function q(e, t, n) {
 | `showInactive()` 先显示面板再取词 | 先取词再显示：egui 窗口显示时会激活本应用，⌘C 就发不到原来的应用了。代价是没有选中内容时要等满 300 ms 才弹出 |
 | `plugin.json` 的 regex / files 规则 | `tools/mod.rs`：同样只看首尾括号（另外接受转义过的 JSON 字符串），或单个 `.json` 文件；没选中时列出所有功能 |
 | 标题“选中的文本 N 个” | `Selection::label()`，按字符计数 |
-| Monaco + formatText 文本级格式化 | `tools/json.rs`：自己写的词法分析与格式化，保留数字原文（`2.0`、大整数）、键顺序和注释；错误给出行列号 |
+| Monaco + formatText 文本级格式化 | `tools/json/`：自己写的词法分析与格式化，保留数字原文（`2.0`、大整数）、键顺序和注释；错误给出行列号 |
 | 重新格式化 / 压缩复制 / 转义复制 / 去除注释，Alt+F / Alt+C / Alt+\\ | `ui/json_editor.rs`：同样的功能和快捷键，另加“去除转义”、缩进选择（2 / 4 / Tab） |
 | JS 过滤（执行 JavaScript） | 不执行代码的路径过滤：`.key.subkey`、`[0][1]`、`[-1]`、`["含空格的键"]`、`.list[].name`（相当于 `.map(x => x.name)`）、`.list.length` |
 | 折叠 / 展开、转 XML / TypeScript、URL Params / XML / YAML 自动转换 | 暂未实现 |

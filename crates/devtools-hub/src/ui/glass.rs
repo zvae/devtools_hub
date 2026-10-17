@@ -16,7 +16,7 @@ use egui::layers::ShapeIdx;
 use egui::{Color32, Context, LayerId, Painter, Rect, Shape, Stroke, Vec2};
 
 use super::liquid_glass::LiquidGlass;
-use super::style;
+use super::style::{self, Palette};
 use crate::platform::panel as native_panel;
 
 /// 栏的下边缘（底部栏是上边缘）渐隐到内容里的高度。
@@ -38,6 +38,7 @@ pub struct Bar {
 }
 
 impl Bar {
+    /// 在栏的内容之前先占好背景图形的位置。
     pub fn begin(painter: &Painter) -> Self {
         Self {
             corners: painter.add(Shape::Noop),
@@ -181,6 +182,7 @@ fn offsets() -> Vec<Vec2> {
     offsets
 }
 
+/// 把图形的不透明度乘上 `opacity`。
 fn fade(shape: &mut Shape, opacity: f32) {
     match shape {
         // 文字有自己的不透明度，不必复制字形网格去改顶点颜色。
@@ -202,4 +204,18 @@ pub fn vertical_gradient(rect: Rect, top: Color32, bottom: Color32) -> Shape {
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(2, 1, 3);
     Shape::mesh(mesh)
+}
+
+/// 栏的底色。液态玻璃时是一层与窗口底色同色的薄底色，压在模糊的内容上；
+/// 模拟玻璃时是窗口底色调淡，再提一点亮。
+pub fn tint(palette: &Palette, liquid: bool) -> Color32 {
+    let dark = palette.text.r() > 128;
+    if liquid {
+        let [r, g, b, _] = palette.background.to_srgba_unmultiplied();
+        return Color32::from_rgba_unmultiplied(r, g, b, if dark { 50 } else { 80 });
+    }
+    let [r, g, b, _] = palette.background.to_srgba_unmultiplied();
+    let lift = |c: u8| c.saturating_add(if dark { 10 } else { 4 });
+    let alpha = (f32::from(palette.background.a()) * 0.4).round() as u8;
+    Color32::from_rgba_unmultiplied(lift(r), lift(g), lift(b), alpha)
 }

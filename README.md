@@ -245,6 +245,7 @@ crates/
 │   ├── uti.rs                类型识别、标题、全文、指纹、file URL 与路径互转
 │   ├── windows_formats.rs    Windows 剪贴板格式 ↔ UTI（CF_HTML、DIB、CF_HDROP、隐私标记等）
 │   ├── rules.rs              隐私与排除规则
+│   ├── styled/               从 IDE 复制的富文本（RTF / HTML）中取出代码的高亮样式
 │   ├── codec.rs              快照二进制编码 + zstd 压缩
 │   ├── store.rs              SQLite 存储：去重、搜索、列表、清理、外部数据
 │   └── thumbnail.rs          图片缩略图
@@ -254,7 +255,7 @@ crates/
     ├── monitor.rs            剪贴板监听线程
     ├── middle_click.rs       鼠标中键快捷面板的触发
     ├── selection.rs          模拟复制读取选中的内容，读完恢复剪贴板
-    ├── tools/                中键面板里的功能：按选中内容匹配；json.rs 是 JSON 格式化、压缩、转义、路径过滤
+    ├── tools/                中键面板里的功能：按选中内容匹配；json/ 是 JSON 校验、格式化、压缩、转义、路径过滤
     ├── hotkey.rs             全局快捷键
     ├── keys.rs               按键在界面上的写法（⌘ / Ctrl）
     ├── tray.rs               菜单栏 / 托盘图标
@@ -265,7 +266,11 @@ crates/
     │   ├── mod.rs            公共类型（面板位置、托盘区域）与平台文案
     │   ├── macos/            NSPasteboard、前台应用、CGEvent ⌘V / ⌘C、中键 CGEventTap、窗口与毛玻璃、LaunchAgent、替换 .app
     │   └── windows/          Win32 剪贴板、来源程序、SendInput Ctrl+V / Ctrl+C、中键鼠标钩子、窗口定位、图标提取、注册表开机启动、替换 exe
-    └── ui/                   egui 面板、设置页、中键快捷面板、JSON 编辑器、字体、矢量图标与样式
+    └── ui/                   egui 界面：字体、矢量图标、样式、玻璃效果与共用控件（widgets.rs）
+        ├── panel/            剪贴板面板：顶部 / 底部栏、卡片列表、大预览、右键菜单、快捷键
+        ├── settings_page/    设置页：各分组与行控件
+        ├── quick_panel.rs    鼠标中键快捷面板
+        └── json_editor.rs    JSON 编辑器
 ```
 
 两个平台的 `platform` 模块对外提供相同的模块和函数（`pasteboard`、`workspace`、`keyboard`、`mouse`、`panel`、`icons`、`login_item`、`updater`），编译时按目标系统选择其一。剪贴板面板、设置页、中键快捷面板和 JSON 编辑器共用同一个窗口，切换时由 `panel::show` 调整窗口大小和位置。

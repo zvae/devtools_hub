@@ -27,6 +27,7 @@ mod labels {
 
 pub use labels::*;
 
+/// 空格键（两个平台写法相同）。
 pub const SPACE: &str = "空格";
 
 /// 组合键的文字写法：macOS 连写（`⇧⌘V`），Windows 用加号连接（`Ctrl+Shift+V`）。

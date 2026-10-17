@@ -79,6 +79,7 @@ pub fn is_self_active() -> bool {
     pid == std::process::id()
 }
 
+/// 进程的可执行文件完整路径。
 fn process_path(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
@@ -144,6 +145,7 @@ fn file_description(path: &str) -> Option<String> {
     }
 }
 
+/// 用 `ShellExecuteW` 打开文件、链接或程序，返回是否成功。
 fn shell_open(file: &str, parameters: Option<&str>) -> bool {
     let (operation, file) = (wide("open"), wide(file));
     let parameters = parameters.map(wide);
@@ -162,6 +164,7 @@ fn shell_open(file: &str, parameters: Option<&str>) -> bool {
     result as usize > 32
 }
 
+/// 用默认浏览器打开链接，返回是否成功。
 pub fn open_url(url: &str) -> bool {
     shell_open(url, None)
 }
@@ -171,6 +174,7 @@ pub fn reveal_path(path: &str) {
     shell_open("explorer.exe", Some(&format!("/select,\"{path}\"")));
 }
 
+/// 用资源管理器打开目录（或用默认程序打开文件）。
 pub fn open_path(path: &Path) {
     shell_open(&path.to_string_lossy(), None);
 }

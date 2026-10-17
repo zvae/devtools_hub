@@ -13,6 +13,7 @@ use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuI
 
 use crate::platform::panel as native_panel;
 
+/// 菜单内容的描述，`A` 是选中菜单项后要执行的操作。
 pub enum Entry<A> {
     Item {
         label: String,
@@ -33,6 +34,7 @@ pub enum Entry<A> {
 }
 
 impl<A> Entry<A> {
+    /// 没有快捷键的普通菜单项。
     pub fn item(label: impl Into<String>, action: A) -> Self {
         Entry::Item {
             label: label.into(),
@@ -50,6 +52,7 @@ impl<A> Entry<A> {
         }
     }
 
+    /// 菜单项的文字（分隔线没有），测试里用来检查菜单内容。
     #[cfg(test)]
     pub fn label(&self) -> Option<&str> {
         match self {
@@ -61,6 +64,7 @@ impl<A> Entry<A> {
     }
 }
 
+/// 菜单项快捷键的修饰键（只用来显示，按键本身由面板处理）。
 pub const NONE: Modifiers = Modifiers::empty();
 /// ⌘（Windows 上是 Ctrl）。
 pub const COMMAND: Modifiers = CMD_OR_CTRL;
@@ -106,11 +110,13 @@ impl<A> NativeMenu<A> {
 /// 菜单项 id 都带这个前缀，与托盘菜单的 id 区分开。
 pub const ID_PREFIX: &str = "context-";
 
+/// 生成不重复的菜单项 id。
 fn next_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     format!("{ID_PREFIX}{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
+/// 把菜单描述转成原生菜单项，同时记下每个菜单项 id 对应的操作。
 fn build_items<A>(
     entries: Vec<Entry<A>>,
     actions: &mut Vec<(String, A)>,
@@ -161,6 +167,7 @@ fn build_items<A>(
     Ok(items)
 }
 
+/// `Menu::append_items` 需要引用的切片。
 fn refs(items: &[Box<dyn IsMenuItem>]) -> Vec<&dyn IsMenuItem> {
     items.iter().map(|item| item.as_ref()).collect()
 }

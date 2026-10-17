@@ -8,6 +8,7 @@ pub struct Representation {
 }
 
 impl Representation {
+    /// 指定类型与数据。
     pub fn new(uti: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
         Self {
             uti: uti.into(),
@@ -27,6 +28,7 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// 只含纯文本的快照（纯文本粘贴、测试用）。
     pub fn from_text(text: &str) -> Self {
         Self {
             items: vec![vec![Representation::new(
@@ -36,18 +38,22 @@ impl Snapshot {
         }
     }
 
+    /// 没有任何数据。
     pub fn is_empty(&self) -> bool {
         self.items.iter().all(|item| item.is_empty())
     }
 
+    /// 所有表示的数据总大小（未压缩）。
     pub fn total_bytes(&self) -> usize {
         self.representations().map(|rep| rep.data.len()).sum()
     }
 
+    /// 依次遍历所有 item 的所有表示。
     pub fn representations(&self) -> impl Iterator<Item = &Representation> {
         self.items.iter().flatten()
     }
 
+    /// 是否有某种类型的表示。
     pub fn has_type(&self, uti: &str) -> bool {
         self.representations().any(|rep| rep.uti == uti)
     }
@@ -79,15 +85,7 @@ pub enum ContentKind {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 6] = [
-        ContentKind::Text,
-        ContentKind::RichText,
-        ContentKind::Link,
-        ContentKind::Image,
-        ContentKind::Files,
-        ContentKind::Other,
-    ];
-
+    /// 存进数据库的整数值（不能改动已有的值）。
     pub fn as_i64(self) -> i64 {
         match self {
             ContentKind::Text => 0,
@@ -99,6 +97,7 @@ impl ContentKind {
         }
     }
 
+    /// 从数据库读出的整数值还原，无法识别的值当作“其他”。
     pub fn from_i64(value: i64) -> Self {
         match value {
             0 => ContentKind::Text,
@@ -110,6 +109,7 @@ impl ContentKind {
         }
     }
 
+    /// 界面上显示的类型名。
     pub fn label(self) -> &'static str {
         match self {
             ContentKind::Text => "文本",
@@ -135,6 +135,7 @@ pub struct SourceApp {
 }
 
 impl SourceApp {
+    /// 显示名：优先用应用名，没有时用 Bundle ID。
     pub fn display_name(&self) -> &str {
         self.name
             .as_deref()
@@ -172,6 +173,7 @@ pub struct ClipItem {
 }
 
 impl ClipItem {
+    /// 是否在指定列表中。
     pub fn in_list(&self, list_id: i64) -> bool {
         self.list_ids.contains(&list_id)
     }

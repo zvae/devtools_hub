@@ -17,6 +17,7 @@ mod settings_page;
 mod snapshot_tests;
 mod style;
 mod textures;
+mod widgets;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -46,7 +47,9 @@ use style::Palette;
 use textures::{AppIcons, Textures};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 窗口当前显示的页面。
 enum Page {
+    /// 剪贴板历史面板。
     Panel,
     Settings,
     /// 鼠标中键弹出的快捷面板。
@@ -65,37 +68,62 @@ pub enum PasteMode {
     CopyOnly,
 }
 
+/// 窗口底部短暂显示的提示。
 struct Toast {
     text: String,
+    /// 到这个时间自动消失。
     until: Instant,
 }
+
+/// 数字键 1–9：面板上 ⌘1–9 快速粘贴、快捷面板上直接执行第 N 个功能。
+const NUMBER_KEYS: [egui::Key; 9] = [
+    egui::Key::Num1,
+    egui::Key::Num2,
+    egui::Key::Num3,
+    egui::Key::Num4,
+    egui::Key::Num5,
+    egui::Key::Num6,
+    egui::Key::Num7,
+    egui::Key::Num8,
+    egui::Key::Num9,
+];
 
 /// JSON 编辑器直接打开的 .json 文件大小上限。
 const JSON_FILE_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
+/// 整个界面的状态，同时是 eframe 的应用对象（只在主线程上访问）。
 pub struct HubApp {
     ctx: egui::Context,
+    /// 与后台线程（剪贴板监听、快捷键、托盘、检查更新）共享的状态和事件队列。
     shared: Arc<Shared>,
+    /// 界面线程自己的数据库连接（监听线程另开一个）。
     store: Store,
     data_dir: PathBuf,
+    /// `--pasteboard` 指定的剪贴板名（测试时用私有剪贴板，不影响系统剪贴板）。
     pasteboard_name: Option<String>,
     settings: Settings,
+    /// 全局快捷键服务；初始化失败时为 `None`，原因记在 `hotkey_error`。
     hotkeys: Option<HotkeyService>,
     hotkey_error: Option<String>,
     tray: Option<Tray>,
     page: Page,
+    // 四个页面各自的界面状态。
     panel: PanelView,
     settings_view: SettingsView,
     quick: QuickPanelView,
     json: JsonEditorView,
     /// 鼠标中键监听线程是否已启动（只启动一次，之后由设置控制是否拦截）。
     middle_click_started: bool,
+    /// 图片条目的缩略图纹理缓存。
     textures: Textures,
     /// 富文本代码的高亮样式。
     code: CodeStyles,
+    /// 来源应用图标的纹理缓存。
     app_icons: AppIcons,
     toast: Option<Toast>,
+    /// 是否已获得辅助功能权限（模拟按键需要，只有 macOS 会是 false）。
     accessibility_ok: bool,
+    /// 上一帧窗口是否有焦点，用来发现失焦。
     was_focused: bool,
     /// 窗口的原生背景材质（离屏渲染测试中是不透明的）。
     backdrop: Backdrop,
@@ -108,6 +136,7 @@ pub struct HubApp {
 }
 
 impl HubApp {
+    /// 创建应用：打开数据库，接管原生窗口，注册全局快捷键，创建菜单栏 / 托盘图标。
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         shared: Arc<Shared>,
@@ -198,6 +227,7 @@ impl HubApp {
         }
     }
 
+    /// 按当前主题、窗口材质与透明度设置得到的配色。
     fn palette(&self, ctx: &egui::Context) -> Palette {
         Palette::new(
             ctx.theme() == egui::Theme::Dark,
@@ -206,6 +236,7 @@ impl HubApp {
         )
     }
 
+    /// 处理后台线程发来的事件；数据库有新记录时让面板重新加载。
     fn handle_events(&mut self) {
         for event in self.shared.drain_events() {
             match event {
@@ -232,6 +263,7 @@ impl HubApp {
         }
     }
 
+    /// 窗口被唤起（快捷键、托盘、菜单）后切到指定页面并重置面板状态。
     fn on_shown(&mut self, page: Page) {
         // 已经被主动显示，就不要再执行启动时的隐藏。
         self.startup_hide_pending = false;
@@ -266,6 +298,7 @@ impl HubApp {
         self.page = Page::Panel;
     }
 
+    /// 设置变化后：同步给后台线程和托盘菜单，并写入设置文件。
     fn persist_settings(&mut self) {
         self.shared.apply_settings(&self.settings);
         if let Some(tray) = &self.tray {
@@ -320,6 +353,7 @@ impl HubApp {
         }
     }
 
+    /// 在窗口底部显示一条约两秒后消失的提示。
     fn show_toast(&mut self, text: impl Into<String>) {
         self.toast = Some(Toast {
             text: text.into(),
@@ -327,6 +361,7 @@ impl HubApp {
         });
     }
 
+    /// 要读写的剪贴板：系统剪贴板，或 `--pasteboard` 指定的私有剪贴板。
     fn pasteboard(&self) -> Pasteboard {
         self.pasteboard_name
             .as_deref()
@@ -452,6 +487,7 @@ impl HubApp {
         }
     }
 
+    /// 粘贴时写回剪贴板的内容：纯文本粘贴只保留文字（文件条目是按行拼接的路径）。
     fn snapshot_for(&self, id: i64, mode: PasteMode) -> Result<Snapshot> {
         let snapshot = self.store.snapshot(id)?;
         if mode != PasteMode::PlainText {
@@ -470,6 +506,7 @@ impl HubApp {
         })
     }
 
+    /// 窗口失去焦点时按页面与设置决定是否自动收起。
     fn handle_focus(&mut self) {
         // Windows 上 winit 的焦点状态在托盘弹出路径下不可靠：面板已经是前台窗口，
         // 但 AttachThreadInput 的 detach 会撤销键盘焦点，has_focus() 恒为 false。
@@ -494,6 +531,7 @@ impl HubApp {
         }
     }
 
+    /// 绘制提示，到期后清除。
     fn toast_ui(&mut self, ctx: &egui::Context) {
         let Some(toast) = &self.toast else {
             return;
@@ -531,6 +569,7 @@ impl HubApp {
 }
 
 impl eframe::App for HubApp {
+    /// 每帧绘制前先处理后台线程发来的事件。
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events();
     }
@@ -567,6 +606,7 @@ impl eframe::App for HubApp {
 }
 
 impl HubApp {
+    /// 绘制圆角背景与当前页面，最后叠上提示。
     fn draw(&mut self, ui: &mut egui::Ui) {
         let palette = self.palette(ui.ctx());
         let inner_margin = match self.page {

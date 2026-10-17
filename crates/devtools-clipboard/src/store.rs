@@ -19,15 +19,18 @@ use crate::model::{Capture, ClipItem, ClipList, ContentKind, Snapshot, SourceApp
 use crate::thumbnail::Thumbnail;
 use crate::uti::Analysis;
 
+/// 数据库文件名与外部数据目录名（都在数据目录下）。
 const DB_FILE: &str = "history.sqlite3";
 const BLOB_DIR: &str = "blobs";
 /// 压缩后超过该大小的数据写到外部文件，保持数据库文件精简。
 const EXTERNAL_THRESHOLD: usize = 256 * 1024;
+/// 数据库结构的版本，保存在 `user_version` 里，结构变化时递增并在 `migrate` 中升级。
 const SCHEMA_VERSION: i64 = 1;
 
 /// 内置的“收藏”列表 id。
 pub const FAVORITES_LIST_ID: i64 = 1;
 
+/// 当前时间（Unix 毫秒）。
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -35,6 +38,7 @@ pub fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
+/// [`Store::record`] 的结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordOutcome {
     pub id: i64,
@@ -48,10 +52,13 @@ pub struct ItemQuery {
     /// 空格分隔的多个关键字，全部命中才返回。
     pub text: String,
     pub kind: Option<KindFilter>,
+    /// 只返回该列表中的条目。
     pub list_id: Option<i64>,
+    /// 最多返回的条数，0 表示默认的 500 条。
     pub limit: usize,
 }
 
+/// 按内容类型筛选。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KindFilter {
     /// 纯文本 + 富文本。
@@ -59,6 +66,7 @@ pub enum KindFilter {
     Exact(ContentKind),
 }
 
+/// 设置页“数据”分组显示的统计。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StoreStats {
     pub item_count: i64,
@@ -66,6 +74,7 @@ pub struct StoreStats {
     pub external_bytes: u64,
 }
 
+/// 剪贴板历史数据库。每个线程各自打开一个，不跨线程共享连接。
 pub struct Store {
     conn: Connection,
     dir: PathBuf,
@@ -92,10 +101,7 @@ impl Store {
         Ok(store)
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
+    /// 建表并创建内置的“收藏”列表（按 `user_version` 判断是否需要升级）。
     fn migrate(&mut self) -> Result<()> {
         // IMMEDIATE 事务：多个连接同时打开时串行执行迁移，而不是在升级写锁时直接报 busy。
         let tx = self
@@ -226,6 +232,7 @@ impl Store {
         Ok(RecordOutcome { id, inserted })
     }
 
+    /// 小数据内联存进数据库，大数据写到外部文件：返回（内联数据，外部文件名）。
     fn write_payload(&self, encoded: &[u8]) -> Result<(Option<Vec<u8>>, Option<String>)> {
         if encoded.len() <= EXTERNAL_THRESHOLD {
             return Ok((Some(encoded.to_vec()), None));
@@ -237,6 +244,7 @@ impl Store {
         Ok((None, Some(name)))
     }
 
+    /// 删除外部数据文件（文件已不存在时不报错）。
     fn remove_blob(&self, name: &str) {
         // 文件名只来自本库生成的值，这里仍防御性地拒绝路径分隔符。
         if name.contains('/') || name.contains("..") {
@@ -249,6 +257,7 @@ impl Store {
         }
     }
 
+    /// 按条件查询条目，最近使用的在前；`limit` 为 0 时最多返回 500 条。
     pub fn items(&self, query: &ItemQuery) -> Result<Vec<ClipItem>> {
         // 文件条目的 search_text 是按行拼接的路径，只取第一行，不把整段文本读出来。
         let mut sql = format!(
@@ -317,6 +326,7 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// 图片条目的缩略图（PNG）。
     pub fn thumbnail(&self, id: i64) -> Result<Option<Vec<u8>>> {
         Ok(self
             .conn
@@ -364,6 +374,7 @@ impl Store {
         Ok(())
     }
 
+    /// 删除条目及其外部数据文件。
     pub fn delete(&mut self, id: i64) -> Result<()> {
         self.delete_where("i.id = ?", vec![Value::Integer(id)])?;
         Ok(())
@@ -385,6 +396,7 @@ impl Store {
         max_items: Option<usize>,
     ) -> Result<usize> {
         let mut removed = 0;
+        /// 不在任何列表中的条目。
         const NOT_IN_LIST: &str =
             "NOT EXISTS (SELECT 1 FROM list_items li WHERE li.item_id = i.id)";
         if let Some(retention) = retention_ms {
@@ -405,6 +417,7 @@ impl Store {
         Ok(removed)
     }
 
+    /// 删除满足条件的条目（`condition` 中条目表的别名是 `i`），并清理它们的外部数据文件。返回删除的条数。
     fn delete_where(&mut self, condition: &str, values: Vec<Value>) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let files: Vec<String> = {
@@ -426,6 +439,7 @@ impl Store {
         Ok(removed)
     }
 
+    /// 所有列表及其条目数，按创建顺序（“收藏”在最前）。
     pub fn lists(&self) -> Result<Vec<ClipList>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT l.id, l.name, (SELECT count(*) FROM list_items li WHERE li.list_id = l.id)
@@ -441,6 +455,7 @@ impl Store {
         rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
 
+    /// 新建列表，返回列表 id；名字为空或已存在时报错。
     pub fn create_list(&self, name: &str) -> Result<i64> {
         let name = name.trim();
         anyhow::ensure!(!name.is_empty(), "列表名称不能为空");
@@ -453,6 +468,7 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 重命名列表；名字为空或与其他列表重名时报错。
     pub fn rename_list(&self, id: i64, name: &str) -> Result<()> {
         let name = name.trim();
         anyhow::ensure!(!name.is_empty(), "列表名称不能为空");
@@ -472,6 +488,7 @@ impl Store {
         Ok(())
     }
 
+    /// 把条目加入（`member` 为 true）或移出列表。
     pub fn set_in_list(&self, item_id: i64, list_id: i64, member: bool) -> Result<()> {
         if member {
             self.conn.execute(
@@ -503,6 +520,7 @@ impl Store {
         rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
 
+    /// 条目数与占用的磁盘空间（数据库文件、WAL 文件与外部数据）。
     pub fn stats(&self) -> Result<StoreStats> {
         let item_count = self
             .conn
@@ -579,6 +597,7 @@ fn filter_clause(query: &ItemQuery) -> (String, Vec<Value>) {
     (sql, values)
 }
 
+/// 转义 LIKE 中的通配符 `%`、`_` 与转义符本身，让关键字按字面匹配。
 fn escape_like(term: &str) -> String {
     let mut out = String::with_capacity(term.len());
     for ch in term.chars() {
@@ -590,6 +609,7 @@ fn escape_like(term: &str) -> String {
     out
 }
 
+/// 外部数据文件名的随机后缀（同一毫秒内写入多个文件也不会重名）。
 fn rand_suffix() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();

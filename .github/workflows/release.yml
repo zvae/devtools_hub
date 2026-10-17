@@ -1,3 +1,6 @@
+# 每次推送到 main：找到（或新建）草稿 Release，按 Cargo.toml 的版本号设置标签，
+# 用上一个正式版本以来的提交生成更新说明，然后构建 macOS、Windows 安装包上传到草稿。
+# 草稿需要在 GitHub 网页上手动发布。
 name: Release Draft
 
 on:
@@ -5,6 +8,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 同一时间只处理一次推送，后来的排队等待（不取消正在上传的构建）。
 concurrency:
   group: release-draft-main
   cancel-in-progress: false
@@ -13,6 +17,7 @@ permissions:
   contents: write
 
 jobs:
+  # 准备草稿 Release，输出上传地址与版本号给后面的构建任务。
   prepare-release:
     runs-on: macos-15
     outputs:
@@ -134,6 +139,7 @@ jobs:
               }
             }
 
+  # 签名、打包成 .app，再做成带“应用程序”快捷方式的 .dmg。
   build-macos-arm64:
     needs: [prepare-release]
     runs-on: macos-15
@@ -197,6 +203,7 @@ jobs:
           asset_path: DevTools-Hub-${{ needs.prepare-release.outputs.version }}-macos-arm64.dmg
           overwrite: true
 
+  # Windows 版是单个 exe（图标与程序名由 build.rs 嵌入）。
   build-windows-x64:
     needs: [prepare-release]
     runs-on: windows-latest

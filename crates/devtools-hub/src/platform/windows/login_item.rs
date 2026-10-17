@@ -8,9 +8,11 @@ use windows_sys::Win32::System::Registry::{
 
 use super::wide;
 
+/// 当前用户的开机启动项注册表键，以及本应用的值名。
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "DevToolsHub";
 
+/// 是否已设置开机启动（注册表中有本应用的值）。
 pub fn is_enabled() -> bool {
     let (key, name) = (wide(RUN_KEY), wide(VALUE_NAME));
     // SAFETY: 只查询值是否存在，不读取数据。
@@ -28,6 +30,7 @@ pub fn is_enabled() -> bool {
     status == ERROR_SUCCESS
 }
 
+/// 开启时写入当前可执行文件的路径，关闭时删除该值。
 pub fn set_enabled(enabled: bool) -> Result<()> {
     let (key, name) = (wide(RUN_KEY), wide(VALUE_NAME));
     if enabled {

@@ -10,6 +10,7 @@ use std::io::Cursor;
 use crate::model::{Representation, Snapshot};
 use crate::uti;
 
+/// 标准剪贴板格式的编号（WinUser.h 中的 CF_*）。
 pub const CF_TEXT: u32 = 1;
 pub const CF_BITMAP: u32 = 2;
 pub const CF_METAFILEPICT: u32 = 3;
@@ -27,6 +28,7 @@ pub const CF_DSPBITMAP: u32 = 0x82;
 pub const CF_DSPMETAFILEPICT: u32 = 0x83;
 pub const CF_DSPENHMETAFILE: u32 = 0x8E;
 
+/// 常见的注册格式名。
 pub const HTML_FORMAT: &str = "HTML Format";
 pub const RTF_FORMAT: &str = "Rich Text Format";
 pub const PNG_FORMAT: &str = "PNG";
@@ -34,9 +36,11 @@ pub const URL_FORMAT: &str = "UniformResourceLocatorW";
 
 /// 密码管理器等用来声明“不要记录”的格式（KeePass、1Password、Bitwarden 都会设置）。
 pub const EXCLUDE_FROM_MONITOR: &str = "ExcludeClipboardContentFromMonitorProcessing";
+/// 剪贴板查看器应忽略的内容（部分工具临时写入时设置）。
 pub const VIEWER_IGNORE: &str = "Clipboard Viewer Ignore";
 /// 值为 0 时表示不要进入剪贴板历史（Windows 10 起的约定）。
 pub const CAN_INCLUDE_IN_HISTORY: &str = "CanIncludeInClipboardHistory";
+/// 是否允许同步到云剪贴板。与 `CAN_INCLUDE_IN_HISTORY` 一样只对当次复制有意义，不保存。
 const CAN_UPLOAD_TO_CLOUD: &str = "CanUploadToCloudClipboard";
 
 /// 不保存的格式：OLE 内部数据、与 CF_HDROP 重复的文件描述，
@@ -74,6 +78,7 @@ pub enum FormatTarget {
     Registered(String),
 }
 
+/// 要写回剪贴板的一种格式及其数据。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatData {
     pub target: FormatTarget,

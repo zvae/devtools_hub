@@ -24,6 +24,7 @@ impl ExcludedApp {
     }
 }
 
+/// 记录剪贴板时的过滤规则（设置页“隐私与排除规则”）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureRules {
@@ -74,6 +75,7 @@ impl Default for CaptureRules {
     }
 }
 
+/// 某次复制没有被记录的原因（写进调试日志）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SkipReason {
     Empty,

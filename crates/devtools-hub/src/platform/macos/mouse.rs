@@ -16,6 +16,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::Duration;
 
+// 用到的系统类型、函数与常量，名字与 Apple 头文件中的一致。
 type CFTypeRef = *const c_void;
 type CGEventRef = *mut c_void;
 type CFMachPortRef = *mut c_void;
@@ -69,9 +70,12 @@ const EVENT_MASK: u64 = (1 << K_CG_EVENT_OTHER_MOUSE_DOWN)
     | (1 << K_CG_EVENT_OTHER_MOUSE_DRAGGED);
 /// 按键号：0 左键、1 右键、2 中键、3 / 4 侧键。
 const MIDDLE_BUTTON: i64 = 2;
+/// 没有权限或创建监听失败时，多久再试一次。
 const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
+/// 传给事件回调的上下文（泄漏成静态引用，回调随时可能被调用）。
 struct Context {
+    /// 创建好的 event tap，被系统停用时用它重新启用。
     tap: AtomicPtr<c_void>,
     /// 这次中键按下已被处理（吞掉），对应的拖动和松开也一并吞掉。
     swallowing: AtomicBool,
@@ -92,6 +96,7 @@ pub fn spawn_middle_click_listener(on_press: impl Fn() -> bool + Send + Sync + '
         .expect("无法创建鼠标中键监听线程");
 }
 
+/// 监听线程：有权限后创建 event tap 并运行 run loop；没有权限时定期重试。
 fn run(context: &'static Context) {
     let mut warned = false;
     loop {

@@ -8,15 +8,17 @@ use egui::{Align, Align2, Color32, FontId, Key, Modifiers, Rect, Sense, Stroke, 
 use super::fonts;
 use super::icons::{self, Icon};
 use super::style::{self, Palette};
-use super::HubApp;
+use super::{HubApp, NUMBER_KEYS};
 use crate::selection::Selection;
 use crate::tools::{self, QuickAction};
 
+/// 窗口宽度（固定），高度随功能个数变化（见 `QuickPanelView::window_size`）。
 const WIDTH: f32 = 300.0;
 /// 窗口内边距（`HubApp::draw` 中这一页的 inner_margin）。
 pub(super) const MARGIN: f32 = 6.0;
 /// 选中行的圆角：窗口圆角 16 − `MARGIN`，与窗口同心。
 const ROW_RADIUS: f32 = 10.0;
+/// 标题区、“没有能处理的功能”提示、功能行的高度与行间距。
 const HEADER_HEIGHT: f32 = 46.0;
 const HINT_HEIGHT: f32 = 26.0;
 const ROW_HEIGHT: f32 = 40.0;
@@ -26,14 +28,19 @@ const ICON_CENTER: f32 = 22.0;
 const TEXT_LEFT: f32 = 44.0;
 const RIGHT_INSET: f32 = 14.0;
 
+/// 快捷面板的状态。
 #[derive(Default)]
 pub struct QuickPanelView {
+    /// 按下中键时读到的选中内容；没有选中时为 `None`。
     pub selection: Option<Selection>,
+    /// 列出的功能。
     pub actions: Vec<QuickAction>,
+    /// 高亮的功能在 `actions` 中的下标。
     pub selected: usize,
 }
 
 impl QuickPanelView {
+    /// 按选中的内容列出功能，高亮第一个。
     pub fn open(&mut self, selection: Option<Selection>) {
         self.actions = tools::actions_for(selection.as_ref());
         self.selection = selection;
@@ -59,22 +66,12 @@ impl QuickPanelView {
 }
 
 impl HubApp {
+    /// 绘制快捷面板：标题区与功能列表。↑↓ 选择、回车或数字键执行、esc 关闭。
     pub(super) fn quick_ui(&mut self, ui: &mut Ui) {
         let palette = self.palette(ui.ctx());
         let count = self.quick.actions.len();
         let mut run = None;
         let mut close = false;
-        let number_keys = [
-            Key::Num1,
-            Key::Num2,
-            Key::Num3,
-            Key::Num4,
-            Key::Num5,
-            Key::Num6,
-            Key::Num7,
-            Key::Num8,
-            Key::Num9,
-        ];
         ui.input_mut(|input| {
             if count > 0 {
                 if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
@@ -86,7 +83,7 @@ impl HubApp {
                 if input.consume_key(Modifiers::NONE, Key::Enter) {
                     run = Some(self.quick.selected);
                 }
-                for (index, key) in number_keys.iter().enumerate().take(count) {
+                for (index, key) in NUMBER_KEYS.iter().enumerate().take(count) {
                     if input.consume_key(Modifiers::NONE, *key) {
                         run = Some(index);
                     }
@@ -135,6 +132,7 @@ impl HubApp {
         }
     }
 
+    /// 标题区：选中的是什么（“选中的文本 N 个”、文件名），没有选中时是“常用功能”。
     fn quick_header(&self, ui: &mut Ui, palette: &Palette) {
         let (rect, _) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), HEADER_HEIGHT),
@@ -208,6 +206,7 @@ impl HubApp {
     }
 }
 
+/// 一个功能行：图标、名称、说明，右侧是快捷键提示（选中时是 ↩，其余是数字键）。
 fn action_row(
     ui: &Ui,
     rect: Rect,

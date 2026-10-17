@@ -24,6 +24,7 @@ const RAMP: f32 = 8.0;
 const DOWNSCALE: u32 = 2;
 const BLUR_ROUNDS: usize = 2;
 
+/// 液态玻璃效果：持有 eframe 的 wgpu 渲染状态，管线和纹理放在渲染器的回调资源里。
 pub struct LiquidGlass {
     state: egui_wgpu::RenderState,
 }
@@ -69,11 +70,14 @@ struct Uniforms {
     screen: [f32; 4],
 }
 
+/// 栏参数缓冲的大小。
 const UNIFORM_SIZE: u64 = std::mem::size_of::<Uniforms>() as u64;
 /// 模糊步骤的参数：方向（目标纹理的像素）与源、目标纹理的大小。
 const BLUR_UNIFORM_SIZE: u64 = 32;
+/// 同一帧里最多几个栏（面板有顶部栏、底部栏，设置页有标题栏）。
 const SLOTS: usize = 4;
 
+/// 把参数结构按内存布局转成字节，写进 uniform 缓冲。
 fn bytes<T: Copy>(value: &T) -> &[u8] {
     // SAFETY: 只用于由 f32 组成、没有填充字节的 repr(C) 结构与数组。
     unsafe {
@@ -81,6 +85,7 @@ fn bytes<T: Copy>(value: &T) -> &[u8] {
     }
 }
 
+/// 绑定组布局中的纹理、uniform 缓冲与采样器项。
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -116,6 +121,7 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// 全屏三角形的渲染管线，片元着色器是 `entry`。
 fn pipeline(
     device: &wgpu::Device,
     module: &wgpu::ShaderModule,
@@ -156,6 +162,7 @@ fn pipeline(
     })
 }
 
+/// 清空并绘制到 `view` 的渲染通道。
 fn color_pass<'a>(
     encoder: &'a mut wgpu::CommandEncoder,
     view: &'a wgpu::TextureView,
@@ -179,6 +186,7 @@ fn color_pass<'a>(
 }
 
 impl LiquidGlass {
+    /// 编译着色器、创建管线，放进渲染器的回调资源。
     pub fn new(state: &egui_wgpu::RenderState) -> Self {
         let device = &state.device;
         let format = state.target_format;
@@ -347,6 +355,7 @@ impl LiquidGlass {
         queue.submit(extra.into_iter().chain(std::iter::once(encoder.finish())));
     }
 
+    /// 按窗口大小创建离屏纹理与模糊各步的绑定组（窗口大小变化时重建）。
     fn targets(&self, resources: &Resources, size: [u32; 2], small: [u32; 2]) -> Targets {
         let device = &self.state.device;
         let view = |size: [u32; 2]| {
@@ -448,6 +457,7 @@ impl LiquidGlass {
     }
 }
 
+/// 栏的绘制回调：写入这一栏的参数，然后在栏的范围内画玻璃。
 struct GlassCallback {
     slot: usize,
     uniforms: Uniforms,

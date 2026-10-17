@@ -25,6 +25,7 @@ use ureq::typestate::AgentScope;
 use crate::platform::updater;
 use crate::shared::Shared;
 
+/// 当前运行的版本号（来自 Cargo.toml）。
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 源代码仓库地址（来自 Cargo.toml 的 `repository`），Release 也发布在这里。
 pub const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
@@ -35,12 +36,14 @@ const STARTUP_DELAY: Duration = Duration::from_secs(10);
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// 后台线程多久醒来看一次是否到期。按墙上时间判断，电脑睡眠过也能按时检查；检查失败时也按这个间隔重试。
 const WAKE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// 查询 GitHub 接口、建立下载连接的超时。
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// 下载安装包的总时长上限（ureq 没有单次读取的空闲超时，网络卡住时靠它结束）。
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// 下载进度多久通知一次 UI。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
+/// GitHub 上的一个正式版本。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
     /// 不带前缀 `v` 的版本号，如 `0.2.0`。
@@ -51,6 +54,7 @@ pub struct Release {
     pub asset: Option<Asset>,
 }
 
+/// Release 中当前平台的安装包。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asset {
     pub name: String,
@@ -101,6 +105,7 @@ impl Install {
     }
 }
 
+/// 检查更新与应用内安装的状态，保存在 `Shared` 里，后台线程修改、UI 读取。
 #[derive(Clone, Debug, Default)]
 pub struct UpdateState {
     pub checking: bool,
@@ -113,6 +118,7 @@ pub struct UpdateState {
 }
 
 impl UpdateState {
+    /// 检查到的新版本。
     pub fn available(&self) -> Option<&Release> {
         match &self.status {
             Status::Available(release) => Some(release),
@@ -149,6 +155,7 @@ pub fn check_now(shared: &Arc<Shared>) {
     std::thread::spawn(move || check(&shared, true));
 }
 
+/// 检查一次更新（已经在检查时直接返回）。`manual` 为 true 时失败原因会显示给用户。
 fn check(shared: &Shared, manual: bool) {
     let started = shared.modify_update(|state| !std::mem::replace(&mut state.checking, true));
     if !started {
@@ -259,6 +266,7 @@ pub fn cleanup() {
     let _ = fs::remove_dir_all(work_root());
 }
 
+/// 安装线程：在临时目录里下载、安装，完成后清理临时目录并更新状态（取消时什么都不改）。
 fn run_install(shared: &Shared, release: &Release, cancel: &AtomicBool) {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -284,6 +292,7 @@ fn run_install(shared: &Shared, release: &Release, cancel: &AtomicBool) {
     });
 }
 
+/// 下载安装包并替换当前安装的程序，返回新版本的路径。
 fn install_release(
     shared: &Shared,
     release: &Release,
@@ -414,6 +423,7 @@ fn fetch_latest() -> Result<Option<Release>> {
     parse_release(&body, &asset_suffix()).map(Some)
 }
 
+/// 把网络错误转成给用户看的中文说明。
 fn describe(err: ureq::Error) -> anyhow::Error {
     match err {
         // 未登录的接口限制每个 IP 每小时 60 次。
@@ -451,6 +461,7 @@ fn asset_suffix() -> String {
     format!("-{os}-{arch}.{extension}")
 }
 
+/// GitHub `releases/latest` 接口响应中用到的字段。
 #[derive(Deserialize)]
 struct ApiRelease {
     tag_name: String,
@@ -470,6 +481,7 @@ struct ApiAsset {
     digest: Option<String>,
 }
 
+/// 解析接口响应，按文件名结尾挑出当前平台的安装包。
 fn parse_release(json: &str, asset_suffix: &str) -> Result<Release> {
     let release: ApiRelease = serde_json::from_str(json).context("无法解析 GitHub 的响应")?;
     let version = release

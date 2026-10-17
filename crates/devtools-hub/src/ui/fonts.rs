@@ -17,6 +17,7 @@ use egui::{FontData, FontDefinitions, FontFamily};
 /// 标题等需要加粗的文字使用的字体族。
 pub const SEMIBOLD: &str = "semibold";
 
+/// 可变字体的轴坐标，例如 `[(b"wght", 600.0)]`。
 type Coords = &'static [(&'static [u8; 4], f32)];
 
 /// 一个候选字面：文件路径、在字体集合（.ttc）中的全名、可变字体的轴坐标。
@@ -27,6 +28,7 @@ struct FaceSpec {
 }
 
 impl FaceSpec {
+    /// 单个字体文件中的第一个字面。
     fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -35,6 +37,7 @@ impl FaceSpec {
         }
     }
 
+    /// 字体集合（.ttc）中指定全名的字面。
     fn named(mut self, full_name: &'static str) -> Self {
         self.full_name = Some(full_name);
         self
@@ -140,6 +143,7 @@ struct LineMetrics {
 }
 
 impl LineMetrics {
+    /// 行高：上沿到下沿再加行距。
     fn height(self) -> f32 {
         self.ascent - self.descent + self.line_gap
     }
@@ -153,6 +157,7 @@ fn baseline_shift(primary: LineMetrics, fallback: LineMetrics) -> f32 {
     primary.ascent - fallback.ascent - 0.5 * (primary.height() - fallback.height())
 }
 
+/// 加载好的字面：常驻内存的文件数据、在集合中的序号、轴坐标与行度量。
 #[derive(Clone, Copy)]
 struct Face {
     bytes: &'static [u8],
@@ -162,6 +167,7 @@ struct Face {
 }
 
 impl Face {
+    /// 转成 egui 的字体数据；`baseline_shift` 见 [`baseline_shift`]。
     fn data(&self, baseline_shift: f32) -> FontData {
         let mut data = FontData::from_static(self.bytes).tweak(FontTweak {
             y_offset_factor: baseline_shift,
@@ -185,6 +191,7 @@ fn read_font_file(path: &Path) -> Option<&'static [u8]> {
     Some(bytes)
 }
 
+/// 按顺序尝试候选字面，返回第一个能读到的。
 fn load_first(specs: &[FaceSpec]) -> Option<Face> {
     specs.iter().find_map(|spec| {
         let bytes = read_font_file(&spec.path)?;
@@ -201,6 +208,8 @@ fn load_first(specs: &[FaceSpec]) -> Option<Face> {
     })
 }
 
+/// 按平台加载系统字体，组装 egui 的字体族：比例字体、等宽字体与 [`SEMIBOLD`]。
+/// 后备字体按主字体的基线做偏移，混排时中西文对齐。
 pub fn definitions() -> FontDefinitions {
     let candidates = candidates();
     let ui = load_first(&candidates.ui);
@@ -371,6 +380,7 @@ pub fn ttc_face_index(data: &[u8], full_name: &str) -> Option<u32> {
     })
 }
 
+/// 字面 `name` 表中的全名（name id 4），各平台、各语言的写法都列出来。
 fn face_full_names(data: &[u8], face: usize) -> Vec<String> {
     let Some(name_table) = table(data, face, b"name") else {
         return Vec::new();
@@ -413,6 +423,7 @@ fn face_full_names(data: &[u8], face: usize) -> Vec<String> {
         .collect()
 }
 
+/// 按大端读取（字体文件里的整数都是大端）。
 fn read_u16(data: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes(data.get(at..at + 2)?.try_into().ok()?))
 }

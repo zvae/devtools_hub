@@ -34,6 +34,7 @@ pub use crate::platform::{Anchor, Backdrop, Placement};
 pub const CORNER_RADIUS: f64 = 0.0;
 
 thread_local! {
+    /// 面板窗口与弹出面板前的前台窗口（收起时把焦点还给它），只在主线程访问。
     static PANEL: Cell<HWND> = const { Cell::new(null_mut()) };
     static PREVIOUS: Cell<HWND> = const { Cell::new(null_mut()) };
 }
@@ -112,6 +113,7 @@ pub fn backdrop() -> Backdrop {
     Backdrop::Opaque
 }
 
+/// 面板窗口是否可见（不论是否有焦点）。
 pub fn is_visible() -> bool {
     let hwnd = window();
     // SAFETY: 只读查询。
@@ -240,6 +242,7 @@ unsafe fn resize(hwnd: HWND, size: [f32; 2]) -> bool {
     true
 }
 
+/// 按锚点摆放窗口，并限制在所在显示器的工作区内（不挡任务栏）。
 unsafe fn position(hwnd: HWND, anchor: Anchor) {
     let mut frame: RECT = zeroed();
     if GetWindowRect(hwnd, &mut frame) == 0 {
@@ -309,6 +312,7 @@ unsafe fn position(hwnd: HWND, anchor: Anchor) {
     );
 }
 
+/// 鼠标的屏幕坐标（物理像素）。
 unsafe fn cursor_position() -> POINT {
     let mut point = POINT { x: 0, y: 0 };
     GetCursorPos(&mut point);

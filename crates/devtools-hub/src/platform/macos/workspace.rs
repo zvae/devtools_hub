@@ -18,6 +18,7 @@ pub fn frontmost_app() -> SourceApp {
     })
 }
 
+/// 运行中应用的 Bundle ID 与显示名。
 pub fn describe(app: &NSRunningApplication) -> SourceApp {
     SourceApp {
         bundle_id: app.bundleIdentifier().map(|s| s.to_string()),
@@ -38,6 +39,7 @@ pub fn frontmost_other_app() -> Option<Retained<NSRunningApplication>> {
     (app.processIdentifier() != std::process::id() as i32).then_some(app)
 }
 
+/// 用默认浏览器打开链接，返回是否成功。
 pub fn open_url(url: &str) -> bool {
     let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) else {
         return false;
@@ -45,6 +47,7 @@ pub fn open_url(url: &str) -> bool {
     NSWorkspace::sharedWorkspace().openURL(&url)
 }
 
+/// 在访达中选中文件。
 pub fn reveal_path(path: &str) {
     let _ = std::process::Command::new("open")
         .arg("-R")
@@ -52,6 +55,7 @@ pub fn reveal_path(path: &str) {
         .spawn();
 }
 
+/// 用访达打开目录（或用默认应用打开文件）。
 pub fn open_path(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
 }

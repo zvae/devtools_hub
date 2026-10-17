@@ -9,8 +9,10 @@
 use std::ffi::c_void;
 use std::ptr;
 
+/// Core Foundation 对象的指针（这里不区分具体类型）。
 type CFTypeRef = *const c_void;
 
+// 用到的系统函数与常量，名字与 Apple 头文件中的一致。
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrustedWithOptions(options: CFTypeRef) -> bool;
@@ -60,6 +62,7 @@ unsafe extern "C" {
     static kCFBooleanTrue: CFTypeRef;
 }
 
+// 常量取值见 CGEventSource.h、CGEventTypes.h 与 UnicodeUtilities.h。
 const K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION: i32 = 0;
 const K_CG_SESSION_EVENT_TAP: u32 = 1;
 const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
@@ -112,6 +115,8 @@ pub fn copy_keycode() -> u16 {
     keycode_for(b'c', KVK_ANSI_C)
 }
 
+/// 在当前 ASCII 键盘布局中逐个键码试出产生 `letter` 的那个（例如 Dvorak 布局下 V、C 不在 ANSI 布局的位置）；
+/// 找不到时用 ANSI 布局的 `fallback`。
 fn keycode_for(letter: u8, fallback: u16) -> u16 {
     unsafe {
         let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();

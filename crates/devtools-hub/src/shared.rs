@@ -37,8 +37,11 @@ pub struct MonitorConfig {
     pub max_items: Option<usize>,
 }
 
+/// 跨线程共享的状态：简单的开关用原子变量，其余用互斥锁保护。
 pub struct Shared {
+    /// 暂停记录。
     pub paused: AtomicBool,
+    /// 监听线程检查剪贴板的间隔（毫秒）。
     pub poll_interval_ms: AtomicU64,
     /// 本应用自己写剪贴板时产生的 changeCount，监听线程遇到它直接跳过。
     pub ignore_change_count: AtomicIsize,
@@ -46,6 +49,7 @@ pub struct Shared {
     pub writing: AtomicBool,
     /// 每记录一条就加一，UI 据此判断是否需要刷新列表。
     pub revision: AtomicU64,
+    /// 通知监听线程退出（测试里用）。
     pub stop: AtomicBool,
     /// 鼠标中键快捷面板是否开启（监听线程据此决定是否拦截中键）。
     pub middle_click: AtomicBool,
@@ -62,6 +66,7 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// 按启动时的设置创建。
     pub fn new(settings: &Settings) -> Arc<Self> {
         Arc::new(Self {
             paused: AtomicBool::new(settings.paused),
@@ -103,10 +108,12 @@ impl Shared {
             .store(settings.auto_check_updates, Ordering::Relaxed);
     }
 
+    /// 监听线程当前使用的过滤规则与清理条件。
     pub fn config(&self) -> MonitorConfig {
         self.config.lock().unwrap().clone()
     }
 
+    /// 快捷键唤起面板时的位置。
     pub fn placement(&self) -> Placement {
         *self.placement.lock().unwrap()
     }
@@ -115,6 +122,7 @@ impl Shared {
         *self.panel_size.lock().unwrap()
     }
 
+    /// 检查更新与安装状态的快照。
     pub fn update_state(&self) -> UpdateState {
         self.update.lock().unwrap().clone()
     }
@@ -126,21 +134,25 @@ impl Shared {
         result
     }
 
+    /// 记下 egui 的上下文，后台线程用它唤醒 UI。
     pub fn set_ctx(&self, ctx: egui::Context) {
         let _ = self.ctx.set(ctx);
     }
 
+    /// 让 UI 线程尽快重绘一帧（处理事件、刷新列表）。
     pub fn request_repaint(&self) {
         if let Some(ctx) = self.ctx.get() {
             ctx.request_repaint();
         }
     }
 
+    /// 给 UI 线程发事件，并唤醒它。
     pub fn post(&self, event: AppEvent) {
         self.events.lock().unwrap().push_back(event);
         self.request_repaint();
     }
 
+    /// 取出所有待处理的事件（UI 线程每帧调用）。
     pub fn drain_events(&self) -> Vec<AppEvent> {
         self.events.lock().unwrap().drain(..).collect()
     }
@@ -153,6 +165,7 @@ impl Shared {
         self.writing.store(false, Ordering::SeqCst);
     }
 
+    /// 记录了新内容：修订号加一，通知 UI 刷新列表。
     pub fn bump_revision(&self) {
         self.revision.fetch_add(1, Ordering::Relaxed);
         self.request_repaint();

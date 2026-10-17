@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::platform::panel::Placement;
 use crate::tools::json::Indent;
 
+/// 设置文件名（在数据目录下）。
 const SETTINGS_FILE: &str = "settings.json";
+/// 覆盖数据目录的环境变量。
 pub const DATA_DIR_ENV: &str = "DEVTOOLS_HUB_DATA_DIR";
 
 /// 默认唤起快捷键。
@@ -50,6 +52,7 @@ pub enum Retention {
 }
 
 impl Retention {
+    /// 设置里可选的全部保留时长。
     pub const ALL: [Retention; 7] = [
         Retention::OneDay,
         Retention::OneWeek,
@@ -60,6 +63,7 @@ impl Retention {
         Retention::Forever,
     ];
 
+    /// 界面上显示的名字。
     pub fn label(self) -> &'static str {
         match self {
             Retention::OneDay => "1 天",
@@ -72,6 +76,7 @@ impl Retention {
         }
     }
 
+    /// 保留时长（毫秒）；“永久”为 `None`。
     pub fn millis(self) -> Option<i64> {
         const DAY: i64 = 24 * 60 * 60 * 1000;
         match self {
@@ -107,20 +112,24 @@ pub enum Tab {
 }
 
 impl Tab {
+    /// 内置的类型分类，默认按这个顺序显示在列表前面。
     pub const BUILT_IN: [Tab; 4] = [Tab::Text, Tab::Link, Tab::Image, Tab::Files];
 }
 
+/// 一个分类标签的设置：是否显示（顺序由在列表中的位置决定）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabSetting {
     pub tab: Tab,
     pub visible: bool,
 }
 
+/// 保存在数据目录 `settings.json` 中的全部设置。缺少的字段用默认值，旧版本的设置文件也能读。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// 唤起面板的全局快捷键，格式如 `Cmd+Shift+V`。
     pub hotkey: String,
+    /// 检查剪贴板变化的间隔（毫秒），可选值见 [`POLL_INTERVALS`]。
     pub poll_interval_ms: u64,
     /// 暂停记录（菜单栏“暂停记录”）。
     pub paused: bool,
@@ -176,6 +185,7 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// 读取设置；文件不存在或无法解析时用默认设置。
     pub fn load(dir: &Path) -> Settings {
         let path = dir.join(SETTINGS_FILE);
         let Ok(text) = fs::read_to_string(&path) else {
@@ -191,6 +201,7 @@ impl Settings {
         }
     }
 
+    /// 保存设置：先写临时文件再改名，写到一半退出也不会损坏原文件。
     pub fn save(&self, dir: &Path) -> Result<()> {
         let path = dir.join(SETTINGS_FILE);
         let tmp = dir.join("settings.json.tmp");
@@ -198,6 +209,7 @@ impl Settings {
         fs::rename(&tmp, &path).with_context(|| format!("保存设置失败：{}", path.display()))
     }
 
+    /// 历史最多保留条数；不限制时为 `None`。
     pub fn max_items(&self) -> Option<usize> {
         (self.max_items > 0).then_some(self.max_items as usize)
     }

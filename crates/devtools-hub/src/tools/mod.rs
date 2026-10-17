@@ -10,6 +10,7 @@ pub mod json;
 
 use crate::selection::Selection;
 
+/// 快捷面板里的一个功能。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuickAction {
     /// 用 JSON 编辑器打开选中的 JSON（或 .json 文件）；没有选中内容时直接打开编辑器。
@@ -19,6 +20,7 @@ pub enum QuickAction {
 }
 
 impl QuickAction {
+    /// 功能名称。
     pub fn label(self) -> &'static str {
         match self {
             QuickAction::JsonEditor => "JSON 编辑器",
@@ -26,6 +28,7 @@ impl QuickAction {
         }
     }
 
+    /// 名称右侧的简短说明。
     pub fn description(self) -> &'static str {
         match self {
             QuickAction::JsonEditor => "格式化、压缩、转义、路径过滤",
@@ -66,6 +69,7 @@ pub fn has_match(selection: &Selection) -> bool {
         .any(|action| action.matches(selection))
 }
 
+/// 扩展名是 .json（不区分大小写）的已存在文件。
 fn is_json_file(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()

@@ -8,6 +8,7 @@ use image::{ImageFormat, ImageReader};
 /// 缩略图最长边（像素）。预览区也直接使用它，避免每次都解码原图。
 pub const MAX_SIDE: u32 = 640;
 
+/// 生成的缩略图。
 #[derive(Clone, Debug)]
 pub struct Thumbnail {
     pub png: Vec<u8>,
@@ -16,6 +17,7 @@ pub struct Thumbnail {
     pub height: u32,
 }
 
+/// 解码图片（自动识别格式），缩小到最长边不超过 [`MAX_SIDE`]，编码成 PNG。
 pub fn make(bytes: &[u8]) -> Result<Thumbnail> {
     let image = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()

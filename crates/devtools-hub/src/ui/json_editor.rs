@@ -17,21 +17,23 @@ use egui::{
 
 use super::fonts;
 use super::icons::{self, Icon};
-use super::panel::{centered_row, icon_button};
 use super::quick_panel::paint_badge;
 use super::style::{self, Palette};
+use super::widgets::{centered_row, drag_window, icon_button};
 use super::HubApp;
 use crate::keys;
-use crate::platform::panel as native_panel;
 use crate::tools::json::{self, Indent, JsonError, TokenKind};
 use crate::tools::QuickAction;
 
 /// 超过这个大小不做语法高亮：egui 排版大量带格式的片段会明显变慢。
 const HIGHLIGHT_MAX_BYTES: usize = 256 * 1024;
+/// 编辑区与过滤结果的字号（等宽字体）。
 const FONT_SIZE: f32 = 13.0;
+/// 编辑区与过滤输入框的控件 id（跳转光标、判断焦点用）。
 const EDITOR_ID: &str = "json-editor";
 const FILTER_ID: &str = "json-filter";
 
+/// 底栏左侧显示的校验结果。
 #[derive(Clone, Debug)]
 enum Status {
     Empty,
@@ -39,14 +41,17 @@ enum Status {
     Invalid(JsonError),
 }
 
+/// 语法高亮的缓存：文本与明暗主题都没变时直接复用排版任务。
 struct Highlight {
     hash: u64,
     dark: bool,
     job: LayoutJob,
 }
 
+/// JSON 编辑器的状态。窗口收起后保留，下次未选中内容打开时接着编辑。
 #[derive(Default)]
 pub struct JsonEditorView {
+    /// 编辑区的文本。
     pub text: String,
     /// 路径过滤表达式。
     pub filter: String,
@@ -54,8 +59,11 @@ pub struct JsonEditorView {
     pub pinned: bool,
     /// 打开时的提示（例如“已去除转义”），编辑后消失。
     note: Option<&'static str>,
+    // 以下是按文本哈希缓存的计算结果，避免每帧重新解析。
+    /// （文本哈希，校验结果）。
     status: Option<(u64, Status)>,
     highlight: Option<Highlight>,
+    /// （文本哈希，过滤表达式，缩进，过滤结果）。
     filtered: Option<(u64, String, Indent, Result<String, String>)>,
     /// 下一帧把光标放到这个字节偏移处并滚动过去。
     jump_to: Option<usize>,
@@ -76,6 +84,7 @@ impl JsonEditorView {
         self.jump_to.get_or_insert(0);
     }
 
+    /// 用操作结果替换文本（内容变了才清掉打开时的提示）。
     fn set_text(&mut self, text: String) {
         if text != self.text {
             self.text = text;
@@ -83,6 +92,7 @@ impl JsonEditorView {
         }
     }
 
+    /// 当前文本的校验结果（文本不变时用缓存）。
     fn status(&mut self) -> Status {
         let hash = text_hash(&self.text);
         if let Some((cached, status)) = &self.status {
@@ -104,6 +114,7 @@ impl JsonEditorView {
         status
     }
 
+    /// 路径过滤的结果（文本、表达式、缩进都不变时用缓存）。
     fn filtered(&mut self, indent: Indent) -> Result<String, String> {
         let hash = text_hash(&self.text);
         if let Some((cached, filter, cached_indent, result)) = &self.filtered {
@@ -119,18 +130,27 @@ impl JsonEditorView {
 
 /// 编辑器上产生的操作，绘制结束后统一执行。
 enum EditorAction {
+    /// 重新格式化。
     Format,
+    /// 去除注释并格式化。
     StripComments,
+    /// 去除一层转义并格式化。
     Unescape,
+    /// 复制原文。
     Copy,
+    /// 压缩成一行后复制。
     CopyMinified,
+    /// 压缩、转义成字符串字面量后复制。
     CopyEscaped,
+    /// 修改缩进设置，并按新缩进重新格式化。
     SetIndent(Indent),
+    /// 把光标移到这个字节偏移处（出错位置）。
     Jump(usize),
     Close,
 }
 
 impl HubApp {
+    /// 绘制编辑器：顶部标题栏，底部过滤框与操作按钮，中间是编辑区；有过滤表达式时右侧显示过滤结果。
     pub(super) fn json_editor_ui(&mut self, ui: &mut Ui) {
         let palette = self.palette(ui.ctx());
         let mut actions = Vec::new();
@@ -180,11 +200,9 @@ impl HubApp {
         self.apply_editor_actions(ui.ctx(), actions);
     }
 
+    /// 标题栏：图标、标题、打开时的提示，右侧是关闭与固定按钮；空白处可以拖动窗口。
     fn json_header(&mut self, ui: &mut Ui, palette: &Palette, actions: &mut Vec<EditorAction>) {
-        let drag = ui.interact(ui.max_rect(), ui.id().with("drag-window"), Sense::drag());
-        if drag.drag_started() && !native_panel::start_drag() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
+        drag_window(ui, ui.max_rect());
         centered_row(ui, 28.0, |ui| {
             let (badge, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
             paint_badge(ui, badge, QuickAction::JsonEditor, palette);
@@ -218,6 +236,7 @@ impl HubApp {
         });
     }
 
+    /// 底栏：第一行是路径过滤输入框，第二行是校验状态、缩进选择与各操作按钮。
     fn json_footer(
         &mut self,
         ui: &mut Ui,
@@ -335,6 +354,7 @@ impl HubApp {
         });
     }
 
+    /// 编辑区：左侧行号栏（出错的行标红），右侧是带语法高亮、不折行的多行输入框。
     fn json_text_area(&mut self, ui: &mut Ui, palette: &Palette, status: &Status) {
         let ctx = ui.ctx().clone();
         let dark = ui.visuals().dark_mode;
@@ -449,6 +469,7 @@ impl HubApp {
             });
     }
 
+    /// 执行编辑器上的操作。格式不对时提示错误并把光标移到出错位置。
     fn apply_editor_actions(&mut self, ctx: &egui::Context, actions: Vec<EditorAction>) {
         let indent = self.settings.json_indent;
         for action in actions {
@@ -502,6 +523,7 @@ impl HubApp {
         }
     }
 
+    /// 提示操作失败的原因，并跳到出错位置。
     fn json_error(&mut self, what: &str, err: &JsonError) {
         self.show_toast(format!("{what}：{err}"));
         self.json.jump_to = Some(err.offset);
@@ -534,6 +556,7 @@ fn json_keys(ctx: &egui::Context, actions: &mut Vec<EditorAction>) {
     });
 }
 
+/// 校验状态：图标加一行文字；格式错误时可以点击跳到出错位置。
 fn status_label(ui: &mut Ui, status: &Status, palette: &Palette, actions: &mut Vec<EditorAction>) {
     let (icon, color, text) = match status {
         Status::Empty => (Icon::Document, palette.weak, "粘贴或输入 JSON".to_string()),
@@ -557,6 +580,7 @@ fn status_label(ui: &mut Ui, status: &Status, palette: &Palette, actions: &mut V
     }
 }
 
+/// 右侧的过滤结果（同样做语法高亮），出错时显示原因。
 fn filter_result(ui: &mut Ui, result: &Result<String, String>, palette: &Palette) {
     ui.label(RichText::new("过滤结果").size(11.5).color(palette.weak));
     ui.add_space(2.0);
@@ -575,6 +599,7 @@ fn filter_result(ui: &mut Ui, result: &Result<String, String>, palette: &Palette
         });
 }
 
+/// 文本的哈希，用作各个缓存的键。
 fn text_hash(text: &str) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     text.hash(&mut hasher);
