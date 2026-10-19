@@ -3,7 +3,8 @@
 //! - 发布流程（`.github/workflows/release.yml`）在 main 上生成 Release 草稿，手动发布后才会被检测到：
 //!   接口 `releases/latest` 只返回已发布的正式版本，草稿和预发布都不算；
 //! - 启动后稍等片刻自动检查一次，之后每天检查一次（可以在设置中关闭）；设置页底部可以手动检查；
-//! - 安装：下载当前平台的安装包（核对大小与 GitHub 记录的 SHA-256），由 `platform::updater`
+//! - 安装：先重新查询一次最新版本（检查之后可能又发布了新版本），再下载当前平台的安装包
+//!   （核对大小与 GitHub 记录的 SHA-256），由 `platform::updater`
 //!   替换正在运行的程序，再启动新版本并退出。用 `cargo run` 启动、Release 里没有对应的安装包
 //!   或者安装失败时，改为在浏览器中下载。
 
@@ -268,6 +269,7 @@ pub fn cleanup() {
 
 /// 安装线程：在临时目录里下载、安装，完成后清理临时目录并更新状态（取消时什么都不改）。
 fn run_install(shared: &Shared, release: &Release, cancel: &AtomicBool) {
+    let release = &latest_before_install(shared, release);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
@@ -290,6 +292,28 @@ fn run_install(shared: &Shared, release: &Release, cancel: &AtomicBool) {
             }
         });
     });
+}
+
+/// 安装前重新查询一次最新版本。检查结果最多可能是一天前的，期间又发布了新版本时直接装最新的，
+/// 免得装完一个旧版本又提示更新。查询失败、或者最新版本里没有当前平台的安装包时，按原来检查到的版本安装。
+fn latest_before_install(shared: &Shared, release: &Release) -> Release {
+    match fetch_latest() {
+        Ok(Some(latest))
+            if latest.asset.is_some() && is_newer(&latest.version, &release.version) =>
+        {
+            tracing::info!("安装前发现更新的版本 {}", latest.version);
+            shared.modify_update(|state| {
+                state.checked_at = Some(SystemTime::now());
+                state.status = Status::Available(latest.clone());
+            });
+            latest
+        }
+        Ok(_) => release.clone(),
+        Err(err) => {
+            tracing::warn!("安装前查询最新版本失败，安装 {}：{err:#}", release.version);
+            release.clone()
+        }
+    }
 }
 
 /// 下载安装包并替换当前安装的程序，返回新版本的路径。
