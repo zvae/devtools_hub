@@ -2,7 +2,9 @@
 //!
 //! macOS 与 Windows 各有一套实现，对外提供相同的模块和函数：
 //! `pasteboard`、`workspace`、`keyboard`、`panel`、`icons`、`login_item`、`updater`。
+//! Windows 另有自绘的右键菜单 `menu`，排布与绘制在与平台无关的 `drawn_menu` 里。
 
+pub mod drawn_menu;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

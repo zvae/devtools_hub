@@ -44,26 +44,6 @@ pub(crate) fn window() -> HWND {
     PANEL.with(Cell::get)
 }
 
-/// 在鼠标位置弹出原生右键菜单，菜单关闭后才返回；返回是否选中了菜单项。
-pub fn popup_menu(menu: &tray_icon::menu::Menu) -> bool {
-    let hwnd = window();
-    if hwnd.is_null() {
-        return false;
-    }
-    // 在其它平台上用 windows-typecheck 检查这里时，muda 没有 Windows 的接口。
-    #[cfg(windows)]
-    {
-        use tray_icon::menu::ContextMenu as _;
-        // SAFETY: hwnd 是绑定过的面板窗口。
-        unsafe { menu.show_context_menu_for_hwnd(hwnd as isize, None) }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = menu;
-        false
-    }
-}
-
 /// 绑定 eframe 创建的窗口。必须在主线程调用。
 ///
 /// `start_hidden`：eframe 会在第一帧之后强制显示窗口，先把窗口移到屏幕外，
@@ -313,14 +293,14 @@ unsafe fn position(hwnd: HWND, anchor: Anchor) {
 }
 
 /// 鼠标的屏幕坐标（物理像素）。
-unsafe fn cursor_position() -> POINT {
+pub(super) unsafe fn cursor_position() -> POINT {
     let mut point = POINT { x: 0, y: 0 };
     GetCursorPos(&mut point);
     point
 }
 
 /// 点所在显示器的工作区（扣除任务栏）。
-unsafe fn work_area_at(point: POINT) -> RECT {
+pub(super) unsafe fn work_area_at(point: POINT) -> RECT {
     let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
     let mut info: MONITORINFO = zeroed();
     info.cbSize = size_of::<MONITORINFO>() as u32;

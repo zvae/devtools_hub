@@ -8,7 +8,7 @@
 //! - `bars`：浮在列表上下的玻璃顶部栏（搜索框、分类标签、提示横幅）与底部栏；
 //! - `cards`：卡片列表与单张卡片的绘制；
 //! - `preview`：空格 / ⌘Y 打开的大预览；
-//! - `menus`：条目与分类标签的原生右键菜单；
+//! - `menus`：条目与分类标签的右键菜单；
 //! - `shortcuts`：面板上的键盘快捷键。
 
 mod bars;
@@ -22,7 +22,7 @@ use devtools_clipboard::{
 };
 use egui::{Frame, Rect, Ui, Vec2};
 
-use super::native_menu::NativeMenu;
+use super::native_menu::{Entry, NativeMenu};
 use super::{HubApp, PasteMode};
 use crate::platform::{keyboard, workspace};
 use crate::settings::{Settings, Tab};
@@ -114,7 +114,7 @@ pub struct PanelView {
     preview: Option<Preview>,
     /// 新建列表弹窗里输入的名字。
     new_list_name: String,
-    /// 最近弹出的原生右键菜单，选中菜单项后从这里取回对应的操作。
+    /// 最近弹出的右键菜单，选中菜单项后从这里取回对应的操作。
     context_menu: Option<NativeMenu<Action>>,
     /// 下一帧打开右上角的新建列表弹窗（右键菜单的“新建列表…”）。
     open_new_list: bool,
@@ -338,7 +338,17 @@ impl HubApp {
         self.panel.preview = None;
     }
 
-    /// 在原生右键菜单里选中了一项。
+    /// 弹出右键菜单。Windows 的自绘菜单关闭时就知道选中了哪一项，马上执行。
+    fn popup_menu(&mut self, entries: Vec<Entry<Action>>) {
+        let popup = NativeMenu::popup(entries, &self.ctx);
+        let chosen = popup.as_ref().and_then(|(_, chosen)| chosen.clone());
+        self.panel.context_menu = popup.map(|(menu, _)| menu);
+        if let Some(id) = chosen {
+            self.menu_command(&id);
+        }
+    }
+
+    /// 在右键菜单里选中了一项。
     pub(super) fn menu_command(&mut self, id: &str) {
         let action = self
             .panel
@@ -412,10 +422,10 @@ impl HubApp {
                 Action::ItemMenu(id) => {
                     let item = self.panel.items.iter().find(|item| item.id == id).cloned();
                     if let Some(item) = item {
-                        self.panel.context_menu = NativeMenu::popup(self.item_menu(&item));
+                        self.popup_menu(self.item_menu(&item));
                     }
                 }
-                Action::TabMenu(tab) => self.panel.context_menu = NativeMenu::popup(tab_menu(tab)),
+                Action::TabMenu(tab) => self.popup_menu(tab_menu(tab)),
                 Action::NewList { add_item } => {
                     self.panel.new_list_item = add_item;
                     self.panel.open_new_list = true;

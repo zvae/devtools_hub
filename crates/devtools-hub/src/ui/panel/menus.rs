@@ -1,4 +1,4 @@
-//! 条目与分类标签的右键菜单（用原生菜单弹出，见 `native_menu`）。
+//! 条目与分类标签的右键菜单（macOS 用原生菜单、Windows 用自绘菜单弹出，见 `native_menu`）。
 
 use devtools_clipboard::{ClipItem, ContentKind};
 use tray_icon::menu::accelerator::Code;
