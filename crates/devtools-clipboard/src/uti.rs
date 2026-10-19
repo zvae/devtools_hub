@@ -72,8 +72,14 @@ pub fn analyze(snapshot: &Snapshot) -> Analysis {
         .copied()
         .find(|uti| snapshot.has_type(uti));
     let has_text = plain.as_deref().is_some_and(|text| !text.trim().is_empty());
+    // 微信（4.x 用 Qt 写剪贴板）复制聊天里的图片时，图片数据之外还附带一份临时文件的路径。
+    // 只有一个图片文件、又带着图片数据时按图片处理；访达复制文件只附带图标（com.apple.icns），仍是文件。
+    let image_file =
+        image_uti.is_some() && matches!(file_paths.as_slice(), [path] if is_image_path(path));
 
-    let kind = if !file_paths.is_empty() {
+    let kind = if image_file {
+        ContentKind::Image
+    } else if !file_paths.is_empty() {
         ContentKind::Files
     } else if has_text {
         let text = plain.as_deref().unwrap_or_default();
@@ -205,6 +211,19 @@ pub fn is_auto_generated(snapshot: &Snapshot) -> bool {
 /// 是否来自通用剪贴板（iPhone / iPad）。
 pub fn is_remote(snapshot: &Snapshot) -> bool {
     snapshot.has_type(REMOTE)
+}
+
+/// 路径的扩展名是不是常见的图片格式。
+fn is_image_path(path: &str) -> bool {
+    const EXTENSIONS: [&str; 10] = [
+        "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif",
+    ];
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(_, extension)| {
+        EXTENSIONS
+            .iter()
+            .any(|image| extension.eq_ignore_ascii_case(image))
+    })
 }
 
 /// 整段文本是不是一个 http / https 链接（不含空白）。
@@ -400,6 +419,63 @@ mod tests {
         let analysis = analyze(&snap(&[(TIFF, b"II*\0"), (PNG, b"\x89PNG")]));
         assert_eq!(analysis.kind, ContentKind::Image);
         assert_eq!(analysis.image_uti, Some(PNG));
+    }
+
+    #[test]
+    fn copied_chat_image_with_temp_file_is_image() {
+        // 微信复制聊天图片：临时文件的路径 + TIFF 图片数据 + Qt 的标记类型。
+        let url: &[u8] = b"file://localhost/Users/me/Library/Containers/com.tencent.xinWeChat/temp/RWTemp/4801da0c.png";
+        let wechat = snap(&[
+            (FILE_URL, url),
+            ("com.trolltech.anymime.text--uri-list", b""),
+            (TIFF, b"MM\0*"),
+            ("com.trolltech.anymime.application--x-qt-image", b""),
+        ]);
+        let analysis = analyze(&wechat);
+        assert_eq!(analysis.kind, ContentKind::Image);
+        assert_eq!(analysis.image_uti, Some(TIFF));
+        assert_eq!(analysis.title, "图片");
+        // 路径仍然保留：纯文本粘贴、选中内容面板还能用到。
+        assert_eq!(analysis.file_paths.len(), 1);
+        // 同一张图换了临时文件名，仍是同一条记录。
+        let renamed = snap(&[
+            (FILE_URL, b"file:///Users/me/temp/other.png"),
+            (TIFF, b"MM\0*"),
+        ]);
+        assert_eq!(analyze(&renamed).checksum, analysis.checksum);
+
+        // 访达复制图片文件：只附带图标，仍是文件。
+        let finder = snap(&[
+            (FILE_URL, b"file:///Users/me/a.png"),
+            (PLAIN_TEXT, b"a.png"),
+            ("com.apple.icns", b"icns"),
+        ]);
+        assert_eq!(analyze(&finder).kind, ContentKind::Files);
+        // 不是图片的文件、多个文件，即使带着图片数据也仍是文件。
+        let document = snap(&[(FILE_URL, b"file:///Users/me/a.pdf"), (TIFF, b"MM\0*")]);
+        assert_eq!(analyze(&document).kind, ContentKind::Files);
+        let several = Snapshot {
+            items: vec![
+                vec![
+                    Representation::new(FILE_URL, b"file:///Users/me/a.png".to_vec()),
+                    Representation::new(TIFF, b"MM\0*".to_vec()),
+                ],
+                vec![Representation::new(
+                    FILE_URL,
+                    b"file:///Users/me/b.png".to_vec(),
+                )],
+            ],
+        };
+        assert_eq!(analyze(&several).kind, ContentKind::Files);
+    }
+
+    #[test]
+    fn recognizes_image_paths() {
+        assert!(is_image_path("/Users/me/a.PNG"));
+        assert!(is_image_path(r"C:\Users\me\photo.jpeg"));
+        assert!(!is_image_path("/Users/me/a.png.txt"));
+        assert!(!is_image_path("/Users/me/png"));
+        assert!(!is_image_path("/Users/me.png/readme"));
     }
 
     #[test]
