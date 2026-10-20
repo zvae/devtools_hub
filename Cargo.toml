@@ -13,7 +13,16 @@ version = "0.1.4"
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 directories = "6.0"
-eframe = "0.36"
+# 不启用 egui-wgpu 默认的 `macos-window-resize-jitter-fix`（eframe 的 `wgpu` 特性会带上它）：它在窗口改变大小时
+# 打开 CAMetalLayer 的 presentsWithTransaction，直到窗口收到别的事件才关掉。贴图连续缩放时窗口一直在改变大小，
+# 画面要等没人提交的 CoreAnimation 事务，nextDrawable 每隔几帧就阻塞 1 秒（实测缩小时尤其明显）。
+# 其余特性与 eframe 默认的一致（Linux / Web 专用的 wayland、x11、web_screen_reader 以及 winit 的默认特性不需要）。
+eframe = { version = "0.36", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "links",
+    "wgpu_no_default_features",
+] }
 egui = "0.36"
 global-hotkey = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "gif", "bmp", "webp"] }
@@ -86,6 +95,8 @@ windows-sys = { version = "0.61", features = [
 ] }
 winresource = "0.1"
 zstd = "0.13"
+# 只为打开 wgpu 的默认特性（各平台的图形后端）：eframe 不带 egui-wgpu 的默认特性后不再替我们打开（见上面的 eframe）。
+wgpu = "30"
 
 devtools-clipboard = { path = "crates/devtools-clipboard" }
 

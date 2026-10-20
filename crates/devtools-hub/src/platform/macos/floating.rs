@@ -235,6 +235,16 @@ pub fn release_pin(title: &str) {
     panel::swap_class(&window, original);
 }
 
+/// 一次设置窗口的位置和大小（`frame` 是全局坐标 `[x, y, 宽, 高]`，点）。分成 egui 的 `InnerSize` 和 `OuterPosition`
+/// 两个命令时，AppKit 先按左上角不动改变大小、再移动，连续缩放贴图时窗口会抖动。返回 false 表示没找到窗口。
+pub fn set_window_frame(title: &str, frame: [f64; 4]) -> bool {
+    let Some((mtm, window)) = find(title) else {
+        return false;
+    };
+    window.setFrame_display(to_cocoa(mtm, frame), true);
+    true
+}
+
 /// 设置贴图窗口的不透明度（0–1）。
 pub fn set_opacity(title: &str, opacity: f32) {
     if let Some((_, window)) = find(title) {

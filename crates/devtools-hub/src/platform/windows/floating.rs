@@ -151,6 +151,29 @@ pub fn start_drag(_title: &str) -> bool {
     false
 }
 
+/// 一次设置窗口的位置和大小（`frame` 是逻辑坐标 `[x, y, 宽, 高]`），避免分成两次改变时窗口抖动。
+/// 返回 false 表示没找到窗口。
+pub fn set_window_frame(title: &str, frame: [f64; 4]) -> bool {
+    let hwnd = window(title);
+    if hwnd.is_null() {
+        return false;
+    }
+    // SAFETY: hwnd 是本线程的有效窗口。
+    unsafe {
+        let scale = f64::from(GetDpiForWindow(hwnd).max(96)) / 96.0;
+        let [x, y, width, height] = frame.map(|v| (v * scale).round() as i32);
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        ) != 0
+    }
+}
+
 /// 弹出保存对话框，返回选择的路径（自动补上 `.png`）；取消时返回 `None`。
 pub fn save_dialog(file_name: &str, directory: Option<&Path>) -> Option<PathBuf> {
     let mut buffer = [0u16; 1024];

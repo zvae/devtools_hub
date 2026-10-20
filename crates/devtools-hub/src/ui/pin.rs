@@ -36,6 +36,9 @@ const ZOOM_STEP: f32 = 1.1;
 const OPACITY_STEP: f32 = 0.1;
 /// 触控板等按像素滚动时，多少点算一格。
 const POINTS_PER_STEP: f32 = 40.0;
+/// 改变窗口大小后多久之内，以自己设置的位置为准（egui 报告的窗口位置要等窗口事件送回来才更新，
+/// 连续缩放时可能还是上一次改变之前的，以它为准算出的位置会来回跳）。
+const FRAME_TRUST: Duration = Duration::from_millis(400);
 /// 提示文字显示的时长。
 const TIP_DURATION: Duration = Duration::from_millis(1100);
 
@@ -95,6 +98,8 @@ struct PinState {
     screen_rect: Option<Rect>,
     /// 下一次改变大小时保持不动的点（相对窗口左上角）；为空时以中心缩放。
     anchor: Option<Vec2>,
+    /// 最近一次缩放设置的窗口位置与大小（逻辑坐标）和设置的时间（见 [`FRAME_TRUST`]）。
+    set_frame: Option<(Rect, Instant)>,
     tip: Option<(String, Instant)>,
     closed: bool,
 }
@@ -135,6 +140,7 @@ impl Pin {
             configured: false,
             screen_rect: None,
             anchor: None,
+            set_frame: None,
             tip: None,
             closed: false,
         };
@@ -316,8 +322,12 @@ impl PinState {
 
         self.screen_rect = ctx.input(|i| i.viewport().outer_rect);
         let response = ui.interact(rect, Id::new(("pin", self.id)), Sense::click_and_drag());
-        if response.drag_started_by(PointerButton::Primary) && !floating::start_drag(&self.title) {
-            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+        if response.drag_started_by(PointerButton::Primary) {
+            // 拖动会移动窗口，之后以 egui 报告的位置为准。
+            self.set_frame = None;
+            if !floating::start_drag(&self.title) {
+                ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+            }
         }
         if response.double_clicked() {
             self.close(&ctx);
@@ -364,11 +374,21 @@ impl PinState {
     fn sync_window(&mut self, ctx: &egui::Context) {
         let size = (self.base * self.zoom).round().max(Vec2::splat(MIN_SIDE));
         if (size - self.applied_size).abs().max_elem() >= 1.0 {
-            if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+            let outer = self
+                .set_frame
+                .filter(|(_, at)| at.elapsed() < FRAME_TRUST)
+                .map(|(frame, _)| frame)
+                .or_else(|| ctx.input(|i| i.viewport().outer_rect));
+            if let Some(outer) = outer {
                 let anchor = self.anchor.take().unwrap_or(outer.size() / 2.0);
                 let position = snip::zoom_about(outer, anchor, size);
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(position));
+                let frame = [position.x, position.y, size.x, size.y].map(f64::from);
+                // 位置和大小一次设置好；没找到原生窗口（例如测试里）时退回 egui 的视口命令。
+                if !floating::set_window_frame(&self.title, frame) {
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+                    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(position));
+                }
+                self.set_frame = Some((Rect::from_min_size(position, size), Instant::now()));
             } else {
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
             }
