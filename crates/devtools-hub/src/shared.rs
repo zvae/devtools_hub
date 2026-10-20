@@ -27,6 +27,27 @@ pub enum AppEvent {
     RevealUpdate,
     /// 在面板的原生右键菜单里选中了一项，值是菜单项 id。
     MenuCommand(String),
+    /// 截屏（快捷键、菜单栏菜单）。
+    Snip,
+    /// 后台截屏完成（成功或失败），结果在界面持有的通道里。
+    SnipCaptured,
+    /// 把剪贴板里的图片贴到屏幕上。
+    PinClipboard,
+    /// 关闭所有贴图（菜单栏菜单）。
+    ClosePins,
+    /// 贴图窗口请求界面执行的操作，第一项是贴图的编号。
+    Pin(u64, PinRequest),
+}
+
+/// 贴图窗口自己做不了、交给界面执行的操作（需要剪贴板、对话框或弹出菜单）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinRequest {
+    /// 弹出右键菜单。
+    Menu,
+    Copy,
+    Save,
+    /// 编辑标注：在贴图上重新打开截屏遮罩和标注工具栏。
+    Edit,
 }
 
 /// 监听线程需要的配置快照。
@@ -142,7 +163,9 @@ impl Shared {
     /// 让 UI 线程尽快重绘一帧（处理事件、刷新列表）。
     pub fn request_repaint(&self) {
         if let Some(ctx) = self.ctx.get() {
-            ctx.request_repaint();
+            // 事件都由主界面处理：在贴图、截屏遮罩的回调里调用时，`request_repaint()` 只会重绘那个窗口，
+            // 主界面要等别的事件才运行（贴图的右键菜单就会迟迟不弹出），所以总是指明主界面。
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
     }
 

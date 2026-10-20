@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use devtools_clipboard::CaptureRules;
 use serde::{Deserialize, Serialize};
 
+use crate::hotkey::HotkeyAction;
 use crate::platform::panel::Placement;
 use crate::tools::json::Indent;
 
@@ -22,6 +23,18 @@ pub const DATA_DIR_ENV: &str = "DEVTOOLS_HUB_DATA_DIR";
 pub const DEFAULT_HOTKEY: &str = "Cmd+Shift+V";
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_HOTKEY: &str = "Alt+Shift+V";
+
+/// 默认的截屏 / 贴图快捷键。Windows 与 Snipaste 的默认值一致（F1 截屏、F3 贴图）；
+/// Mac 键盘上的 F1–F12 默认是亮度、音量等媒体键，改用 ⌃⇧A / ⌃⇧V，避开 ⇧⌘V（唤起面板）
+/// 和微信、QQ 截图常用的 ⌃⌘A。
+#[cfg(target_os = "macos")]
+pub const DEFAULT_SNIP_HOTKEY: &str = "Ctrl+Shift+A";
+#[cfg(target_os = "macos")]
+pub const DEFAULT_PIN_HOTKEY: &str = "Ctrl+Shift+V";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_SNIP_HOTKEY: &str = "F1";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_PIN_HOTKEY: &str = "F3";
 
 /// 数据目录：默认 `~/Library/Application Support/DevToolsHub`，
 /// 可以用环境变量 `DEVTOOLS_HUB_DATA_DIR` 或 `--data-dir` 覆盖（开发调试时不污染真实数据）。
@@ -157,6 +170,12 @@ pub struct Settings {
     pub skipped_version: Option<String>,
     /// 分类标签的顺序与是否显示，完整的顺序见 [`Settings::ordered_tabs`]。
     pub tabs: Vec<TabSetting>,
+    /// 截屏的全局快捷键。
+    pub snip_hotkey: String,
+    /// 把剪贴板里的图片贴到屏幕上的全局快捷键。
+    pub pin_hotkey: String,
+    /// 上次保存截图的目录（保存对话框从这里开始）。
+    pub screenshot_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -180,11 +199,32 @@ impl Default for Settings {
             auto_check_updates: true,
             skipped_version: None,
             tabs: Vec::new(),
+            snip_hotkey: DEFAULT_SNIP_HOTKEY.to_string(),
+            pin_hotkey: DEFAULT_PIN_HOTKEY.to_string(),
+            screenshot_dir: None,
         }
     }
 }
 
 impl Settings {
+    /// 某个操作的全局快捷键。
+    pub fn hotkey(&self, action: HotkeyAction) -> &str {
+        match action {
+            HotkeyAction::Panel => &self.hotkey,
+            HotkeyAction::Snip => &self.snip_hotkey,
+            HotkeyAction::Pin => &self.pin_hotkey,
+        }
+    }
+
+    /// 修改某个操作的全局快捷键。
+    pub fn hotkey_mut(&mut self, action: HotkeyAction) -> &mut String {
+        match action {
+            HotkeyAction::Panel => &mut self.hotkey,
+            HotkeyAction::Snip => &mut self.snip_hotkey,
+            HotkeyAction::Pin => &mut self.pin_hotkey,
+        }
+    }
+
     /// 读取设置；文件不存在或无法解析时用默认设置。
     pub fn load(dir: &Path) -> Settings {
         let path = dir.join(SETTINGS_FILE);

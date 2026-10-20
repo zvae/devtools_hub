@@ -63,6 +63,9 @@ impl HubApp {
                 entries: lists,
             },
         ];
+        if item.kind == ContentKind::Image {
+            entries.push(Entry::item("贴到屏幕", Action::PinImage(id)));
+        }
         if item.kind == ContentKind::Files {
             let first_path = self
                 .store

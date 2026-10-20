@@ -25,6 +25,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowRect,
     GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow, SetWindowPos,
     ShowWindow, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    SW_SHOWNOACTIVATE,
 };
 
 use super::workspace;
@@ -37,6 +38,8 @@ thread_local! {
     /// 面板窗口与弹出面板前的前台窗口（收起时把焦点还给它），只在主线程访问。
     static PANEL: Cell<HWND> = const { Cell::new(null_mut()) };
     static PREVIOUS: Cell<HWND> = const { Cell::new(null_mut()) };
+    /// 被 [`wake`] 临时摆到屏幕外时，面板原来的位置。
+    static WAKING: Cell<Option<RECT>> = const { Cell::new(None) };
 }
 
 /// 面板窗口句柄；不在主线程或尚未绑定时为空。
@@ -93,11 +96,71 @@ pub fn backdrop() -> Backdrop {
     Backdrop::Opaque
 }
 
-/// 面板窗口是否可见（不论是否有焦点）。
+/// 面板窗口是否可见（不论是否有焦点）。为截屏、贴图临时摆出的窗口不算（见 [`wake`]）。
 pub fn is_visible() -> bool {
     let hwnd = window();
     // SAFETY: 只读查询。
-    !hwnd.is_null() && unsafe { IsWindowVisible(hwnd) } != 0
+    !is_waking() && !hwnd.is_null() && unsafe { IsWindowVisible(hwnd) } != 0
+}
+
+/// 让 eframe 运行一次界面（原因见 macOS 版的同名函数）：把面板显示在屏幕外、不激活，
+/// 新窗口创建后由 [`finish_wake`] 隐藏并放回原处。
+pub fn wake() {
+    let hwnd = window();
+    // SAFETY: hwnd 是已绑定的面板窗口。
+    unsafe {
+        if hwnd.is_null() || IsWindowVisible(hwnd) != 0 {
+            return;
+        }
+        let mut frame: RECT = zeroed();
+        GetWindowRect(hwnd, &mut frame);
+        WAKING.with(|cell| cell.set(Some(frame)));
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            -32000,
+            -32000,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+/// 面板是否正被 [`wake`] 临时摆在屏幕外（这时不用绘制面板内容）。
+pub fn is_waking() -> bool {
+    WAKING.with(Cell::get).is_some()
+}
+
+/// 隐藏 [`wake`] 摆出的窗口并放回原处。
+pub fn finish_wake() {
+    let hwnd = window();
+    if hwnd.is_null() {
+        return;
+    }
+    // SAFETY: hwnd 是已绑定的面板窗口。
+    unsafe {
+        if is_waking() {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+        end_wake(hwnd);
+    }
+}
+
+/// 结束临时显示：把面板放回原来的位置（不改变显示状态）。
+unsafe fn end_wake(hwnd: HWND) {
+    if let Some(frame) = WAKING.with(|cell| cell.take()) {
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            frame.left,
+            frame.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
 }
 
 /// 拖动面板：Windows 上 winit 的 `drag_window` 可靠，返回 false 交给它处理。
@@ -122,7 +185,10 @@ pub fn show(anchor: Anchor, size: [f32; 2]) -> bool {
     }
     // SAFETY: hwnd 是已绑定的面板窗口。
     unsafe {
-        let visible = IsWindowVisible(hwnd) != 0;
+        // 正被临时摆在屏幕外（见 `wake`）时按隐藏处理：放回原处后重新定位。
+        let waking = is_waking();
+        end_wake(hwnd);
+        let visible = IsWindowVisible(hwnd) != 0 && !waking;
         if !visible {
             // 从托盘弹出时前台是任务栏（或我们自己的托盘窗口），它不能作为粘贴目标；
             // 这种情况回退到监听线程最近记录的真实前台程序。
@@ -159,6 +225,7 @@ pub fn hide(restore_focus: bool) {
     // SAFETY: hwnd 是已绑定的面板窗口；previous 使用前检查是否仍然存在。
     unsafe {
         ShowWindow(hwnd, SW_HIDE);
+        end_wake(hwnd);
         if restore_focus && !previous.is_null() && IsWindow(previous) != 0 {
             SetForegroundWindow(previous);
         }
@@ -174,8 +241,8 @@ pub fn previous_app_name() -> Option<String> {
 }
 
 /// 后台程序直接调用 SetForegroundWindow 会被系统拦截（只会闪烁任务栏按钮），
-/// 临时把本线程的输入队列挂到当前前台线程上即可获准。
-unsafe fn bring_to_front(hwnd: HWND) {
+/// 临时把本线程的输入队列挂到当前前台线程上即可获准。截屏遮罩也用它。
+pub(super) unsafe fn bring_to_front(hwnd: HWND) {
     let foreground = GetForegroundWindow();
     let foreground_thread = GetWindowThreadProcessId(foreground, null_mut());
     let current_thread = GetCurrentThreadId();

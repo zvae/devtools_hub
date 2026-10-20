@@ -237,6 +237,8 @@ pub(super) enum Action {
     OpenUrl(String),
     /// 在文件管理器中显示文件，然后收起面板。
     Reveal(String),
+    /// 把图片条目贴到屏幕上（贴图），然后收起面板。
+    PinImage(i64),
     /// 请求辅助功能权限并打开系统设置。
     RequestAccessibility,
     /// 本次运行不再在面板上提示该版本。
@@ -442,6 +444,20 @@ impl HubApp {
                 Action::Reveal(path) => {
                     workspace::reveal_path(&path);
                     self.hide_panel(false);
+                }
+                Action::PinImage(id) => {
+                    let image = self
+                        .store
+                        .snapshot(id)
+                        .ok()
+                        .and_then(|snapshot| crate::snip::image_from_snapshot(&snapshot));
+                    match image {
+                        Some(image) => {
+                            self.hide_panel(true);
+                            self.pin_at_cursor(image);
+                        }
+                        None => self.show_toast("无法读取这张图片"),
+                    }
                 }
                 Action::RequestAccessibility => {
                     keyboard::accessibility_trusted(true);

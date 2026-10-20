@@ -1,6 +1,7 @@
-//! egui 界面：剪贴板面板、设置页、鼠标中键快捷面板与 JSON 编辑器。
+//! egui 界面：剪贴板面板、设置页、鼠标中键快捷面板与 JSON 编辑器，以及截屏遮罩和贴图窗口。
 //!
 //! 四个页面共用同一个窗口：切换页面时由平台层调整窗口大小和位置。
+//! 截屏遮罩（`snipper`）和贴图（`pin`）是各自独立的窗口（egui 的子视口），流程在 `screenshot` 里。
 
 mod code_text;
 mod fonts;
@@ -11,10 +12,13 @@ mod liquid_glass;
 mod menu;
 mod native_menu;
 mod panel;
+mod pin;
 mod quick_panel;
+mod screenshot;
 mod settings_page;
 #[cfg(test)]
 mod snapshot_tests;
+mod snipper;
 mod style;
 mod textures;
 mod widgets;
@@ -27,7 +31,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use devtools_clipboard::{uti, Snapshot, Store};
 
-use crate::hotkey::{self, HotkeyService};
+use crate::hotkey::{HotkeyAction, HotkeyService};
 use crate::platform::pasteboard::Pasteboard;
 use crate::platform::{keyboard, panel as native_panel, Anchor, Backdrop, Placement};
 use crate::selection::{self, Selection};
@@ -40,9 +44,12 @@ use crate::{controller, middle_click, Args};
 use code_text::CodeStyles;
 use json_editor::JsonEditorView;
 use liquid_glass::LiquidGlass;
+use native_menu::NativeMenu;
 use panel::PanelView;
+use pin::{Pin, PinAction};
 use quick_panel::QuickPanelView;
 use settings_page::SettingsView;
+use snipper::Snipper;
 use style::Palette;
 use textures::{AppIcons, Textures};
 
@@ -102,9 +109,10 @@ pub struct HubApp {
     /// `--pasteboard` 指定的剪贴板名（测试时用私有剪贴板，不影响系统剪贴板）。
     pasteboard_name: Option<String>,
     settings: Settings,
-    /// 全局快捷键服务；初始化失败时为 `None`，原因记在 `hotkey_error`。
+    /// 全局快捷键服务；初始化失败时为 `None`，原因记在 `hotkey_errors`。
     hotkeys: Option<HotkeyService>,
-    hotkey_error: Option<String>,
+    /// 各个全局快捷键（按 [`HotkeyAction::index`]）注册失败的原因。
+    hotkey_errors: [Option<String>; 3],
     tray: Option<Tray>,
     page: Page,
     // 四个页面各自的界面状态。
@@ -133,6 +141,19 @@ pub struct HubApp {
     startup_hide_pending: bool,
     /// 在面板上关掉了提示的新版本（本次运行不再在面板上提示，菜单栏和设置页照常显示）。
     update_dismissed: Option<String>,
+    /// 正在进行的截屏。
+    snip: Option<Snipper>,
+    /// 截屏刚结束、正在收起的遮罩（见 `closing_snip_ui`）。
+    closing_snip: Option<screenshot::ClosingSnip>,
+    /// 后台截屏线程的结果（截屏完成前不为空）。
+    capturing: Option<std::sync::mpsc::Receiver<screenshot::CaptureResult>>,
+    /// 截屏完成后要编辑的贴图（贴图的“编辑标注”）。
+    pending_edit: Option<screenshot::PinEdit>,
+    /// 屏幕上的贴图。
+    pins: Vec<Pin>,
+    next_pin_id: u64,
+    /// 最近一次弹出的贴图右键菜单：（贴图编号，菜单）。
+    pin_menu: Option<(u64, NativeMenu<PinAction>)>,
 }
 
 impl HubApp {
@@ -160,23 +181,24 @@ impl HubApp {
         app.backdrop = native_panel::backdrop();
         app.liquid = cc.wgpu_render_state.as_ref().map(LiquidGlass::new);
         match HotkeyService::new(shared.clone()) {
-            Ok(mut service) => {
-                if let Err(err) = service.apply(&app.settings.hotkey) {
-                    tracing::warn!("{err}");
-                    app.hotkey_error = Some(err);
-                }
+            Ok(service) => {
                 app.hotkeys = Some(service);
+                for action in HotkeyAction::ALL {
+                    app.apply_hotkey(action);
+                    if let Some(err) = &app.hotkey_errors[action.index()] {
+                        tracing::warn!("{err}");
+                    }
+                }
             }
-            Err(err) => app.hotkey_error = Some(format!("无法初始化全局快捷键：{err}")),
+            Err(err) => {
+                app.hotkey_errors[HotkeyAction::Panel.index()] =
+                    Some(format!("无法初始化全局快捷键：{err}"));
+            }
         }
         app.sync_middle_click();
-        app.tray = Tray::new(
-            shared.clone(),
-            app.data_dir.clone(),
-            &hotkey::display(&app.settings.hotkey),
-        )
-        .inspect_err(|err| tracing::warn!("无法创建菜单栏图标：{err:#}"))
-        .ok();
+        app.tray = Tray::new(shared.clone(), app.data_dir.clone(), &app.settings)
+            .inspect_err(|err| tracing::warn!("无法创建菜单栏图标：{err:#}"))
+            .ok();
         if args.after_update {
             // 应用内更新后重新启动：打开设置页底部，告诉用户已经是新版本（macOS 上可能还要重新授权）。
             controller::show_panel(&shared, true);
@@ -184,6 +206,15 @@ impl HubApp {
             app.show_toast(format!("已更新到 {}", update::CURRENT_VERSION));
         } else if args.show {
             controller::show_panel(&shared, false);
+        }
+        if args.snip {
+            shared.post(AppEvent::Snip);
+        }
+        if let Some(path) = &args.pin {
+            match image::open(path) {
+                Ok(image) => app.pin_at_cursor(image.to_rgba8()),
+                Err(err) => tracing::warn!("无法打开图片 {}：{err}", path.display()),
+            }
         }
         Ok(app)
     }
@@ -206,7 +237,7 @@ impl HubApp {
             pasteboard_name: None,
             settings,
             hotkeys: None,
-            hotkey_error: None,
+            hotkey_errors: Default::default(),
             tray: None,
             page: Page::Panel,
             panel: PanelView::default(),
@@ -224,6 +255,13 @@ impl HubApp {
             liquid: None,
             startup_hide_pending: false,
             update_dismissed: None,
+            snip: None,
+            closing_snip: None,
+            capturing: None,
+            pending_edit: None,
+            pins: Vec::new(),
+            next_pin_id: 1,
+            pin_menu: None,
         }
     }
 
@@ -253,7 +291,16 @@ impl HubApp {
                     update::restart_if_installed(&self.shared, &self.relaunch_args());
                 }
                 AppEvent::RevealUpdate => self.settings_view.reveal_update = true,
-                AppEvent::MenuCommand(id) => self.menu_command(&id),
+                AppEvent::MenuCommand(id) => {
+                    if !self.pin_menu_command(&id) {
+                        self.menu_command(&id);
+                    }
+                }
+                AppEvent::Snip => self.start_snip(),
+                AppEvent::SnipCaptured => self.finish_capture(),
+                AppEvent::PinClipboard => self.pin_clipboard(),
+                AppEvent::ClosePins => self.close_pins(),
+                AppEvent::Pin(id, request) => self.pin_request(id, request),
             }
         }
         let revision = self.shared.revision.load(Ordering::Relaxed);
@@ -302,10 +349,7 @@ impl HubApp {
     fn persist_settings(&mut self) {
         self.shared.apply_settings(&self.settings);
         if let Some(tray) = &self.tray {
-            tray.sync(
-                self.settings.paused,
-                &hotkey::display(&self.settings.hotkey),
-            );
+            tray.sync(&self.settings);
         }
         if let Err(err) = self.settings.save(&self.data_dir) {
             self.show_toast(format!("保存设置失败：{err:#}"));
@@ -571,6 +615,7 @@ impl HubApp {
 impl eframe::App for HubApp {
     /// 每帧绘制前先处理后台线程发来的事件。
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.check_snip_rescued();
         self.handle_events();
     }
 
@@ -590,7 +635,16 @@ impl eframe::App for HubApp {
         if cfg!(windows) && self.page != Page::Settings && native_panel::is_visible() {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
-        self.draw(ui);
+        // 截屏遮罩或贴图在显示时，面板隐藏着 eframe 也会运行界面，这时不用绘制面板。
+        if native_panel::is_visible() {
+            self.draw(ui);
+        }
+        let ctx = ui.ctx().clone();
+        self.closing_snip_ui(&ctx);
+        self.snip_ui(&ctx);
+        self.pins_ui(&ctx);
+        // 为创建截屏遮罩、贴图而临时摆出的面板（见 `panel::wake`）完成了任务，收起来。
+        native_panel::finish_wake();
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {

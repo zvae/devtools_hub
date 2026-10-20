@@ -3,7 +3,7 @@
 //! 采用 macOS 偏好设置常见的“左侧标签、右侧控件”行布局，布尔项使用开关。
 //!
 //! 各分组分在不同文件里：
-//! - `general`：通用、外观、粘贴、鼠标中键、记录；
+//! - `general`：通用、外观、粘贴、鼠标中键、截屏与贴图、记录；
 //! - `rules`：隐私与排除规则；
 //! - `lists`：分类标签、列表与数据；
 //! - `about`：页面底部的版本信息与检查更新；
@@ -24,6 +24,7 @@ use super::icons::Icon;
 use super::style::{self, Palette};
 use super::widgets::{centered_row, drag_window, icon_button};
 use super::{HubApp, Page};
+use crate::hotkey::HotkeyAction;
 use crate::platform::{login_item, workspace, Backdrop};
 use general::{appearance_section, middle_click_section, record_section};
 use rows::section;
@@ -31,8 +32,8 @@ use rows::section;
 /// 设置页自己的界面状态（设置本身保存在 `HubApp::settings`）。
 #[derive(Default)]
 pub struct SettingsView {
-    /// 正在录制唤起快捷键（录制期间旧快捷键暂时注销）。
-    recording_hotkey: bool,
+    /// 正在录制的全局快捷键（录制期间旧快捷键暂时注销）。
+    recording_hotkey: Option<HotkeyAction>,
     /// 排除规则里手动输入的 Bundle ID / 程序名。
     manual_bundle_id: String,
     /// “列表”分组里输入的新列表名。
@@ -52,6 +53,8 @@ pub struct SettingsView {
     pub reveal_update: bool,
     /// 下一帧滚动到“分类标签”分组（从面板的“编辑分类标签…”打开设置时）。
     pub reveal_tabs: bool,
+    /// 下一帧滚动到“截屏与贴图”分组（没有屏幕录制权限、无法截屏时）。
+    pub reveal_snip: bool,
     /// 浮在内容上面的标题栏的高度（上一帧量出来的）。
     header_height: f32,
 }
@@ -74,7 +77,7 @@ impl HubApp {
     /// 控件改的是设置的一份副本，绘制结束后与原设置比较，有变化才保存并应用。
     pub(super) fn settings_ui(&mut self, ui: &mut Ui) {
         let palette = self.palette(ui.ctx());
-        let escape = !self.settings_view.recording_hotkey
+        let escape = self.settings_view.recording_hotkey.is_none()
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
         // 标题栏浮在内容上面（与面板的顶部栏一样是玻璃，见 `glass`）：内容从窗口顶部开始，
         // 上面留出标题栏的高度（上一帧量出来的），滚到标题栏下面的部分不直接画。
@@ -109,6 +112,13 @@ impl HubApp {
                 section(ui, &palette, "鼠标中键", |ui| {
                     middle_click_section(ui, &palette, &mut settings)
                 });
+                let snip = section(ui, &palette, "截屏与贴图", |ui| {
+                    self.snip_section(ui, &palette, &mut settings)
+                });
+                if std::mem::take(&mut self.settings_view.reveal_snip) {
+                    let rect = snip.rect.with_min_y(snip.rect.top() - top - 8.0);
+                    ui.scroll_to_rect(rect, Some(Align::Min));
+                }
                 section(ui, &palette, "记录", |ui| {
                     record_section(ui, &palette, &mut settings)
                 });
@@ -156,10 +166,13 @@ impl HubApp {
         }
 
         if settings != self.settings {
-            let hotkey_changed = settings.hotkey != self.settings.hotkey;
+            let changed: Vec<HotkeyAction> = HotkeyAction::ALL
+                .into_iter()
+                .filter(|action| settings.hotkey(*action) != self.settings.hotkey(*action))
+                .collect();
             self.settings = settings;
-            if hotkey_changed {
-                self.apply_hotkey();
+            for action in changed {
+                self.apply_hotkey(action);
             }
             self.persist_settings();
             self.sync_middle_click();
@@ -223,15 +236,15 @@ impl HubApp {
 
     /// 离开设置页时若仍在录制，恢复原快捷键的注册。
     pub(super) fn cancel_hotkey_recording(&mut self) {
-        if std::mem::take(&mut self.settings_view.recording_hotkey) {
-            self.apply_hotkey();
+        if let Some(action) = self.settings_view.recording_hotkey.take() {
+            self.apply_hotkey(action);
         }
     }
 
-    /// 按当前设置重新注册全局快捷键，失败时把原因显示在快捷键一行下面。
-    fn apply_hotkey(&mut self) {
-        self.hotkey_error = match &mut self.hotkeys {
-            Some(service) => service.apply(&self.settings.hotkey).err(),
+    /// 按当前设置重新注册某个全局快捷键，失败时把原因显示在快捷键一行下面。
+    pub(in crate::ui) fn apply_hotkey(&mut self, action: HotkeyAction) {
+        self.hotkey_errors[action.index()] = match &mut self.hotkeys {
+            Some(service) => service.apply(action, self.settings.hotkey(action)).err(),
             None => Some("全局快捷键服务不可用".into()),
         };
     }

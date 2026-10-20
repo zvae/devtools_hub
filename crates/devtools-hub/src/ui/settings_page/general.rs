@@ -1,9 +1,10 @@
-//! 通用、外观、粘贴、鼠标中键与记录分组。
+//! 通用、外观、粘贴、鼠标中键、截屏与贴图、记录分组。
 
 use egui::{Key, RichText, Sense, Ui, Vec2};
 
 use super::rows::{divider, hint, hint_text, row, switch_row};
-use crate::platform::{keyboard, login_item, panel::Placement};
+use crate::hotkey::HotkeyAction;
+use crate::platform::{floating, keyboard, login_item, panel::Placement, screen};
 use crate::settings::{Retention, Settings, POLL_INTERVALS};
 use crate::ui::icons::{self, Icon};
 use crate::ui::style::Palette;
@@ -19,69 +20,7 @@ impl HubApp {
         palette: &Palette,
         settings: &mut Settings,
     ) {
-        if self.settings_view.recording_hotkey {
-            row(ui, "唤起快捷键", |ui| {
-                ui.label(RichText::new("请按下新的组合键…").color(palette.accent));
-            });
-            hint(
-                ui,
-                palette,
-                &format!(
-                    "需要包含 {} 中的至少一个，{} 取消",
-                    keys::MODIFIER_HINT,
-                    keys::ESCAPE
-                ),
-            );
-            let pressed = ui.input(|i| {
-                i.events.iter().find_map(|event| match event {
-                    egui::Event::Key {
-                        key,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } => Some((*key, *modifiers)),
-                    _ => None,
-                })
-            });
-            match pressed {
-                Some((Key::Escape, _)) => {
-                    self.settings_view.recording_hotkey = false;
-                    self.apply_hotkey();
-                }
-                Some((key, modifiers)) => {
-                    if let Some(spec) = hotkey::from_egui(modifiers, key) {
-                        settings.hotkey = spec;
-                        self.settings_view.recording_hotkey = false;
-                        // 录制期间注销了旧快捷键，这里无论是否变化都重新注册。
-                        if settings.hotkey == self.settings.hotkey {
-                            self.apply_hotkey();
-                        }
-                    }
-                }
-                None => {}
-            }
-        } else {
-            row(ui, "唤起快捷键", |ui| {
-                if ui.button("录制").clicked() {
-                    self.settings_view.recording_hotkey = true;
-                    // 避免录制时按下旧快捷键直接把面板关掉。
-                    if let Some(service) = &mut self.hotkeys {
-                        service.suspend();
-                    }
-                }
-                let parts = hotkey::display_parts(&settings.hotkey);
-                let keys: Vec<&str> = parts.iter().map(String::as_str).collect();
-                keycaps(ui, &keys, palette);
-            });
-            let default = Settings::default().hotkey;
-            let restore = format!("恢复默认 {}", hotkey::display(&default));
-            if settings.hotkey != default && ui.link(RichText::new(restore).size(11.5)).clicked() {
-                settings.hotkey = default;
-            }
-        }
-        if let Some(error) = &self.hotkey_error {
-            ui.label(hint_text(error.clone(), palette.warn));
-        }
+        self.hotkey_row(ui, palette, settings, HotkeyAction::Panel);
         divider(ui, palette);
         row(ui, "出现位置", |ui| {
             egui::ComboBox::from_id_salt("placement")
@@ -123,6 +62,140 @@ impl HubApp {
             palette,
             "启动时和之后每天检查一次 GitHub 上是否有新版本",
         );
+    }
+
+    /// 一个全局快捷键：键帽与“录制”按钮；录制时等待按下新的组合键，esc 取消。
+    fn hotkey_row(
+        &mut self,
+        ui: &mut Ui,
+        palette: &Palette,
+        settings: &mut Settings,
+        action: HotkeyAction,
+    ) {
+        if self.settings_view.recording_hotkey == Some(action) {
+            row(ui, action.label(), |ui| {
+                ui.label(RichText::new("请按下新的组合键…").color(palette.accent));
+            });
+            hint(
+                ui,
+                palette,
+                &format!(
+                    "需要包含 {} 中的至少一个（F1–F12 可以单独使用），{} 取消",
+                    keys::MODIFIER_HINT,
+                    keys::ESCAPE
+                ),
+            );
+            let pressed = ui.input(|i| {
+                i.events.iter().find_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+            });
+            match pressed {
+                Some((Key::Escape, _)) => {
+                    self.settings_view.recording_hotkey = None;
+                    self.apply_hotkey(action);
+                }
+                Some((key, modifiers)) => {
+                    if let Some(spec) = hotkey::from_egui(modifiers, key) {
+                        *settings.hotkey_mut(action) = spec;
+                        self.settings_view.recording_hotkey = None;
+                        // 录制期间注销了旧快捷键，这里无论是否变化都重新注册。
+                        if settings.hotkey(action) == self.settings.hotkey(action) {
+                            self.apply_hotkey(action);
+                        }
+                    }
+                }
+                None => {}
+            }
+        } else {
+            row(ui, action.label(), |ui| {
+                if ui.button("录制").clicked() {
+                    // 同时只录制一个：先恢复正在录制的那个。
+                    self.cancel_hotkey_recording();
+                    self.settings_view.recording_hotkey = Some(action);
+                    // 避免录制时按下旧快捷键直接触发（例如把面板关掉）。
+                    if let Some(service) = &mut self.hotkeys {
+                        service.suspend(action);
+                    }
+                }
+                let parts = hotkey::display_parts(settings.hotkey(action));
+                let keys: Vec<&str> = parts.iter().map(String::as_str).collect();
+                keycaps(ui, &keys, palette);
+            });
+            let default = Settings::default().hotkey(action).to_string();
+            let restore = format!("恢复默认 {}", hotkey::display(&default));
+            if settings.hotkey(action) != default
+                && ui.link(RichText::new(restore).size(11.5)).clicked()
+            {
+                *settings.hotkey_mut(action) = default;
+            }
+        }
+        if let Some(error) = &self.hotkey_errors[action.index()] {
+            ui.label(hint_text(error.clone(), palette.warn));
+        }
+    }
+
+    /// 截屏与贴图：两个快捷键、屏幕录制权限（macOS）与操作说明。
+    pub(super) fn snip_section(&mut self, ui: &mut Ui, palette: &Palette, settings: &mut Settings) {
+        let command = |key: &str| keys::shortcut(&[keys::COMMAND, key]);
+        self.hotkey_row(ui, palette, settings, HotkeyAction::Snip);
+        hint(
+            ui,
+            palette,
+            &format!(
+                "截下鼠标所在的屏幕：拖动框选区域，或单击选中鼠标下的窗口；选区下方的工具栏可以画矩形、箭头、\
+                 马赛克、文字等标注（{} 撤销）。{} 或双击复制，{} 贴到屏幕，{} 保存，{} 退出；\
+                 没有选区时按 C 复制鼠标处的颜色值",
+                command("Z"),
+                command("C"),
+                command("T"),
+                command("S"),
+                keys::ESCAPE
+            ),
+        );
+        divider(ui, palette);
+        self.hotkey_row(ui, palette, settings, HotkeyAction::Pin);
+        let opacity = if floating::OPACITY_SUPPORTED {
+            format!("，{}+滚轮调整不透明度", keys::COMMAND)
+        } else {
+            String::new()
+        };
+        hint(
+            ui,
+            palette,
+            &format!(
+                "把剪贴板里的图片贴到屏幕上（截屏时也可以直接贴图）。贴图可以拖动，滚轮缩放{opacity}，\
+                 空格或右键菜单的“编辑标注”可以继续画标注，双击或 {} 关闭，右键查看更多操作",
+                keys::ESCAPE
+            ),
+        );
+        if platform::SCREEN_CAPTURE_NEEDS_PERMISSION {
+            divider(ui, palette);
+            let allowed = screen::capture_allowed();
+            row(ui, "屏幕录制权限", |ui| {
+                if allowed {
+                    ui.label(RichText::new("已授权").color(palette.ok));
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                    icons::paint(ui.painter(), icon_rect, Icon::Check, palette.ok);
+                } else if ui.button("去授权").clicked() {
+                    screen::request_capture_access();
+                    screen::open_capture_settings();
+                }
+            });
+            if !allowed {
+                hint(
+                    ui,
+                    palette,
+                    "没有权限时只能截到桌面和菜单栏。在系统设置里打开后，需要退出并重新打开 DevTools Hub",
+                );
+            }
+        }
     }
 
     /// 粘贴：是否直接粘贴到当前应用、辅助功能权限、粘贴后是否移到最前。

@@ -53,11 +53,15 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 
 /// 在鼠标位置弹出菜单，菜单关闭后才返回；返回选中菜单项的 `id`。面板窗口不存在时不弹出。
 pub fn popup(nodes: &[Node], colors: &Colors) -> Option<usize> {
-    let owner = super::panel::window();
+    popup_owned(super::panel::window(), nodes, colors)
+}
+
+/// 同 [`popup`]，菜单属于指定的窗口（贴图窗口的右键菜单）。窗口为空时不弹出。
+pub fn popup_owned(owner: HWND, nodes: &[Node], colors: &Colors) -> Option<usize> {
     if owner.is_null() || nodes.is_empty() {
         return None;
     }
-    // SAFETY: 在主线程（面板窗口所在线程）调用；窗口、DC 等资源都由 `Session` 创建并在返回前释放。
+    // SAFETY: 在主线程（面板、贴图窗口所在线程）调用；窗口、DC 等资源都由 `Session` 创建并在返回前释放。
     unsafe { Session::run(owner, nodes, *colors) }
 }
 

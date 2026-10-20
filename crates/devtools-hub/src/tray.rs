@@ -3,16 +3,20 @@
 //! 与 PasteNow 一致：左键点击在图标旁弹出/收起面板，右键显示菜单。
 //! 图标是彩色的，菜单栏 / 任务栏明暗主题下都按原色显示。
 //! 发现新版本时，菜单最上面多出一项“发现新版本”，点击打开设置页底部的更新信息。
+//! 菜单里还有截屏、贴图与“关闭所有贴图”（对应 Snipaste 托盘菜单里的同名项）。
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::controller;
+use crate::hotkey::{self, HotkeyAction};
 use crate::platform::TrayRect;
+use crate::settings::Settings;
 use crate::shared::{AppEvent, Shared};
 
 /// macOS 在按下时响应（与系统菜单栏一致）；Windows 在松开时响应，
@@ -23,12 +27,17 @@ const CLICK_STATE: MouseButtonState = if cfg!(windows) {
     MouseButtonState::Down
 };
 
+/// 从菜单里截屏时，等菜单淡出后再截，免得把菜单截进去（Snipaste 也有延时截屏 `startDelayed`）。
+const SNIP_DELAY: Duration = Duration::from_millis(250);
+
 /// 菜单栏（macOS）/ 托盘（Windows）图标与它的菜单。
 pub struct Tray {
     _icon: TrayIcon,
     menu: Menu,
     pause: CheckMenuItem,
     show: MenuItem,
+    snip: MenuItem,
+    pin: MenuItem,
     update: MenuItem,
     update_separator: PredefinedMenuItem,
     /// 菜单里正在提示的新版本。
@@ -40,14 +49,12 @@ impl Tray {
     pub fn new(
         shared: Arc<Shared>,
         data_dir: std::path::PathBuf,
-        hotkey_label: &str,
+        settings: &Settings,
     ) -> Result<Self> {
-        let show = MenuItem::with_id(
-            "show",
-            format!("打开剪贴板历史    {hotkey_label}"),
-            true,
-            None,
-        );
+        let show = MenuItem::with_id("show", label(settings, HotkeyAction::Panel), true, None);
+        let snip = MenuItem::with_id("snip", label(settings, HotkeyAction::Snip), true, None);
+        let pin = MenuItem::with_id("pin", label(settings, HotkeyAction::Pin), true, None);
+        let close_pins = MenuItem::with_id("close-pins", "关闭所有贴图", true, None);
         let pause = CheckMenuItem::with_id(
             "pause",
             "暂停记录",
@@ -63,6 +70,10 @@ impl Tray {
         let menu = Menu::with_items(&[
             &show,
             &pause,
+            &PredefinedMenuItem::separator(),
+            &snip,
+            &pin,
+            &close_pins,
             &PredefinedMenuItem::separator(),
             &settings,
             &data,
@@ -97,6 +108,15 @@ impl Tray {
                 shared.post(AppEvent::PauseChanged);
             }
             "settings" => controller::show_panel(&shared, true),
+            "snip" => {
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(SNIP_DELAY);
+                    shared.post(AppEvent::Snip);
+                });
+            }
+            "pin" => shared.post(AppEvent::PinClipboard),
+            "close-pins" => shared.post(AppEvent::ClosePins),
             "data" => crate::platform::workspace::open_path(&data_dir),
             "update" => {
                 controller::show_panel(&shared, true);
@@ -123,6 +143,8 @@ impl Tray {
             menu,
             pause,
             show,
+            snip,
+            pin,
             update,
             update_separator: PredefinedMenuItem::separator(),
             update_version: None,
@@ -130,10 +152,11 @@ impl Tray {
     }
 
     /// 设置变化后同步菜单：“暂停记录”的勾选状态与快捷键提示。
-    pub fn sync(&self, paused: bool, hotkey_label: &str) {
-        self.pause.set_checked(paused);
-        self.show
-            .set_text(format!("打开剪贴板历史    {hotkey_label}"));
+    pub fn sync(&self, settings: &Settings) {
+        self.pause.set_checked(settings.paused);
+        self.show.set_text(label(settings, HotkeyAction::Panel));
+        self.snip.set_text(label(settings, HotkeyAction::Snip));
+        self.pin.set_text(label(settings, HotkeyAction::Pin));
     }
 
     /// 有需要提醒的新版本时在菜单最上面显示“发现新版本”，没有时移除。
@@ -160,6 +183,21 @@ impl Tray {
             tracing::warn!("更新菜单栏菜单失败：{err}");
         }
         self.update_version = version.map(str::to_owned);
+    }
+}
+
+/// 菜单项的文字，后面附上快捷键提示（没有设置快捷键时不附）。
+fn label(settings: &Settings, action: HotkeyAction) -> String {
+    let name = match action {
+        HotkeyAction::Panel => "打开剪贴板历史",
+        HotkeyAction::Snip => "截屏",
+        HotkeyAction::Pin => "贴图（剪贴板中的图片）",
+    };
+    let spec = settings.hotkey(action);
+    if spec.trim().is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}    {}", hotkey::display(spec))
     }
 }
 

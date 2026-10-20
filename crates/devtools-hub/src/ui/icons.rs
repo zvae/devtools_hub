@@ -33,6 +33,20 @@ pub enum Icon {
     List,
     ChevronUp,
     ChevronDown,
+    // 截屏标注工具栏（参照 Snipaste 的工具栏）。
+    /// 矩形 / 椭圆工具。
+    Shapes,
+    Rectangle,
+    Ellipse,
+    Arrow,
+    Marker,
+    Mosaic,
+    Text,
+    Eraser,
+    Undo,
+    Redo,
+    Save,
+    Copy,
 }
 
 /// 16×16 网格坐标到屏幕坐标的映射。
@@ -279,6 +293,114 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::ChevronUp => line(&[(3.0, 10.5), (8.0, 5.5), (13.0, 10.5)]),
         Icon::ChevronDown => line(&[(3.0, 5.5), (8.0, 10.5), (13.0, 5.5)]),
+        Icon::Shapes => {
+            painter.rect_stroke(
+                g.rect(2.4, 2.8, 10.4, 10.0),
+                g.r(1.6),
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            painter.circle_stroke(g.p(10.6, 10.6), g.r(3.4), stroke);
+        }
+        Icon::Rectangle => {
+            painter.rect_stroke(
+                g.rect(2.6, 3.6, 13.4, 12.4),
+                g.r(1.2),
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        Icon::Ellipse => {
+            painter.add(Shape::ellipse_stroke(
+                g.p(8.0, 8.0),
+                Vec2::new(g.r(5.6), g.r(4.6)),
+                stroke,
+            ));
+        }
+        Icon::Arrow => {
+            line(&[(3.2, 12.8), (12.2, 3.8)]);
+            line(&[(6.6, 3.6), (12.4, 3.6), (12.4, 9.4)]);
+        }
+        Icon::Marker => {
+            // 斜放的记号笔：笔身、扁平的笔尖，下面一道划痕。
+            closed(&[(9.8, 2.2), (13.4, 5.8), (8.2, 11.0), (4.6, 7.4)], false);
+            closed(&[(4.6, 7.4), (8.2, 11.0), (5.8, 12.6), (3.0, 9.8)], true);
+            line(&[(2.2, 14.2), (13.8, 14.2)]);
+        }
+        Icon::Mosaic => {
+            let cell = 11.0 / 3.0;
+            for row in 0..3 {
+                for col in 0..3 {
+                    if (row + col) % 2 == 0 {
+                        let (x, y) = (2.5 + col as f32 * cell, 2.5 + row as f32 * cell);
+                        painter.rect_filled(g.rect(x, y, x + cell, y + cell), 0.0, color);
+                    }
+                }
+            }
+            painter.rect_stroke(
+                g.rect(2.5, 2.5, 13.5, 13.5),
+                0.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        Icon::Text => {
+            line(&[(3.4, 5.0), (3.4, 3.2), (12.6, 3.2), (12.6, 5.0)]);
+            line(&[(8.0, 3.2), (8.0, 13.0)]);
+            line(&[(5.8, 13.0), (10.2, 13.0)]);
+        }
+        Icon::Eraser => {
+            closed(&[(9.2, 2.6), (13.6, 7.0), (7.6, 13.0), (3.2, 8.6)], false);
+            line(&[(6.2, 5.6), (10.6, 10.0)]);
+            line(&[(7.6, 13.0), (13.8, 13.0)]);
+        }
+        Icon::Undo | Icon::Redo => {
+            // ↶：上面一道向左的箭头，右侧绕一个半圆回到下方；重做左右镜像。
+            let mirror = icon == Icon::Redo;
+            let x = |x: f32| if mirror { 16.0 - x } else { x };
+            let mut points = vec![g.p(x(3.6), 6.0)];
+            let center = (9.6, 9.0);
+            for i in 0..=12 {
+                let angle = -FRAC_PI_2 + i as f32 / 12.0 * std::f32::consts::PI;
+                let (sin, cos) = angle.sin_cos();
+                points.push(g.p(x(center.0 + 3.0 * cos), center.1 + 3.0 * sin));
+            }
+            points.push(g.p(x(6.0), 12.0));
+            painter.add(Shape::line(points, stroke));
+            line(&[(x(6.0), 3.6), (x(3.6), 6.0), (x(6.0), 8.4)]);
+        }
+        Icon::Save => {
+            closed(
+                &[
+                    (2.6, 2.6),
+                    (11.0, 2.6),
+                    (13.4, 5.0),
+                    (13.4, 13.4),
+                    (2.6, 13.4),
+                ],
+                false,
+            );
+            line(&[(5.2, 2.6), (5.2, 6.0), (10.0, 6.0), (10.0, 2.6)]);
+            closed(&[(4.6, 13.4), (4.6, 9.2), (11.4, 9.2), (11.4, 13.4)], false);
+        }
+        Icon::Copy => {
+            painter.rect_stroke(
+                g.rect(2.6, 5.4, 10.6, 13.4),
+                g.r(1.4),
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            line(&[
+                (5.4, 5.4),
+                (5.4, 3.8),
+                (6.2, 2.6),
+                (12.2, 2.6),
+                (13.4, 3.8),
+                (13.4, 9.8),
+                (12.2, 10.6),
+                (10.6, 10.6),
+            ]);
+        }
     }
 }
 

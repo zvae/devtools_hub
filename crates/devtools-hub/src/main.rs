@@ -6,6 +6,7 @@
 //! - `hotkey` / `tray`：全局快捷键与菜单栏 / 托盘图标，唤起面板；
 //! - `middle_click` / `selection` / `tools`：鼠标中键快捷面板（参照 uTools）：读取其他应用中
 //!   选中的内容，列出能处理它的功能（目前是 JSON 编辑器）；
+//! - `snip`：截屏与贴图（参照 Snipaste）中与平台、界面无关的计算，界面在 `ui::snipper` / `ui::pin`；
 //! - `ui`：egui 面板（搜索、分类、预览、键盘操作）与设置页；
 //! - `update`：检查 GitHub Releases 上的新版本，提示升级并在应用内安装；
 //! - `platform`：各平台的原生能力（剪贴板读写、模拟粘贴 / 复制、鼠标中键监听、窗口控制、
@@ -32,6 +33,8 @@ mod settings;
 #[cfg(any(target_os = "macos", windows))]
 mod shared;
 #[cfg(any(target_os = "macos", windows))]
+mod snip;
+#[cfg(any(target_os = "macos", windows))]
 mod tools;
 #[cfg(any(target_os = "macos", windows))]
 mod tray;
@@ -52,6 +55,10 @@ pub struct Args {
     pub pasteboard: Option<String>,
     /// 由旧版本在应用内更新后启动：等旧进程退出，启动后显示设置页底部的版本信息。
     pub after_update: bool,
+    /// 启动后立即截屏（对应 Snipaste 的命令行 `snip`）。
+    pub snip: bool,
+    /// 启动后把这张图片贴到屏幕上（对应 Snipaste 的命令行 `paste --files`）。
+    pub pin: Option<PathBuf>,
 }
 
 /// `--help` 的输出。
@@ -65,6 +72,8 @@ const HELP: &str = "DevTools Hub 剪贴板历史
                          Windows 为 %LOCALAPPDATA%\\DevToolsHub；
                          也可用环境变量 DEVTOOLS_HUB_DATA_DIR 指定）
   --pasteboard <名称>    监听指定名称的私有剪贴板（调试用，仅 macOS，不影响系统剪贴板）
+  --snip                 启动后立即截屏
+  --pin <图片>           启动后把图片贴到屏幕上
   -h, --help             显示帮助";
 
 impl Args {
@@ -81,6 +90,8 @@ impl Args {
                 "--pasteboard" => {
                     args.pasteboard = Some(iter.next().ok_or("--pasteboard 需要一个名称")?)
                 }
+                "--snip" => args.snip = true,
+                "--pin" => args.pin = Some(iter.next().ok_or("--pin 需要一张图片")?.into()),
                 // 内部参数，不在帮助中列出。
                 "--after-update" => args.after_update = true,
                 "-h" | "--help" => return Ok(None),

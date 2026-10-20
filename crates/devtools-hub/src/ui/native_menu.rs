@@ -113,6 +113,41 @@ impl<A> NativeMenu<A> {
         }
     }
 
+    /// 同 [`Self::popup`]，菜单属于标题为 `title` 的窗口（贴图窗口的右键菜单）；找不到窗口时不弹出。
+    pub fn popup_in(
+        entries: Vec<Entry<A>>,
+        ctx: &egui::Context,
+        title: &str,
+    ) -> Option<(Self, Option<String>)> {
+        let mut actions = Vec::new();
+        #[cfg(windows)]
+        {
+            let owner = crate::platform::floating::window(title);
+            if owner.is_null() {
+                return None;
+            }
+            let nodes = drawn_nodes(entries, &mut actions);
+            let chosen = crate::platform::menu::popup_owned(owner, &nodes, &drawn_colors(ctx))
+                .map(|index| actions[index].0.clone());
+            Some((Self { actions }, chosen))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = ctx;
+            let menu = nsmenu::build(entries, &mut actions)
+                .inspect_err(|err| tracing::warn!("创建右键菜单失败：{err:#}"))
+                .ok()?;
+            crate::platform::floating::popup_menu(title, &menu);
+            Some((
+                Self {
+                    _menu: menu,
+                    actions,
+                },
+                None,
+            ))
+        }
+    }
+
     /// 取出菜单项 `id` 对应的操作。
     pub fn take(&mut self, id: &str) -> Option<A> {
         let index = self.actions.iter().position(|(item, _)| item == id)?;

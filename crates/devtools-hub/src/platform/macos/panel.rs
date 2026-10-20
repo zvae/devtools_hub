@@ -88,24 +88,14 @@ pub fn is_key() -> bool {
     PANEL_KEY.load(Ordering::Relaxed)
 }
 
-/// 把 winit 创建的窗口换成 [`HubPanel`] 并设为不激活应用的面板。返回是否成功。
-fn make_nonactivating(window: &NSWindow) -> bool {
-    let from = window.class();
-    let to = HubPanel::class();
-    // 换类要求两个类的实例布局一致：都只有 NSWindow 的实例变量。
-    if from.instance_size() != to.instance_size() {
-        tracing::warn!(
-            "无法把面板换成 NSPanel：{} 实例大小 {}，{} 实例大小 {}",
-            from.name().to_string_lossy(),
-            from.instance_size(),
-            to.name().to_string_lossy(),
-            to.instance_size()
-        );
+/// 把 winit 创建的窗口换成 `NSPanel` 子类 `to` 并设为不激活应用的面板。返回是否成功。
+/// 面板用 [`HubPanel`]，贴图窗口用 `floating` 模块里的类。
+///
+/// 换类的细节见 [`swap_class`]。
+pub(super) fn make_nonactivating(window: &NSWindow, to: &AnyClass) -> bool {
+    if !swap_class(window, to) {
         return false;
     }
-    // SAFETY: 实例大小相同，WinitWindow 与 HubPanel 都没有自己的实例变量；
-    // HubPanel 覆盖的方法保留了 WinitWindow 依赖的行为（可以成为键盘窗口）。
-    unsafe { AnyObject::set_class(window, to) };
     window.setStyleMask(window.styleMask() | NSWindowStyleMask::NonactivatingPanel);
     // 只有 init 时带上 NonactivatingPanel，AppKit 才会设置窗口的“阻止激活”属性；
     // 创建后再加这一位，样式里有了，点击面板却仍会激活本应用（实测 `_preventsActivation` 仍为 false）。
@@ -121,6 +111,85 @@ fn make_nonactivating(window: &NSWindow) -> bool {
         }
     }
     true
+}
+
+/// 窗口原来的类（KVO 改写过 `-class`，返回的是原来的类，不是动态生成的 `NSKVONotifying_` 子类）。
+/// 换类前记下它，窗口销毁前用 [`swap_class`] 换回去。
+pub(super) fn original_class(window: &NSWindow) -> &'static AnyClass {
+    // SAFETY: `-class` 没有参数，返回类对象。
+    unsafe { msg_send![window, class] }
+}
+
+/// 把窗口实例的类换成 `to`（实例布局必须相同）。返回是否换成了。
+///
+/// winit 创建窗口时用 KVO 观察它的 `effectiveAppearance`（主题变化），KVO 会把实例的类换成动态生成的
+/// `NSKVONotifying_WinitWindow`。直接换类会让这条登记失效：窗口销毁时 winit 移除观察者，
+/// 系统抛出 `NSRangeException`（“is not registered as an observer”）导致崩溃，主题变化也收不到了。
+/// 所以换类前先移除观察者，换类后按 winit 的参数重新登记（KVO 会基于新类再生成动态子类）。
+///
+/// 系统自己也会观察窗口（例如视图经由 `NSKVOForwarder` 观察 `_windowLayerContext`），这些登记没法移除再加回，
+/// 是按原来的类记下的：换类后系统移除它们时同样会抛异常（日志里 “Cannot remove an observer … for the key path
+/// "_windowLayerContext"”，异常展开时提前释放了 autorelease pool，随后报 “This pool has already been drained”）。
+/// 所以会销毁的窗口（贴图）在销毁前要换回 [`original_class`]。
+pub(super) fn swap_class(window: &NSWindow, to: &AnyClass) -> bool {
+    let observer = appearance_observer(window);
+    let key = NSString::from_str(APPEARANCE_KEY);
+    if let Some(observer) = &observer {
+        // SAFETY: `appearance_observer` 确认了 winit 的观察者已登记，移除不会抛异常。
+        unsafe {
+            let _: () = msg_send![window, removeObserver: &**observer, forKeyPath: &*key];
+        }
+    }
+    let from = window.class();
+    // 换类要求两个类的实例布局一致：都只有 NSWindow 的实例变量。
+    let swapped = from.instance_size() == to.instance_size();
+    if swapped {
+        // SAFETY: 实例大小相同，WinitWindow 与这里的 NSPanel 子类都没有自己的实例变量；
+        // 子类覆盖的方法保留了 WinitWindow 依赖的行为（可以成为键盘窗口）。
+        unsafe { AnyObject::set_class(window, to) };
+    } else {
+        tracing::warn!(
+            "无法把窗口换成 NSPanel：{} 实例大小 {}，{} 实例大小 {}",
+            from.name().to_string_lossy(),
+            from.instance_size(),
+            to.name().to_string_lossy(),
+            to.instance_size()
+        );
+    }
+    if let Some(observer) = &observer {
+        // SAFETY: 与 winit 登记时的参数相同（New | Old，context 为空）；winit 在窗口销毁时移除它。
+        unsafe {
+            let _: () = msg_send![
+                window,
+                addObserver: &**observer,
+                forKeyPath: &*key,
+                options: KVO_OPTIONS_NEW_OLD,
+                context: std::ptr::null_mut::<std::ffi::c_void>()
+            ];
+        }
+    }
+    swapped
+}
+
+/// winit 观察的键（见 [`make_nonactivating`]）。
+const APPEARANCE_KEY: &str = "effectiveAppearance";
+/// `NSKeyValueObservingOptionNew | NSKeyValueObservingOptionOld`，与 winit 登记时的参数相同。
+const KVO_OPTIONS_NEW_OLD: usize = 0x01 | 0x02;
+
+/// winit 登记的 `effectiveAppearance` 观察者（就是窗口的 delegate）。
+/// 只有窗口确实处在 KVO 观察之下（实例的类是 `NSKVONotifying_` 开头的动态子类）时才返回，
+/// 避免移除一个没有登记的观察者而抛异常。
+fn appearance_observer(window: &NSWindow) -> Option<Retained<AnyObject>> {
+    // SAFETY: `object_getClass` 返回实例真正的类（`-class` 会被 KVO 改写成原来的类）。
+    let class = unsafe { objc2::ffi::object_getClass((window as *const NSWindow).cast()) };
+    // SAFETY: 类指针来自运行时，不为空时有效。
+    let observed = unsafe { class.as_ref() }
+        .is_some_and(|class| class.name().to_bytes().starts_with(b"NSKVONotifying_"));
+    if !observed {
+        return None;
+    }
+    // SAFETY: `delegate` 返回窗口的 delegate（winit 的 `WinitWindowDelegate`）或 nil。
+    unsafe { msg_send![window, delegate] }
 }
 
 /// 窗口圆角半径，与 UI 中背景的圆角一致。
@@ -144,7 +213,10 @@ pub fn attach(handle: &impl HasWindowHandle, start_hidden: bool) -> Result<()> {
     // SAFETY: eframe 保证句柄在窗口存活期间有效，NSView 指针来自 winit。
     let view: &NSView = unsafe { raw.ns_view.cast().as_ref() };
     let window = view.window().context("视图不在窗口中")?;
-    NONACTIVATING.store(make_nonactivating(&window), Ordering::Relaxed);
+    NONACTIVATING.store(
+        make_nonactivating(&window, HubPanel::class()),
+        Ordering::Relaxed,
+    );
     // 出现在所有桌面（含全屏应用所在的桌面）之上，像系统面板一样。
     window.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
@@ -263,9 +335,45 @@ pub fn is_active() -> bool {
     with_panel(|_, window| window.isVisible() && window.isKeyWindow()).unwrap_or(false)
 }
 
-/// 面板窗口是否可见（不论是否有焦点）。
+/// 面板窗口是否可见（不论是否有焦点）。为截屏、贴图临时摆出的透明窗口不算（见 [`wake`]）。
 pub fn is_visible() -> bool {
-    with_panel(|_, window| window.isVisible()).unwrap_or(false)
+    !is_waking() && with_panel(|_, window| window.isVisible()).unwrap_or(false)
+}
+
+/// 面板是否正被 [`wake`] 临时摆在屏幕上。
+static WAKING: AtomicBool = AtomicBool::new(false);
+
+/// 让 eframe 运行一次界面：面板窗口隐藏时，eframe 只调用 `logic` 而不运行界面，
+/// 也就不能创建新窗口（截屏遮罩、贴图都是 egui 的子视口，只能在界面里创建）。
+/// 这里把面板以全透明、不接收鼠标的方式摆到屏幕上，下一帧照常运行界面；
+/// 新窗口创建后由 [`finish_wake`] 收起（子视口可见时，即使面板隐藏 eframe 也会运行界面）。
+pub fn wake() {
+    with_panel(|_, window| {
+        if window.isVisible() {
+            return;
+        }
+        window.setAlphaValue(0.0);
+        window.setIgnoresMouseEvents(true);
+        window.orderFrontRegardless();
+        WAKING.store(true, Ordering::Relaxed);
+    });
+}
+
+/// 面板是否正被 [`wake`] 临时摆在屏幕上（这时不用绘制面板内容）。
+pub fn is_waking() -> bool {
+    WAKING.load(Ordering::Relaxed)
+}
+
+/// 收起 [`wake`] 摆出的透明窗口，恢复原来的状态。
+pub fn finish_wake() {
+    if !WAKING.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    with_panel(|_, window| {
+        window.orderOut(None);
+        window.setAlphaValue(1.0);
+        window.setIgnoresMouseEvents(false);
+    });
 }
 
 /// 从标题栏空白处开始拖动面板。返回 false 表示面板尚未绑定，由调用方交给 winit。
@@ -276,40 +384,42 @@ pub fn is_visible() -> bool {
 /// 这里只在当前事件确实是本窗口的左键按下 / 拖动时直接使用，否则按鼠标的实际位置构造一个按下事件；
 /// 鼠标已经松开（只是单击）时不拖动。
 pub fn start_drag() -> bool {
-    with_panel(|mtm, window| {
-        let current = NSApplication::sharedApplication(mtm).currentEvent();
-        let usable = current.as_deref().filter(|event| {
-            let kind = event.r#type();
-            (kind == NSEventType::LeftMouseDown || kind == NSEventType::LeftMouseDragged)
-                && event.windowNumber() == window.windowNumber()
-        });
-        if let Some(event) = usable {
-            window.performWindowDragWithEvent(event);
-            return;
-        }
-        tracing::debug!(
-            "拖动面板：当前事件 {:?} 不是本窗口的鼠标按下，按鼠标位置重建",
-            current.as_ref().map(|event| event.r#type())
-        );
-        if NSEvent::pressedMouseButtons() & 1 == 0 {
-            return;
-        }
-        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-            NSEventType::LeftMouseDown,
-            window.mouseLocationOutsideOfEventStream(),
-            NSEventModifierFlags::empty(),
-            current.map_or(0.0, |event| event.timestamp()),
-            window.windowNumber(),
-            None,
-            0,
-            1,
-            1.0,
-        );
-        if let Some(event) = event {
-            window.performWindowDragWithEvent(&event);
-        }
-    })
-    .is_some()
+    with_panel(drag).is_some()
+}
+
+/// 按住鼠标拖动窗口（面板与贴图窗口共用，做法见 [`start_drag`]）。
+pub(super) fn drag(mtm: MainThreadMarker, window: &NSWindow) {
+    let current = NSApplication::sharedApplication(mtm).currentEvent();
+    let usable = current.as_deref().filter(|event| {
+        let kind = event.r#type();
+        (kind == NSEventType::LeftMouseDown || kind == NSEventType::LeftMouseDragged)
+            && event.windowNumber() == window.windowNumber()
+    });
+    if let Some(event) = usable {
+        window.performWindowDragWithEvent(event);
+        return;
+    }
+    tracing::debug!(
+        "拖动窗口：当前事件 {:?} 不是本窗口的鼠标按下，按鼠标位置重建",
+        current.as_ref().map(|event| event.r#type())
+    );
+    if NSEvent::pressedMouseButtons() & 1 == 0 {
+        return;
+    }
+    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        NSEventType::LeftMouseDown,
+        window.mouseLocationOutsideOfEventStream(),
+        NSEventModifierFlags::empty(),
+        current.map_or(0.0, |event| event.timestamp()),
+        window.windowNumber(),
+        None,
+        0,
+        1,
+        1.0,
+    );
+    if let Some(event) = event {
+        window.performWindowDragWithEvent(&event);
+    }
 }
 
 /// 显示面板并让它成为键盘窗口（不激活本应用）。`size` 是内容区大小（逻辑像素）：同一个窗口既用作剪贴板面板，
@@ -317,7 +427,12 @@ pub fn start_drag() -> bool {
 /// 窗口原本隐藏、或者大小有变化时，按 `anchor` 重新定位。
 pub fn show(anchor: Anchor, size: [f32; 2]) -> bool {
     with_panel(|mtm, window| {
-        let visible = window.isVisible();
+        // 正被临时摆在屏幕上（见 `wake`）的透明窗口按隐藏处理，重新定位。
+        let waking = WAKING.swap(false, Ordering::Relaxed);
+        if waking {
+            window.setIgnoresMouseEvents(false);
+        }
+        let visible = window.isVisible() && !waking;
         // 面板不激活本应用，前台应用就是粘贴目标；面板固定显示时用户可能已经换了应用，每次都更新。
         if let Some(app) = workspace::frontmost_other_app() {
             PREVIOUS_APP.with(|prev| *prev.borrow_mut() = Some(app));
@@ -366,6 +481,10 @@ fn resize(window: &NSWindow, size: [f32; 2]) -> bool {
 pub fn hide(restore_focus: bool) {
     with_panel(|mtm, window| {
         window.orderOut(None);
+        if WAKING.swap(false, Ordering::Relaxed) {
+            window.setAlphaValue(1.0);
+            window.setIgnoresMouseEvents(false);
+        }
         PANEL_KEY.store(false, Ordering::Relaxed);
         let previous = PREVIOUS_APP.with(|prev| prev.borrow_mut().take());
         let app = NSApplication::sharedApplication(mtm);
@@ -389,13 +508,18 @@ pub fn hide(restore_focus: bool) {
 
 /// 在鼠标位置弹出原生右键菜单，菜单关闭后才返回；返回是否选中了菜单项。
 pub fn popup_menu(menu: &tray_icon::menu::Menu) -> bool {
-    use tray_icon::menu::ContextMenu as _;
     // 先取出视图再弹出：菜单跟踪期间会继续绘制界面，不能一直借用着 PANEL。
     let Some(view) = with_panel(|_, window| window.contentView()).flatten() else {
         return false;
     };
-    // SAFETY: view 是面板窗口的内容视图，这里持有它的引用，菜单弹出期间一直有效。
-    unsafe { menu.show_context_menu_for_nsview(Retained::as_ptr(&view).cast(), None) }
+    popup_menu_in(&view, menu)
+}
+
+/// 在鼠标位置、以 `view` 为依托弹出菜单，菜单关闭后才返回。
+pub(super) fn popup_menu_in(view: &NSView, menu: &tray_icon::menu::Menu) -> bool {
+    use tray_icon::menu::ContextMenu as _;
+    // SAFETY: 调用方持有 view 的引用，菜单弹出期间一直有效。
+    unsafe { menu.show_context_menu_for_nsview((view as *const NSView).cast(), None) }
 }
 
 /// 之前的前台应用名称（面板标题里显示“粘贴到 xxx”）。

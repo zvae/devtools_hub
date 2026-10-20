@@ -1,7 +1,8 @@
-//! 平台能力：剪贴板、来源应用、模拟粘贴、窗口控制、应用图标、开机启动、安装更新。
+//! 平台能力：剪贴板、来源应用、模拟粘贴、窗口控制、应用图标、开机启动、安装更新、截屏与贴图窗口。
 //!
 //! macOS 与 Windows 各有一套实现，对外提供相同的模块和函数：
-//! `pasteboard`、`workspace`、`keyboard`、`panel`、`icons`、`login_item`、`updater`。
+//! `pasteboard`、`workspace`、`keyboard`、`panel`、`icons`、`login_item`、`updater`、
+//! `screen`（截屏、显示器与窗口位置）、`floating`（截屏遮罩与贴图窗口）。
 //! Windows 另有自绘的右键菜单 `menu`，排布与绘制在与平台无关的 `drawn_menu` 里。
 
 pub mod drawn_menu;
@@ -39,6 +40,9 @@ pub const TRAY_NAME: &str = if cfg!(target_os = "macos") {
 
 /// 自动粘贴是否需要用户授予系统权限（macOS 的“辅助功能”；Windows 不需要）。
 pub const PASTE_NEEDS_PERMISSION: bool = cfg!(target_os = "macos");
+
+/// 截屏是否需要用户授予系统权限（macOS 的“屏幕录制”；Windows 不需要）。
+pub const SCREEN_CAPTURE_NEEDS_PERMISSION: bool = cfg!(target_os = "macos");
 
 /// 是否支持通用剪贴板（从 iPhone / iPad 同步内容；Windows 没有）。
 pub const HAS_UNIVERSAL_CLIPBOARD: bool = cfg!(target_os = "macos");
