@@ -375,7 +375,7 @@ impl SnipSession {
             Some(BarAction::Output(output)) => Some(output),
             _ => None,
         };
-        let (escape, copy, pin, save) = ui.input_mut(|i| {
+        let (escape, copy, pin, save, ocr) = ui.input_mut(|i| {
             let copy_event = i
                 .events
                 .iter()
@@ -387,6 +387,7 @@ impl SnipSession {
                     || i.consume_key(Modifiers::NONE, Key::Enter),
                 i.consume_key(Modifiers::COMMAND, Key::T),
                 i.consume_key(Modifiers::COMMAND, Key::S),
+                i.consume_key(Modifiers::COMMAND, Key::E),
             )
         });
         if escape {
@@ -397,6 +398,8 @@ impl SnipSession {
             output = Some(Output::Pin);
         } else if save {
             output = Some(Output::Save);
+        } else if ocr {
+            output = Some(Output::Ocr);
         }
         if let Some(output) = output {
             return self.finish_scroll(output);

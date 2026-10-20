@@ -1,4 +1,4 @@
-//! 离屏渲染测试：用示例数据渲染面板、设置页、鼠标中键快捷面板和 JSON 编辑器，
+//! 离屏渲染测试：用示例数据渲染面板、设置页、鼠标中键快捷面板、JSON 编辑器和提取文字，
 //! 输出 PNG 供人工检查，并验证键盘操作。
 //!
 //! 需要 GPU（wgpu/Metal），默认忽略。手动运行：
@@ -715,6 +715,83 @@ fn snapshot_quick_panel_and_json_editor() {
         save(&mut harness, &format!("json-error-{suffix}"));
 
         // esc 关闭编辑器。
+        harness.key_press(Key::Escape);
+        harness.run_steps(2);
+        assert_eq!(harness.state().page, Page::Panel);
+    }
+}
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_ocr() {
+    use crate::snip::ocr::Line;
+
+    // 1200×700 像素的“截图”：白底上 8 行深色的“文字”，第 3 行右边还有一段（表格的第二列）。
+    let mut image = RgbaImage::from_pixel(1200, 700, Rgba([255, 255, 255, 255]));
+    let mut lines = Vec::new();
+    for row in 0..8u32 {
+        let top = 40 + row * 80;
+        let width = 400 + (row % 3) * 200;
+        for y in top..top + 30 {
+            for x in 40..40 + width {
+                image.put_pixel(x, y, Rgba([50, 50, 56, 255]));
+            }
+        }
+        lines.push(Line {
+            text: format!("第 {} 行识别出的文字 Line {}", row + 1, row + 1),
+            rect: egui::Rect::from_min_size(
+                egui::pos2(40.0, top as f32),
+                egui::vec2(width as f32, 30.0),
+            ),
+        });
+    }
+    lines.push(Line {
+        text: "第二列".into(),
+        rect: egui::Rect::from_min_size(egui::pos2(1000.0, 200.0), egui::vec2(120.0, 30.0)),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        // 正在识别。
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(860.0, 560.0), |app| {
+            app.pasteboard_name = Some(format!("devtools-hub-test-ocr-{}", std::process::id()));
+            app.ocr.set_result(image.clone(), None);
+            app.page = Page::Ocr;
+        });
+        harness.run_steps(3);
+        save(&mut harness, &format!("ocr-running-{suffix}"));
+
+        // 识别完成：左边的图片上画出每一行，右边是合并好的文字（同一行离得远的两段用制表符隔开）。
+        harness
+            .state_mut()
+            .ocr
+            .set_result(image.clone(), Some(lines.clone()));
+        harness.run_steps(3);
+        let text = harness.state().ocr.text().unwrap().to_owned();
+        assert!(text.starts_with("第 1 行识别出的文字 Line 1\n"));
+        assert!(text.contains("第 3 行识别出的文字 Line 3\t第二列\n"));
+        save(&mut harness, &format!("ocr-done-{suffix}"));
+
+        // ⇧⌘C 复制全部。
+        harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().toast.as_ref().map(|t| t.text.as_str()),
+            Some("已复制")
+        );
+        assert_eq!(
+            uti::plain_text(&harness.state().pasteboard().read()).as_deref(),
+            Some(text.as_str())
+        );
+
+        // 没有识别到文字。
+        harness
+            .state_mut()
+            .ocr
+            .set_result(image.clone(), Some(Vec::new()));
+        harness.run_steps(3);
+        save(&mut harness, &format!("ocr-empty-{suffix}"));
+
+        // esc 关闭。
         harness.key_press(Key::Escape);
         harness.run_steps(2);
         assert_eq!(harness.state().page, Page::Panel);

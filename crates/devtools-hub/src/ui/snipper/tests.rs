@@ -582,6 +582,45 @@ fn scroll_capture_stitches_frames_and_copies_long_image() {
 }
 
 #[test]
+fn ocr_button_and_shortcut_extract_text() {
+    // 工具栏上长截图右边的“提取文字”按钮：输出选区的图片。
+    let mut snip = harness();
+    select_area(&mut snip);
+    click(&mut snip, scroll_button() + vec2(30.0, 0.0));
+    let Some(Outcome::Ocr(image)) = snip.state_mut().outcome.take() else {
+        panic!("应该提取文字");
+    };
+    assert_eq!(image.dimensions(), (200, 150));
+
+    // ⌘E 同样提取文字。
+    let mut shortcut = harness();
+    select_area(&mut shortcut);
+    shortcut.key_press_modifiers(Modifiers::COMMAND, Key::E);
+    shortcut.step();
+    assert!(matches!(shortcut.state().outcome, Some(Outcome::Ocr(_))));
+
+    // 长截图中 ⌘E 提取整张长图的文字。
+    let mut scroll = harness();
+    scroll.state_mut().session.frame_source = scrolling_frames;
+    select_area(&mut scroll);
+    click(&mut scroll, scroll_button());
+    wait_for_height(&mut scroll, 400);
+    scroll.key_press_modifiers(Modifiers::COMMAND, Key::E);
+    scroll.step();
+    let Some(Outcome::Ocr(image)) = scroll.state_mut().outcome.take() else {
+        panic!("长截图中 ⌘E 应该提取长图的文字");
+    };
+    assert!(image.height() >= 400, "长图高度 {}", image.height());
+
+    // 编辑贴图时没有提取文字（贴图的右键菜单里有）。
+    let mut edit = harness();
+    edit_pin(&mut edit);
+    edit.key_press_modifiers(Modifiers::COMMAND, Key::E);
+    edit.step();
+    assert!(edit.state().outcome.is_none());
+}
+
+#[test]
 fn scroll_capture_escape_cancels() {
     let mut harness = harness();
     harness.state_mut().session.frame_source = scrolling_frames;

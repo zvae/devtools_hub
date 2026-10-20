@@ -1,5 +1,5 @@
 //! 截屏与贴图在主界面这一侧的流程：响应快捷键和菜单，截屏后显示截屏遮罩（`snipper`），
-//! 处理截屏结果（复制、保存、贴图），维持贴图窗口（`pin`）并执行它们交上来的操作。
+//! 处理截屏结果（复制、保存、贴图、提取文字），维持贴图窗口（`pin`）并执行它们交上来的操作。
 //!
 //! 截屏遮罩和贴图都是 egui 的子视口，只能在主界面的 `ui` 里创建；面板隐藏时 eframe 只调用 `logic`，
 //! 所以创建前先用 `panel::wake` 让下一帧运行界面（见那里的说明）。
@@ -169,8 +169,9 @@ impl HubApp {
         let Some(snipper) = self.snip.take() else {
             return;
         };
-        if matches!(outcome, Outcome::Save(_)) {
+        if matches!(outcome, Outcome::Save(_) | Outcome::Ocr(_)) {
             // 保存对话框要显示在遮罩上面：立即收起遮罩，焦点由保存对话框结束时还回去。
+            // 提取文字的结果显示在主窗口里，同样立即收起遮罩，焦点在主窗口收起时还回去。
             floating::hide_overlay(snipper.title());
         } else {
             // 先把焦点还给原来的应用，遮罩（这时只画静止的截图）再停留一会儿，见 `floating::restore_focus`。
@@ -199,6 +200,7 @@ impl HubApp {
                 let (zoom, top_left) = fit_long_pin(rect);
                 self.create_pin(image, rect.size(), zoom, top_left);
             }
+            Outcome::Ocr(image) => self.open_ocr(Arc::new(image)),
             Outcome::CopyColor(hex) => {
                 let snapshot = devtools_clipboard::Snapshot::from_text(&hex);
                 self.pasteboard().write(&snapshot);
@@ -342,6 +344,7 @@ impl HubApp {
             PinRequest::Copy => self.pin_action(id, PinAction::Copy),
             PinRequest::Save => self.pin_action(id, PinAction::Save),
             PinRequest::Edit => self.pin_action(id, PinAction::Edit),
+            PinRequest::Ocr => self.pin_action(id, PinAction::Ocr),
         }
     }
 
@@ -396,6 +399,10 @@ impl HubApp {
                 }
             }
             PinAction::CloseAll => self.close_pins(),
+            PinAction::Ocr => {
+                let image = self.pins[index].image();
+                self.open_ocr(image);
+            }
             PinAction::Edit => {
                 let pin = &self.pins[index];
                 if let Some(rect) = pin.screen_rect() {

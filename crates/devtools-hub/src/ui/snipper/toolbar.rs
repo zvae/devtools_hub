@@ -1,7 +1,8 @@
 //! 截屏遮罩的工具栏（参照 Snipaste）：
 //!
-//! - 主工具栏：标注工具（矩形 / 椭圆、箭头、画笔、记号笔、马赛克、文字、橡皮擦）｜撤销、重做｜长截图｜退出、贴图、保存、复制；
-//!   编辑贴图时没有长截图；滚动截图时只有退出、贴图、保存、复制；
+//! - 主工具栏：标注工具（矩形 / 椭圆、箭头、画笔、记号笔、马赛克、文字、橡皮擦）｜撤销、重做｜长截图、提取文字｜
+//!   退出、贴图、保存、复制；编辑贴图时没有长截图和提取文字（贴图的右键菜单里有提取文字）；
+//!   滚动截图时只有提取文字和输出按钮；
 //! - 属性栏：选中标注工具后出现在主工具栏下方（主工具栏在选区上方时出现在它上方），
 //!   形状工具可以切换矩形和椭圆，其余是三档粗细（文字是字号）和色板。
 //!
@@ -97,7 +98,7 @@ enum Item {
     Separator,
 }
 
-/// 编辑贴图时的主工具栏（也是不支持滚动截图的平台上普通截屏的工具栏）。
+/// 编辑贴图时的主工具栏。
 const EDIT_ITEMS: [Item; 15] = [
     Item::Tool(Tool::Shape),
     Item::Tool(Tool::Arrow),
@@ -116,7 +117,7 @@ const EDIT_ITEMS: [Item; 15] = [
     Item::Output(Output::Copy),
 ];
 
-const SNIP_ITEMS: [Item; 17] = [
+const SNIP_ITEMS: [Item; 18] = [
     Item::Tool(Tool::Shape),
     Item::Tool(Tool::Arrow),
     Item::Tool(Tool::Pen),
@@ -129,6 +130,7 @@ const SNIP_ITEMS: [Item; 17] = [
     Item::Redo,
     Item::Separator,
     Item::Scroll,
+    Item::Output(Output::Ocr),
     Item::Separator,
     Item::Output(Output::Cancel),
     Item::Output(Output::Pin),
@@ -136,7 +138,30 @@ const SNIP_ITEMS: [Item; 17] = [
     Item::Output(Output::Copy),
 ];
 
-const SCROLL_ITEMS: [Item; 4] = [
+/// 不支持滚动截图的平台上普通截屏的工具栏。
+const SNIP_NO_SCROLL_ITEMS: [Item; 17] = [
+    Item::Tool(Tool::Shape),
+    Item::Tool(Tool::Arrow),
+    Item::Tool(Tool::Pen),
+    Item::Tool(Tool::Marker),
+    Item::Tool(Tool::Mosaic),
+    Item::Tool(Tool::Text),
+    Item::Tool(Tool::Eraser),
+    Item::Separator,
+    Item::Undo,
+    Item::Redo,
+    Item::Separator,
+    Item::Output(Output::Ocr),
+    Item::Separator,
+    Item::Output(Output::Cancel),
+    Item::Output(Output::Pin),
+    Item::Output(Output::Save),
+    Item::Output(Output::Copy),
+];
+
+const SCROLL_ITEMS: [Item; 6] = [
+    Item::Output(Output::Ocr),
+    Item::Separator,
     Item::Output(Output::Cancel),
     Item::Output(Output::Pin),
     Item::Output(Output::Save),
@@ -147,7 +172,8 @@ const SCROLL_ITEMS: [Item; 4] = [
 fn items(mode: Mode) -> &'static [Item] {
     match mode {
         Mode::Snip if platform::SCROLL_CAPTURE_SUPPORTED => &SNIP_ITEMS,
-        Mode::Snip | Mode::Edit => &EDIT_ITEMS,
+        Mode::Snip => &SNIP_NO_SCROLL_ITEMS,
+        Mode::Edit => &EDIT_ITEMS,
         Mode::Scroll => &SCROLL_ITEMS,
     }
 }
@@ -376,6 +402,7 @@ fn output_icon(output: Output) -> Icon {
         Output::Pin => Icon::Pin,
         Output::Save => Icon::Save,
         Output::Copy => Icon::Copy,
+        Output::Ocr => Icon::Ocr,
     }
 }
 
@@ -387,6 +414,8 @@ fn output_hint(output: Output, mode: Mode) -> String {
         Output::Copy if mode == Mode::Scroll => {
             format!("完成并复制 {} / {}", command("C"), keys::RETURN)
         }
+        Output::Ocr if mode == Mode::Scroll => format!("完成并提取文字 {}", command("E")),
+        Output::Ocr => format!("提取文字 {}", command("E")),
         Output::Cancel if editing => format!("放弃修改 {}", keys::ESCAPE),
         Output::Cancel => format!("退出 {}", keys::ESCAPE),
         Output::Pin if editing => format!("完成编辑 {}", command("T")),
@@ -555,9 +584,9 @@ mod tests {
         let narrow = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0));
         let tiny = Rect::from_min_max(pos2(10.0, 10.0), pos2(50.0, 20.0));
         assert_eq!(layout(tiny, narrow, None, Mode::Snip).main.left(), 4.0);
-        // 滚动截图的工具栏只有四个输出按钮。
+        // 滚动截图的工具栏只有提取文字和四个输出按钮。
         let scroll = layout(selection, screen, None, Mode::Scroll);
-        assert_eq!(scroll.main.width(), BUTTON * 4.0 + PAD * 2.0);
+        assert_eq!(scroll.main.width(), BUTTON * 5.0 + SEPARATOR + PAD * 2.0);
         assert_eq!(scroll.main.right(), selection.right());
     }
 }

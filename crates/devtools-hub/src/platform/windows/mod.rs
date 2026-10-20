@@ -1,5 +1,5 @@
 //! Windows 平台能力：剪贴板、来源程序、模拟 Ctrl+V / Ctrl+C、鼠标中键监听、窗口控制、右键菜单、程序图标、开机启动、安装更新、
-//! 截屏与贴图窗口。
+//! 截屏、贴图窗口与文字识别。
 //!
 //! 与 `platform/macos` 提供相同的模块和函数；剪贴板格式与 UTI 的转换在
 //! `devtools_clipboard::windows_formats` 中，这里只负责调用 Win32 API。
@@ -10,6 +10,9 @@ pub mod keyboard;
 pub mod login_item;
 pub mod menu;
 pub mod mouse;
+// windows crate 的 WinRT 部分（windows-future）只能在 Windows 上编译，在别的平台上类型检查时跳过。
+#[cfg(windows)]
+pub mod ocr;
 pub mod panel;
 pub mod pasteboard;
 pub mod screen;

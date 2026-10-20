@@ -6,9 +6,10 @@
 //! - 移动鼠标时自动框出鼠标下的窗口，单击选中它（桌面上没有窗口时选中整个屏幕），拖动则框选任意区域；
 //! - 选区可以拖动、拖八个控制点调整大小；方向键移动 1 像素，⇧+方向键调整宽高；
 //! - 放大镜显示鼠标处的像素与颜色，按 C 复制颜色值，按 ⇧ 切换 RGB / HEX（选好区域后鼠标在选区内也显示）；
-//! - 工具栏（`toolbar`）：矩形 / 椭圆、箭头、画笔、记号笔、马赛克、文字、橡皮擦，撤销重做，长截图，退出、贴图、保存、复制；
+//! - 工具栏（`toolbar`）：矩形 / 椭圆、箭头、画笔、记号笔、马赛克、文字、橡皮擦，撤销重做，长截图、提取文字，
+//!   退出、贴图、保存、复制；
 //! - 长截图（`scroll`）：选区内鼠标穿透，用户滚动下面的窗口，后台截取选区并拼成长图；
-//! - 双击选区 / ↩ / ⌘C 复制，⌘T 贴图，⌘S 保存，⌘Z / ⇧⌘Z 撤销重做，右键先取消工具、再取消选区、最后退出，esc 退出。
+//! - 双击选区 / ↩ / ⌘C 复制，⌘T 贴图，⌘S 保存，⌘E 提取文字，⌘Z / ⇧⌘Z 撤销重做，右键先取消工具、再取消选区、最后退出，esc 退出。
 //!
 //! 编辑贴图（贴图右键菜单“编辑标注”或空格）：同样打开截屏遮罩，选区固定为贴图的范围、用贴图的原图作底，
 //! 输出的图片写回这张贴图（与 Snipaste 贴图的标注工具条一样）。
@@ -86,6 +87,8 @@ pub enum Outcome {
     },
     /// 复制放大镜下的颜色值（`#RRGGBB`）。
     CopyColor(String),
+    /// 提取图片里的文字（由主界面在后台识别，结果显示在主窗口里）。
+    Ocr(RgbaImage),
 }
 
 /// 输出方式（工具栏右侧的按钮与快捷键）。
@@ -95,6 +98,8 @@ pub enum Output {
     Pin,
     Save,
     Copy,
+    /// 提取文字。
+    Ocr,
 }
 
 /// 正在进行的拖动（像素坐标）。
@@ -233,8 +238,8 @@ impl Snipper {
     /// 维持截屏遮罩窗口，返回截屏结果（还在截屏时是 `Continue`）。必须在主界面的 `ui` 里每帧调用，
     /// 直到返回的不是 `Continue`；之后不再调用，egui 在下一帧结束时关闭窗口。
     ///
-    /// 结果是保存时例外：保存对话框要显示在遮罩上面，遮罩立即收起、不再需要，这一帧就不维持，
-    /// egui 在这一帧结束时关闭窗口。
+    /// 结果是保存或提取文字时例外：保存对话框、识别结果的窗口要显示在遮罩上面，遮罩立即收起、不再需要，
+    /// 这一帧就不维持，egui 在这一帧结束时关闭窗口。
     ///
     /// 其余结果的这一帧也要维持窗口：哪一帧没有调用 `show_viewport_deferred`，egui 就在这一帧结束时销毁窗口，
     /// 之后再调用（截屏结束后遮罩还要停留一会儿，见 `closing_snip_ui`）会新建一个窗口。新窗口没有经过
@@ -259,7 +264,7 @@ impl Snipper {
             }
             (session.builder(), outcome)
         };
-        if matches!(outcome, Outcome::Save(_)) {
+        if matches!(outcome, Outcome::Save(_) | Outcome::Ocr(_)) {
             return outcome;
         }
         let session = self.session.clone();
@@ -631,7 +636,7 @@ impl SnipSession {
         pick_color: bool,
     ) -> Outcome {
         let bounds = self.capture.bounds();
-        let (escape, enter, copy, color, pin, save, redo, undo, arrows) = ui.input_mut(|i| {
+        let (escape, enter, copy, color, pin, save, ocr, redo, undo, arrows) = ui.input_mut(|i| {
             let copy_event = i.events.iter().any(|event| matches!(event, Event::Copy));
             let arrows = [
                 (Key::ArrowLeft, vec2(-1.0, 0.0)),
@@ -659,6 +664,7 @@ impl SnipSession {
                 i.consume_key(Modifiers::NONE, Key::C),
                 i.consume_key(Modifiers::COMMAND, Key::T),
                 i.consume_key(Modifiers::COMMAND, Key::S),
+                i.consume_key(Modifiers::COMMAND, Key::E),
                 redo,
                 i.consume_key(Modifiers::COMMAND, Key::Z),
                 arrows,
@@ -686,6 +692,10 @@ impl SnipSession {
         }
         if save {
             return self.output(ctx, view, Output::Save, pointer);
+        }
+        // 编辑贴图的工具栏上没有提取文字（贴图的右键菜单里有）。
+        if ocr && self.editing.is_none() {
+            return self.output(ctx, view, Output::Ocr, pointer);
         }
         if color && pick_color {
             if let Some(rgba) = pointer.and_then(|p| self.capture.pixel(p)) {
@@ -1044,6 +1054,7 @@ impl SnipSession {
             Output::Cancel => Outcome::Cancel,
             Output::Copy => Outcome::Copy(image),
             Output::Save => Outcome::Save(image),
+            Output::Ocr => Outcome::Ocr(image),
             Output::Pin => Outcome::Pin {
                 image,
                 rect: self.capture.logical_rect(rect),

@@ -1,6 +1,6 @@
-//! egui 界面：剪贴板面板、设置页、鼠标中键快捷面板与 JSON 编辑器，以及截屏遮罩和贴图窗口。
+//! egui 界面：剪贴板面板、设置页、鼠标中键快捷面板、JSON 编辑器与提取文字，以及截屏遮罩和贴图窗口。
 //!
-//! 四个页面共用同一个窗口：切换页面时由平台层调整窗口大小和位置。
+//! 这几个页面共用同一个窗口：切换页面时由平台层调整窗口大小和位置。
 //! 截屏遮罩（`snipper`）和贴图（`pin`）是各自独立的窗口（egui 的子视口），流程在 `screenshot` 里。
 
 mod code_text;
@@ -11,6 +11,7 @@ mod json_editor;
 mod liquid_glass;
 mod menu;
 mod native_menu;
+mod ocr;
 mod panel;
 mod pin;
 mod quick_panel;
@@ -45,6 +46,7 @@ use code_text::CodeStyles;
 use json_editor::JsonEditorView;
 use liquid_glass::LiquidGlass;
 use native_menu::NativeMenu;
+use ocr::OcrView;
 use panel::PanelView;
 use pin::{Pin, PinAction};
 use quick_panel::QuickPanelView;
@@ -62,6 +64,8 @@ enum Page {
     /// 鼠标中键弹出的快捷面板。
     QuickActions,
     JsonEditor,
+    /// 提取文字（截屏、贴图的识别结果）。
+    Ocr,
 }
 
 /// 粘贴方式。
@@ -115,11 +119,12 @@ pub struct HubApp {
     hotkey_errors: [Option<String>; 3],
     tray: Option<Tray>,
     page: Page,
-    // 四个页面各自的界面状态。
+    // 各个页面的界面状态。
     panel: PanelView,
     settings_view: SettingsView,
     quick: QuickPanelView,
     json: JsonEditorView,
+    ocr: OcrView,
     /// 鼠标中键监听线程是否已启动（只启动一次，之后由设置控制是否拦截）。
     middle_click_started: bool,
     /// 图片条目的缩略图纹理缓存。
@@ -244,6 +249,7 @@ impl HubApp {
             settings_view: SettingsView::default(),
             quick: QuickPanelView::default(),
             json: JsonEditorView::default(),
+            ocr: OcrView::default(),
             middle_click_started: false,
             textures: Textures::default(),
             code: CodeStyles::default(),
@@ -301,6 +307,7 @@ impl HubApp {
                 AppEvent::PinClipboard => self.pin_clipboard(),
                 AppEvent::ClosePins => self.close_pins(),
                 AppEvent::Pin(id, request) => self.pin_request(id, request),
+                AppEvent::OcrDone => self.ocr.poll(),
             }
         }
         let revision = self.shared.revision.load(Ordering::Relaxed);
@@ -324,13 +331,14 @@ impl HubApp {
     }
 
     /// 隐藏面板，并记住用户调整过的窗口大小（PasteNow 存在 `float-panel-size` 偏好里）。
-    /// 剪贴板面板与 JSON 编辑器分别记录；快捷面板的大小是固定的。
+    /// 剪贴板面板、JSON 编辑器与提取文字分别记录；快捷面板的大小是固定的。
     fn hide_panel(&mut self, restore_focus: bool) {
         if let Some(rect) = self.ctx.input(|i| i.viewport().inner_rect) {
             let size = [rect.width().round(), rect.height().round()];
             let saved = match self.page {
                 Page::Panel | Page::Settings => Some(&mut self.settings.window_size),
                 Page::JsonEditor => Some(&mut self.settings.json_editor_size),
+                Page::Ocr => Some(&mut self.settings.ocr_size),
                 Page::QuickActions => None,
             };
             if let Some(saved) = saved {
@@ -567,6 +575,7 @@ impl HubApp {
             // 快捷面板与 uTools 一样，点到别处就收起。
             Page::QuickActions => true,
             Page::JsonEditor => self.settings.hide_on_blur && !self.json.pinned,
+            Page::Ocr => self.settings.hide_on_blur && !self.ocr.pinned,
         };
         if lost_focus && auto_hide && native_panel::is_visible() {
             // 用户点击了别的应用：只隐藏，不抢回焦点。
@@ -585,11 +594,11 @@ impl HubApp {
             self.toast = None;
             return;
         }
-        // JSON 编辑器底部有两行工具栏，提示放在它上面。
-        let bottom = if self.page == Page::JsonEditor {
-            -96.0
-        } else {
-            -48.0
+        // JSON 编辑器底部有两行工具栏、提取文字有一行，提示放在它们上面。
+        let bottom = match self.page {
+            Page::JsonEditor => -96.0,
+            Page::Ocr => -64.0,
+            _ => -48.0,
         };
         egui::Area::new(egui::Id::new("toast"))
             .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, bottom))
@@ -664,7 +673,7 @@ impl HubApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let palette = self.palette(ui.ctx());
         let inner_margin = match self.page {
-            Page::Panel | Page::JsonEditor => egui::Margin::ZERO,
+            Page::Panel | Page::JsonEditor | Page::Ocr => egui::Margin::ZERO,
             Page::Settings => egui::Margin::same(style::PAD),
             Page::QuickActions => egui::Margin::same(quick_panel::MARGIN as i8),
         };
@@ -688,6 +697,7 @@ impl HubApp {
                 Page::Settings => self.settings_ui(ui),
                 Page::QuickActions => self.quick_ui(ui),
                 Page::JsonEditor => self.json_editor_ui(ui),
+                Page::Ocr => self.ocr_ui(ui),
             });
         let ctx = self.ctx.clone();
         self.toast_ui(&ctx);
