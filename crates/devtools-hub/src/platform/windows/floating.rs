@@ -14,17 +14,20 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use windows_sys::core::BOOL;
-use windows_sys::Win32::Foundation::{HWND, LPARAM};
-use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_TRANSITIONS_FORCEDISABLED,
+};
+use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetSaveFileNameW, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumThreadWindows, GetForegroundWindow, GetWindowTextW, IsWindow, SetForegroundWindow,
-    SetWindowPos, ShowWindow, ShowWindowAsync, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_HIDE,
+    EnumThreadWindows, GetClientRect, GetForegroundWindow, GetWindowRect, GetWindowTextW, IsWindow,
+    SetForegroundWindow, SetWindowPos, ShowWindow, ShowWindowAsync, HWND_TOPMOST, SWP_NOACTIVATE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
 };
 
 use super::{panel, wide, workspace};
@@ -71,6 +74,84 @@ pub(crate) fn window(title: &str) -> HWND {
     search.found
 }
 
+/// 遮罩窗口创建时是否隐藏（见 [`show_overlay`]）。
+///
+/// Windows 上遮罩是不透明窗口（wgpu 的透明窗口不稳定）：一创建就显示的话，第一帧画出来之前是一块白色，
+/// 而且 winit 按创建时的缩放换算逻辑尺寸，窗口只有屏幕的一部分大；`begin_overlay` 铺满屏幕后，
+/// 第一帧还按旧尺寸画，其余部分是黑的（录屏里截屏开始时闪一下）。所以先隐藏着创建，
+/// 由主界面摆好位置、用 DWM 遮住（cloak）后再显示，按正确尺寸画出一帧后才去掉遮挡（[`reveal_overlay`]）。
+pub const OVERLAY_STARTS_HIDDEN: bool = true;
+
+/// 主界面调用：把隐藏着创建的遮罩摆到 `frame`（铺满显示器）、遮住后显示出来，eframe 随后运行遮罩的界面。
+/// 返回是否找到了窗口（窗口还没创建时下一帧再试）。
+pub fn show_overlay(title: &str, frame: [f64; 4]) -> bool {
+    let hwnd = window(title);
+    if hwnd.is_null() {
+        return false;
+    }
+    disable_transitions(hwnd);
+    set_cloaked(hwnd, true);
+    // SAFETY: hwnd 是本线程的窗口。
+    unsafe { place_overlay(hwnd, frame, SWP_SHOWWINDOW | SWP_NOACTIVATE) };
+    true
+}
+
+/// 遮罩按正确尺寸画出第一帧后调用：去掉 [`show_overlay`] 加的遮挡。
+pub fn reveal_overlay(title: &str) {
+    let hwnd = window(title);
+    if !hwnd.is_null() {
+        set_cloaked(hwnd, false);
+    }
+}
+
+/// 用 DWM 遮住 / 露出窗口：遮住时窗口照常“可见”、照常绘制，只是不显示在屏幕上。
+fn set_cloaked(hwnd: HWND, cloaked: bool) {
+    let value: BOOL = cloaked.into();
+    // SAFETY: hwnd 是本线程的顶层窗口；属性值是 4 字节的 BOOL。
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK as u32,
+            (&value as *const BOOL).cast(),
+            size_of::<BOOL>() as u32,
+        );
+    }
+}
+
+/// 按物理像素把遮罩的客户区摆到 `frame`，并置顶。
+///
+/// winit 的无边框窗口保留了部分边框样式，客户区不一定与窗口矩形重合（录屏里遮罩收起时整个画面错开了约 1 像素）：
+/// 先摆好窗口，再按客户区与目标的偏差修正一次。
+///
+/// SAFETY: hwnd 是本线程的窗口。
+unsafe fn place_overlay(hwnd: HWND, frame: [f64; 4], flags: u32) {
+    let [x, y, width, height] = frame.map(|v| v as i32);
+    SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, flags);
+    let mut window: RECT = zeroed();
+    let mut client: RECT = zeroed();
+    let mut origin = POINT { x: 0, y: 0 };
+    if GetWindowRect(hwnd, &mut window) == 0
+        || GetClientRect(hwnd, &mut client) == 0
+        || ClientToScreen(hwnd, &mut origin) == 0
+    {
+        return;
+    }
+    let (left, top) = (origin.x - window.left, origin.y - window.top);
+    let extra_width = (window.right - window.left) - client.right;
+    let extra_height = (window.bottom - window.top) - client.bottom;
+    if left != 0 || top != 0 || extra_width != 0 || extra_height != 0 {
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x - left,
+            y - top,
+            width + extra_width,
+            height + extra_height,
+            flags | SWP_NOACTIVATE,
+        );
+    }
+}
+
 /// 关掉 DWM 给窗口显示、隐藏加的淡入淡出（与 macOS 上关掉窗口动画一样）：遮罩画的是整屏的静止截图，
 /// 收起时淡出看起来整屏闪一下；贴图与 Snipaste 一样立即出现、消失。
 fn disable_transitions(hwnd: HWND) {
@@ -94,14 +175,13 @@ pub fn begin_overlay(title: &str, frame: [f64; 4]) -> bool {
         return false;
     }
     disable_transitions(hwnd);
-    let [x, y, width, height] = frame.map(|v| v as i32);
     // SAFETY: hwnd 是本线程的窗口。
     unsafe {
         let foreground = GetForegroundWindow();
         if workspace::is_other_app(foreground) {
             PREVIOUS.with(|cell| cell.set(foreground));
         }
-        SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_SHOWWINDOW);
+        place_overlay(hwnd, frame, SWP_SHOWWINDOW);
         panel::bring_to_front(hwnd);
     }
     OVERLAY.store(hwnd as isize, Ordering::Relaxed);

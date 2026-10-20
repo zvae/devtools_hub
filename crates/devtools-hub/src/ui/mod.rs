@@ -644,7 +644,14 @@ impl eframe::App for HubApp {
         self.snip_ui(&ctx);
         self.pins_ui(&ctx);
         // 为创建截屏遮罩、贴图而临时摆出的面板（见 `panel::wake`）完成了任务，收起来。
-        native_panel::finish_wake();
+        // 隐藏着创建的遮罩还没显示时除外：面板一收起，eframe 就只调用 `logic`，没有人去显示遮罩了。
+        if !self
+            .snip
+            .as_ref()
+            .is_some_and(|snip| snip.waiting_to_show())
+        {
+            native_panel::finish_wake();
+        }
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {

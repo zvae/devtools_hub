@@ -108,6 +108,17 @@ fn to_cocoa(mtm: MainThreadMarker, frame: [f64; 4]) -> NSRect {
     )
 }
 
+/// 遮罩窗口创建时是否隐藏。macOS 上遮罩是透明窗口，创建时什么都不显示，直接显示即可（Windows 见那里的说明）。
+pub const OVERLAY_STARTS_HIDDEN: bool = false;
+
+/// 只在遮罩隐藏着创建时调用（macOS 上不会）。
+pub fn show_overlay(_title: &str, _frame: [f64; 4]) -> bool {
+    true
+}
+
+/// 遮罩画出第一帧后调用；macOS 上没有要做的。
+pub fn reveal_overlay(_title: &str) {}
+
 /// 截屏遮罩出现后调用：盖住整个显示器（`frame` 是 CG 全局坐标）、提到菜单栏之上，并激活本应用接收按键。
 /// 返回是否找到了窗口（窗口还没创建时下一帧再试）。
 pub fn begin_overlay(title: &str, frame: [f64; 4]) -> bool {
