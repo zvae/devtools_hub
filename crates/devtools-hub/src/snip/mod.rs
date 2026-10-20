@@ -354,6 +354,24 @@ pub fn rgb_color(rgba: [u8; 4]) -> String {
 }
 
 /// 转成 egui 的纹理数据。
+/// 上传纹理用的图片：超过显卡支持的最大边长 `max_side`（`egui::InputState::max_texture_side`）时等比缩小，
+/// 否则 egui 直接 panic（例如长截图贴到屏幕上）。裁剪、复制、保存仍然用原图。
+pub fn texture_image(image: &RgbaImage, max_side: usize) -> egui::ColorImage {
+    let max = u32::try_from(max_side).unwrap_or(u32::MAX).max(1);
+    if image.width() <= max && image.height() <= max {
+        return color_image(image);
+    }
+    let scale = f64::from(max) / f64::from(image.width().max(image.height()));
+    let size = |side: u32| ((f64::from(side) * scale).round() as u32).clamp(1, max);
+    let resized = image::imageops::resize(
+        image,
+        size(image.width()),
+        size(image.height()),
+        image::imageops::FilterType::Triangle,
+    );
+    color_image(&resized)
+}
+
 pub fn color_image(image: &RgbaImage) -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied(
         [image.width() as usize, image.height() as usize],
@@ -451,6 +469,23 @@ mod tests {
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
         Rect::from_min_size(pos2(x, y), vec2(w, h))
+    }
+
+    #[test]
+    fn texture_image_fits_max_texture_side() {
+        // 长截图：按比例缩小到最长边不超过上限。
+        let long = RgbaImage::new(1210, 11645);
+        assert_eq!(texture_image(&long, 8192).size, [851, 8192]);
+        // 极细长的图也至少保留 1 像素宽。
+        assert_eq!(
+            texture_image(&RgbaImage::new(1, 9000), 2048).size,
+            [1, 2048]
+        );
+        // 不超过上限时原样上传。
+        assert_eq!(
+            texture_image(&RgbaImage::new(300, 200), 2048).size,
+            [300, 200]
+        );
     }
 
     #[test]

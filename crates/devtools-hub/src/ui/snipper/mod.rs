@@ -507,9 +507,10 @@ impl SnipSession {
         if let Some(editing) = &mut self.editing {
             // 贴图的原图（不是截图里显示的那份：那里可能缩放过、带着悬停时的边框）。
             let texture = editing.texture.get_or_insert_with(|| {
+                let max = painter.ctx().input(|i| i.max_texture_side);
                 painter.ctx().load_texture(
                     "snip-edit-pin",
-                    snip::color_image(&editing.image),
+                    snip::texture_image(&editing.image, max),
                     TextureOptions::LINEAR,
                 )
             });
@@ -603,22 +604,10 @@ impl SnipSession {
     fn texture(&mut self, ctx: &egui::Context) -> TextureHandle {
         self.texture
             .get_or_insert_with(|| {
-                let max = ctx.input(|i| i.max_texture_side) as u32;
-                let image = &self.capture.image;
-                let image = if image.width() > max || image.height() > max {
-                    let scale = max as f32 / image.width().max(image.height()) as f32;
-                    image::imageops::resize(
-                        image,
-                        (image.width() as f32 * scale) as u32,
-                        (image.height() as f32 * scale) as u32,
-                        image::imageops::FilterType::Triangle,
-                    )
-                } else {
-                    image.clone()
-                };
+                let max = ctx.input(|i| i.max_texture_side);
                 ctx.load_texture(
                     "snip-screen",
-                    snip::color_image(&image),
+                    snip::texture_image(&self.capture.image, max),
                     TextureOptions::NEAREST,
                 )
             })

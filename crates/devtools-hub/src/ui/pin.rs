@@ -100,6 +100,9 @@ struct PinState {
     anchor: Option<Vec2>,
     /// 最近一次缩放设置的窗口位置与大小（逻辑坐标）和设置的时间（见 [`FRAME_TRUST`]）。
     set_frame: Option<(Rect, Instant)>,
+    /// 窗口边长的上限（点）：物理像素不能超过显卡支持的最大纹理边长，否则 wgpu 配置 surface 时校验失败、
+    /// 程序直接崩溃（长截图贴图放大时出现过）。每帧按 `max_texture_side` 和缩放比例更新。
+    max_side: f32,
     tip: Option<(String, Instant)>,
     closed: bool,
 }
@@ -141,6 +144,7 @@ impl Pin {
             screen_rect: None,
             anchor: None,
             set_frame: None,
+            max_side: f32::INFINITY,
             tip: None,
             closed: false,
         };
@@ -307,6 +311,8 @@ impl PinState {
             self.configured = floating::configure_pin(&self.title);
             ctx.request_repaint();
         }
+        self.max_side = ctx.input(|i| i.max_texture_side) as f32 / ctx.pixels_per_point();
+        self.zoom = self.zoom.min(self.zoom_range().1);
         let texture = self.texture(&ctx);
         let rect = ctx.viewport_rect();
         let painter = ui.painter().with_clip_rect(rect);
@@ -348,19 +354,23 @@ impl PinState {
         self.paint_tip(&painter, &ctx, rect);
     }
 
-    /// 图片的纹理（第一次绘制、旋转翻转之后上传）。
+    /// 图片的纹理（第一次绘制、旋转翻转之后上传）。超过显卡支持的最大边长时（例如长截图）缩小后上传。
     fn texture(&mut self, ctx: &egui::Context) -> TextureHandle {
+        let max = ctx.input(|i| i.max_texture_side);
         match &mut self.texture {
             Some(texture) if !self.texture_dirty => texture.clone(),
             Some(texture) => {
-                texture.set(snip::color_image(&self.image), TextureOptions::LINEAR);
+                texture.set(
+                    snip::texture_image(&self.image, max),
+                    TextureOptions::LINEAR,
+                );
                 self.texture_dirty = false;
                 texture.clone()
             }
             None => {
                 let texture = ctx.load_texture(
                     format!("pin-{}", self.id),
-                    snip::color_image(&self.image),
+                    snip::texture_image(&self.image, max),
                     TextureOptions::LINEAR,
                 );
                 self.texture = Some(texture.clone());
@@ -545,10 +555,17 @@ impl PinState {
         ctx.request_repaint_of(self.viewport);
     }
 
-    /// 改变缩放比例（限制在范围内、窗口不小于最小边长），并显示百分比。
-    fn set_zoom(&mut self, zoom: f32) {
+    /// 缩放比例的范围：窗口不小于最小边长，也不超过 [`Self::max_side`]（长图放大时由后者限制）。
+    fn zoom_range(&self) -> (f32, f32) {
+        let max = MAX_ZOOM.min((self.max_side - 1.0) / self.base.max_elem().max(1.0));
         let min = MIN_ZOOM.max(MIN_SIDE / self.base.min_elem().max(1.0));
-        self.zoom = zoom.clamp(min.min(MAX_ZOOM), MAX_ZOOM);
+        (min.min(max), max)
+    }
+
+    /// 改变缩放比例（限制在 [`Self::zoom_range`] 内），并显示百分比。
+    fn set_zoom(&mut self, zoom: f32) {
+        let (min, max) = self.zoom_range();
+        self.zoom = zoom.clamp(min, max);
         self.show_tip(&format!("{}%", (self.zoom * 100.0).round()));
     }
 
@@ -618,6 +635,43 @@ mod tests {
                 |ui, test: &mut Test| test.pin.state.lock().unwrap().ui(ui, &test.shared),
                 Test { pin, shared },
             )
+    }
+
+    /// 比显卡支持的最大纹理边长还长的贴图（长截图）：缩小后上传，不 panic；旋转后重新上传也一样。
+    #[test]
+    fn long_image_fits_max_texture_side() {
+        let image = RgbaImage::from_pixel(50, 5000, Rgba([0, 128, 255, 255]));
+        let pin = Pin::new(8, image, vec2(50.0, 5000.0), 0.05, Pos2::ZERO);
+        let shared = Shared::new(&Settings::default());
+        let mut harness = Harness::builder()
+            .with_size(vec2(16.0, 250.0))
+            .build_ui_state(
+                |ui, test: &mut Test| test.pin.state.lock().unwrap().ui(ui, &test.shared),
+                Test { pin, shared },
+            );
+        harness.step();
+        let max = harness.ctx.input(|i| i.max_texture_side);
+        assert!(
+            max < 5000,
+            "测试环境的纹理上限应小于图片高度（现在是 {max}）"
+        );
+        let size = state(&harness).texture.as_ref().unwrap().size();
+        assert!(size[1] <= max && size[0] >= 1, "纹理 {size:?}");
+        // 滚轮放大、按 0 恢复 100%：窗口都不超过纹理上限（超过时 wgpu 配置 surface 失败、程序崩溃）。
+        let limit = max as f32;
+        wheel(&mut harness, 100.0, Modifiers::NONE);
+        assert!(state(&harness).applied_size.max_elem() < limit);
+        harness.key_press(Key::Num0);
+        harness.step();
+        assert!(state(&harness).applied_size.max_elem() < limit);
+        assert!(state(&harness).zoom < 1.0);
+        harness.key_press(Key::R);
+        harness.step();
+        let size = state(&harness).texture.as_ref().unwrap().size();
+        assert!(size[0] <= max, "旋转后的纹理 {size:?}");
+        assert!(state(&harness).applied_size.max_elem() < limit);
+        // 原图不变，复制、保存用的仍是原始分辨率。
+        assert_eq!(state(&harness).image.dimensions(), (5000, 50));
     }
 
     fn state<'a>(harness: &'a Harness<'_, Test>) -> MutexGuard<'a, PinState> {
