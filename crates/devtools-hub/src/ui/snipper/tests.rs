@@ -547,6 +547,7 @@ fn scroll_button() -> Pos2 {
 }
 
 /// 等后台线程把长图拼到至少 `height` 像素高（最多等 5 秒）。
+#[cfg(target_os = "macos")]
 fn wait_for_height(harness: &mut Harness<'_, Test>, height: u32) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -563,7 +564,9 @@ fn wait_for_height(harness: &mut Harness<'_, Test>, height: u32) {
     }
 }
 
+// 长截图只在 macOS 上支持（见 `platform::SCROLL_CAPTURE_SUPPORTED`）。
 #[test]
+#[cfg(target_os = "macos")]
 fn scroll_capture_stitches_frames_and_copies_long_image() {
     let mut harness = harness();
     harness.state_mut().session.frame_source = scrolling_frames;
@@ -581,7 +584,9 @@ fn scroll_capture_stitches_frames_and_copies_long_image() {
     assert!(image.height() >= 400, "长图高度 {}", image.height());
 }
 
+// 长截图只在 macOS 上支持（见 `platform::SCROLL_CAPTURE_SUPPORTED`）。
 #[test]
+#[cfg(target_os = "macos")]
 fn scroll_capture_escape_cancels() {
     let mut harness = harness();
     harness.state_mut().session.frame_source = scrolling_frames;
