@@ -8,13 +8,15 @@
 //! 默认交互与 Snipaste 一致：拖动移动，滚轮以鼠标为中心缩放，⌘ / Ctrl + 滚轮调整不透明度，
 //! 双击或 esc 关闭（Snipaste 的提示：“双击贴图窗口会使其关闭”），右键菜单里有其余操作。
 
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use egui::{
-    vec2, Color32, Event, FontId, Id, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect,
-    Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, Vec2, ViewportBuilder,
-    ViewportCommand, ViewportId, WindowLevel,
+    pos2, vec2, Color32, ColorImage, Event, FontId, Id, Key, Modifiers, MouseWheelUnit, Painter,
+    PointerButton, Pos2, Rect, Sense, Spinner, Stroke, StrokeKind, TextureHandle, TextureOptions,
+    Ui, Vec2, ViewportBuilder, ViewportCommand, ViewportId, WindowLevel,
 };
 use image::RgbaImage;
 use tray_icon::menu::accelerator::Code;
@@ -81,6 +83,10 @@ struct PinState {
     has_alpha: bool,
     texture: Option<TextureHandle>,
     texture_dirty: bool,
+    /// 后台线程正在准备的纹理图片（见 [`Pin::new_in_background`]）：准备好之前窗口里显示“正在加载”。
+    preparing: Option<Receiver<Prepared>>,
+    /// 后台准备好、还没上传的纹理图片。
+    prepared: Option<ColorImage>,
     /// 缩放为 100% 时的窗口大小（点，随旋转交换宽高）。
     base: Vec2,
     zoom: f32,
@@ -107,9 +113,58 @@ struct PinState {
     closed: bool,
 }
 
+/// 后台准备好的纹理图片与图片是否有透明像素。
+struct Prepared {
+    texture: ColorImage,
+    has_alpha: bool,
+}
+
 impl Pin {
     /// 创建贴图：`base` 是 100% 时的大小（点），`zoom` 是初始缩放，窗口左上角在 `top_left`（逻辑坐标）。
     pub fn new(id: u64, image: RgbaImage, base: Vec2, zoom: f32, top_left: Pos2) -> Self {
+        let has_alpha = snip::has_alpha(&image);
+        Self::create(id, Arc::new(image), has_alpha, None, base, zoom, top_left)
+    }
+
+    /// 与 [`Self::new`] 一样，但图片超过显卡支持的最大边长 `max_side` 时（例如长截图），上传前的缩小和
+    /// 透明像素检查放到后台线程：1404×18178 的长图缩小要一百多毫秒，放在主线程上整个界面都会卡住。
+    /// 窗口立即出现，准备好之前显示“正在加载”（见 [`paint_loading`]）。
+    pub fn new_in_background(
+        id: u64,
+        image: RgbaImage,
+        base: Vec2,
+        zoom: f32,
+        top_left: Pos2,
+        max_side: usize,
+    ) -> Self {
+        if image.width() as usize <= max_side && image.height() as usize <= max_side {
+            return Self::new(id, image, base, zoom, top_left);
+        }
+        let image = Arc::new(image);
+        let (sender, receiver) = mpsc::channel();
+        let source = image.clone();
+        thread::Builder::new()
+            .name("pin-texture".into())
+            .spawn(move || {
+                let prepared = Prepared {
+                    texture: snip::texture_image(&source, max_side),
+                    has_alpha: snip::has_alpha(&source),
+                };
+                let _ = sender.send(prepared);
+            })
+            .expect("创建贴图纹理线程失败");
+        Self::create(id, image, false, Some(receiver), base, zoom, top_left)
+    }
+
+    fn create(
+        id: u64,
+        image: Arc<RgbaImage>,
+        has_alpha: bool,
+        preparing: Option<Receiver<Prepared>>,
+        base: Vec2,
+        zoom: f32,
+        top_left: Pos2,
+    ) -> Self {
         let title = format!("DevTools Hub 贴图 {id}");
         let viewport = ViewportId::from_hash_of(("devtools-hub-pin", id));
         let size = (base * zoom).round().max(Vec2::splat(MIN_SIDE));
@@ -127,10 +182,12 @@ impl Pin {
             id,
             title,
             viewport,
-            has_alpha: snip::has_alpha(&image),
-            image: Arc::new(image),
+            has_alpha,
+            image,
             texture: None,
             texture_dirty: false,
+            preparing,
+            prepared: None,
             base,
             zoom,
             opacity: 1.0,
@@ -202,6 +259,7 @@ impl Pin {
         state.has_alpha = snip::has_alpha(&image);
         state.image = Arc::new(image);
         state.texture_dirty = true;
+        state.discard_prepared();
         state.base = size;
         state.zoom = 1.0;
         state.anchor = None;
@@ -292,12 +350,64 @@ impl Pin {
     }
 }
 
+/// 纹理还在后台准备时贴图窗口里的样子：浅灰底、转圈和“正在加载…”，免得以为程序没反应。
+/// 转圈会请求重绘，每一帧都检查后台是否准备好了。
+fn paint_loading(ui: &Ui, painter: &Painter, rect: Rect) {
+    painter.rect_filled(rect, 0.0, Color32::from_gray(245));
+    painter.rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0, Color32::from_gray(210)),
+        StrokeKind::Inside,
+    );
+    let color = Color32::from_gray(110);
+    let label = painter.layout_no_wrap("正在加载…".to_owned(), FontId::proportional(12.0), color);
+    let size = 20.0_f32.min(rect.width() - 8.0).max(8.0);
+    let top = rect.center().y - (size + 8.0 + label.size().y) / 2.0;
+    Spinner::new().size(size).color(color).paint_at(
+        ui,
+        Rect::from_center_size(pos2(rect.center().x, top + size / 2.0), Vec2::splat(size)),
+    );
+    let at = pos2(rect.center().x - label.size().x / 2.0, top + size + 8.0);
+    painter.galley(at, label, color);
+}
+
 impl PinState {
+    /// 取走后台准备好的纹理图片，返回是否已经可以画出图片（没有在后台准备时也可以）。
+    fn receive_prepared(&mut self) -> bool {
+        let Some(receiver) = &self.preparing else {
+            return true;
+        };
+        match receiver.try_recv() {
+            Ok(prepared) => {
+                self.prepared = Some(prepared.texture);
+                self.has_alpha = prepared.has_alpha;
+            }
+            Err(TryRecvError::Empty) => return false,
+            // 后台线程意外退出：在窗口里照常同步准备。
+            Err(TryRecvError::Disconnected) => self.has_alpha = snip::has_alpha(&self.image),
+        }
+        self.preparing = None;
+        true
+    }
+
+    /// 图片变了（旋转、翻转、换成编辑过的图片）：后台准备的是原来的图片，不再用它，改为同步准备。
+    fn discard_prepared(&mut self) {
+        if self.preparing.take().is_some() {
+            self.has_alpha = snip::has_alpha(&self.image);
+        }
+        self.prepared = None;
+    }
+
     /// 窗口回调：同步窗口状态、绘制图片、处理鼠标与按键。
     fn ui(&mut self, ui: &mut Ui, shared: &Arc<Shared>) {
         let ctx = ui.ctx().clone();
         if self.closed {
             // 等主界面关闭窗口（下一帧）期间照常画出图片：不画的话窗口会变成一块灰色。
+            if !self.receive_prepared() {
+                paint_loading(ui, ui.painter(), ctx.viewport_rect());
+                return;
+            }
             let texture = self.texture(&ctx);
             ui.painter().image(
                 texture.id(),
@@ -313,27 +423,41 @@ impl PinState {
         }
         self.max_side = ctx.input(|i| i.max_texture_side) as f32 / ctx.pixels_per_point();
         self.zoom = self.zoom.min(self.zoom_range().1);
-        let texture = self.texture(&ctx);
         let rect = ctx.viewport_rect();
         let painter = ui.painter().with_clip_rect(rect);
-        if self.has_alpha {
-            painter.rect_filled(rect, 0.0, Color32::WHITE);
+        if !self.receive_prepared() {
+            paint_loading(ui, &painter, rect);
+        } else {
+            let texture = self.texture(&ctx);
+            if self.has_alpha {
+                painter.rect_filled(rect, 0.0, Color32::WHITE);
+            }
+            painter.image(
+                texture.id(),
+                rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
-        painter.image(
-            texture.id(),
-            rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
 
         self.screen_rect = ctx.input(|i| i.viewport().outer_rect);
         let response = ui.interact(rect, Id::new(("pin", self.id)), Sense::click_and_drag());
         if response.drag_started_by(PointerButton::Primary) {
             // 拖动会移动窗口，之后以 egui 报告的位置为准。
             self.set_frame = None;
-            if !floating::start_drag(&self.title) {
+            let grab = ctx
+                .input(|i| i.pointer.press_origin())
+                .map_or(Vec2::ZERO, |origin| origin - rect.min);
+            if !floating::start_drag(&self.title, grab) {
                 ctx.send_viewport_cmd(ViewportCommand::StartDrag);
             }
+        }
+        // Windows 上由平台层跟着鼠标移动窗口（系统的拖动不让窗口顶部超出屏幕，见 `floating::start_drag`）。
+        if response.dragged_by(PointerButton::Primary) {
+            floating::drag_moved();
+        }
+        if response.drag_stopped() {
+            floating::end_drag();
         }
         if response.double_clicked() {
             self.close(&ctx);
@@ -368,11 +492,12 @@ impl PinState {
                 texture.clone()
             }
             None => {
-                let texture = ctx.load_texture(
-                    format!("pin-{}", self.id),
-                    snip::texture_image(&self.image, max),
-                    TextureOptions::LINEAR,
-                );
+                let data = self
+                    .prepared
+                    .take()
+                    .unwrap_or_else(|| snip::texture_image(&self.image, max));
+                let texture =
+                    ctx.load_texture(format!("pin-{}", self.id), data, TextureOptions::LINEAR);
                 self.texture = Some(texture.clone());
                 self.texture_dirty = false;
                 texture
@@ -525,11 +650,13 @@ impl PinState {
         match action {
             PinAction::Rotate(clockwise) => {
                 self.image = Arc::new(snip::rotate(&self.image, clockwise));
+                self.discard_prepared();
                 self.base = vec2(self.base.y, self.base.x);
                 self.texture_dirty = true;
             }
             PinAction::Flip(horizontal) => {
                 self.image = Arc::new(snip::flip(&self.image, horizontal));
+                self.discard_prepared();
                 self.texture_dirty = true;
             }
             PinAction::Zoom(percent) => {
@@ -672,6 +799,65 @@ mod tests {
         assert!(state(&harness).applied_size.max_elem() < limit);
         // 原图不变，复制、保存用的仍是原始分辨率。
         assert_eq!(state(&harness).image.dimensions(), (5000, 50));
+    }
+
+    /// 超过最大纹理边长的贴图在后台缩小：准备好之前不出现，准备好后上传的是缩小的图片，透明像素也检查过。
+    #[test]
+    fn oversized_image_is_prepared_in_background() {
+        let mut image = RgbaImage::from_pixel(40, 3000, Rgba([0, 128, 255, 255]));
+        image.put_pixel(0, 2999, Rgba([0, 0, 0, 0]));
+        let pin = Pin::new_in_background(9, image, vec2(40.0, 3000.0), 0.1, Pos2::ZERO, 1000);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pin.state.lock().unwrap().receive_prepared() {
+            assert!(Instant::now() < deadline, "后台一直没有准备好纹理");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let state = pin.state.lock().unwrap();
+        assert!(state.has_alpha);
+        assert_eq!(state.prepared.as_ref().unwrap().size, [13, 1000]);
+        assert_eq!(state.image.dimensions(), (40, 3000));
+        drop(state);
+        // 不超过上限时与 `Pin::new` 一样，同步准备。
+        let small = RgbaImage::from_pixel(40, 30, Rgba([0, 128, 255, 255]));
+        let pin = Pin::new_in_background(10, small, vec2(40.0, 30.0), 1.0, Pos2::ZERO, 1000);
+        assert!(pin.state.lock().unwrap().preparing.is_none());
+    }
+
+    /// 后台还没准备好时窗口显示“正在加载”（不上传纹理），准备好后换成图片。
+    #[test]
+    fn shows_loading_until_prepared() {
+        let image = RgbaImage::from_pixel(100, 50, Rgba([0, 128, 255, 255]));
+        let (sender, receiver) = mpsc::channel();
+        let pin = Pin::create(
+            11,
+            Arc::new(image),
+            false,
+            Some(receiver),
+            vec2(100.0, 50.0),
+            1.0,
+            Pos2::ZERO,
+        );
+        let shared = Shared::new(&Settings::default());
+        let mut harness = Harness::builder()
+            .with_size(vec2(100.0, 50.0))
+            .build_ui_state(
+                |ui, test: &mut Test| test.pin.state.lock().unwrap().ui(ui, &test.shared),
+                Test { pin, shared },
+            );
+        harness.step();
+        assert!(state(&harness).texture.is_none());
+        assert!(state(&harness).preparing.is_some());
+        let texture = ColorImage::filled([10, 5], Color32::RED);
+        sender
+            .send(Prepared {
+                texture,
+                has_alpha: true,
+            })
+            .unwrap();
+        harness.step();
+        assert!(state(&harness).preparing.is_none());
+        assert!(state(&harness).has_alpha);
+        assert_eq!(state(&harness).texture.as_ref().unwrap().size(), [10, 5]);
     }
 
     fn state<'a>(harness: &'a Harness<'_, Test>) -> MutexGuard<'a, PinState> {

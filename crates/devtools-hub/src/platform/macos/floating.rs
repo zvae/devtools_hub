@@ -17,9 +17,9 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
 use objc2::{define_class, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationOptions, NSEventType, NSModalResponseOK, NSPanel,
-    NSResponder, NSRunningApplication, NSSavePanel, NSScreenSaverWindowLevel, NSWindow,
-    NSWindowAnimationBehavior, NSWindowCollectionBehavior,
+    NSApplication, NSApplicationActivationOptions, NSEvent, NSEventType, NSModalResponseOK,
+    NSPanel, NSResponder, NSRunningApplication, NSSavePanel, NSScreen, NSScreenSaverWindowLevel,
+    NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 
@@ -35,6 +35,8 @@ thread_local! {
     static RESTORING_APP: RefCell<Option<Retained<NSRunningApplication>>> = const { RefCell::new(None) };
     /// 贴图窗口换类前原来的类（winit 的 `WinitWindow`），销毁前换回去（见 [`release_pin`]）。
     static PIN_ORIGINAL_CLASS: Cell<Option<&'static AnyClass>> = const { Cell::new(None) };
+    /// 正在拖动的贴图窗口与按住的那一点相对窗口左上角的位置（点，见 [`start_drag`]）。
+    static DRAG: RefCell<Option<(Retained<NSWindow>, NSPoint)>> = const { RefCell::new(None) };
 }
 
 define_class!(
@@ -68,6 +70,12 @@ define_class!(
         #[unsafe(method(canBecomeMainWindow))]
         fn can_become_main_window(&self) -> bool {
             false
+        }
+
+        /// 不把贴图限制在菜单栏下面：比屏幕还高的长截图贴图要能往上移，放大时窗口也要能伸到屏幕外。
+        #[unsafe(method(constrainFrameRect:toScreen:))]
+        fn constrain_frame_rect(&self, frame: NSRect, _screen: Option<&NSScreen>) -> NSRect {
+            frame
         }
     }
 );
@@ -149,13 +157,23 @@ pub fn begin_overlay(title: &str, frame: [f64; 4]) -> bool {
     true
 }
 
-/// 截屏遮罩的窗口编号（`CGWindowID`），滚动截图时用来把遮罩排除在截图之外。窗口还没创建时为空。
-pub fn overlay_window_id(title: &str) -> Option<u32> {
+/// 截屏遮罩是透明窗口：滚动截图时选区里看到的就是真实的屏幕，鼠标在选区里时让整个遮罩穿透。
+pub const OVERLAY_TRANSPARENT: bool = true;
+
+/// 进入滚动截图时调用：返回遮罩的窗口编号（`CGWindowID`），截取选区时用来把遮罩排除在截图之外。
+/// 窗口还没创建时为空。选区外的遮罩由界面直接画在透明窗口上，用不到 `_mask`。
+pub fn begin_scroll(title: &str, _mask: egui::Color32) -> Option<u32> {
     let (_, window) = find(title)?;
     u32::try_from(window.windowNumber())
         .ok()
         .filter(|id| *id != 0)
 }
+
+/// 遮罩是透明窗口、用鼠标穿透，不需要改变窗口的形状（见 Windows 版）。
+pub fn set_scroll_regions(_title: &str, _hole: egui::Rect, _shown: &[(egui::Rect, f32)]) {}
+
+/// 透明窗口结束时什么都不画即可（见 Windows 版）。
+pub fn end_scroll(_title: &str) {}
 
 /// 收起截屏遮罩（egui 随后销毁窗口）。
 pub fn hide_overlay(title: &str) {
@@ -270,11 +288,39 @@ pub fn set_shadow(title: &str, shadow: bool) {
     }
 }
 
-/// 按住鼠标拖动贴图窗口。返回 false 表示没找到窗口，由调用方交给 winit。
-pub fn start_drag(title: &str) -> bool {
-    find(title)
-        .map(|(mtm, window)| panel::drag(mtm, &window))
-        .is_some()
+/// 按住鼠标拖动贴图窗口：之后每帧由 [`drag_moved`] 让窗口跟着鼠标移动，松开时 [`end_drag`]。
+/// `grab` 是按下鼠标的位置（相对窗口左上角，点）：开始拖动时鼠标已经移动了一小段，
+/// 按这个位置算，按住的那一点始终在鼠标下面。
+///
+/// 不用系统的拖动（`performWindowDragWithEvent`，主面板仍然用它）：系统让窗口保持在菜单栏下面，
+/// 比屏幕还高的长截图贴图就拖不上去了。返回 false 表示没找到窗口，由调用方交给 winit。
+pub fn start_drag(title: &str, grab: egui::Vec2) -> bool {
+    let Some((_, window)) = find(title) else {
+        return false;
+    };
+    let grab = NSPoint::new(f64::from(grab.x), f64::from(grab.y));
+    DRAG.with(|drag| *drag.borrow_mut() = Some((window, grab)));
+    drag_moved();
+    true
+}
+
+/// 拖动中：移动窗口，让按住的那一点回到鼠标下面。
+pub fn drag_moved() {
+    DRAG.with(|drag| {
+        let drag = drag.borrow();
+        let Some((window, grab)) = drag.as_ref() else {
+            return;
+        };
+        // AppKit 的坐标原点在主显示器左下角、y 向上；`grab` 从窗口左上角往下量。
+        let mouse = NSEvent::mouseLocation();
+        let height = window.frame().size.height;
+        window.setFrameOrigin(NSPoint::new(mouse.x - grab.x, mouse.y + grab.y - height));
+    });
+}
+
+/// 松开鼠标，结束拖动。
+pub fn end_drag() {
+    DRAG.with(|drag| drag.borrow_mut().take());
 }
 
 /// 在鼠标位置弹出贴图的右键菜单，菜单关闭后才返回。

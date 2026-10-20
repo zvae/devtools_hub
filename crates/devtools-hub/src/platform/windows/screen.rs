@@ -1,6 +1,8 @@
 //! 截屏、显示器与窗口位置（Windows）。
 //!
 //! - 截屏：用 GDI 从屏幕 DC `BitBlt` 到 32 位 DIB（带 `CAPTUREBLT`，分层窗口也截得到）；
+//! - 滚动截图：同样 `BitBlt` 选区，但不带 `CAPTUREBLT`（每秒截几十次，它会让鼠标指针跟着闪烁）；
+//!   遮罩挖掉了选区并且不进入截屏（见 `floating::begin_scroll`）。
 //! - 窗口：`EnumWindows` 按 Z 序（从上到下）枚举顶层窗口，取 DWM 的 `DWMWA_EXTENDED_FRAME_BOUNDS`
 //!   （不含 Windows 10/11 窗口四周不可见的缩放边框），跳过隐藏、最小化、被 DWM 隐藏（cloaked，
 //!   例如其他虚拟桌面上的窗口）、鼠标穿透的窗口和本程序自己的窗口。
@@ -92,17 +94,23 @@ pub fn cursor() -> Option<([f64; 2], Display)> {
     }
 }
 
-/// 截取桌面上的一块区域，只截截屏遮罩下面的内容（滚动截图用）。Windows 上还没有实现：
-/// 遮罩是不透明窗口，看不到下面滚动的内容（见 `platform::SCROLL_CAPTURE_SUPPORTED`）。
-pub fn capture_area(_area: [f64; 4], _below: Option<u32>) -> Result<RgbaImage> {
-    bail!("Windows 上还不支持滚动截图")
+/// 截取桌面上的一块区域（`area` 是全局坐标 `[x, y, 宽, 高]`，物理像素），返回 RGBA 图像（滚动截图用）。
+/// 遮罩在进入滚动截图时已经设为不进入截屏（`floating::begin_scroll`），截到的就是它下面的内容，用不到 `_below`。
+pub fn capture_area(area: [f64; 4], _below: Option<u32>) -> Result<RgbaImage> {
+    let [x, y, width, height] = area.map(|v| v.round() as i32);
+    blt([x, y, width, height], SRCCOPY)
 }
 
 /// 截取整个显示器，返回物理像素的 RGBA 图像。
 pub fn capture(display: &Display) -> Result<RgbaImage> {
-    let [x, y, width, height] = display.frame.map(|v| v as i32);
+    blt(display.frame.map(|v| v as i32), SRCCOPY | CAPTUREBLT)
+}
+
+/// 从屏幕 DC 把 `[x, y, 宽, 高]`（物理像素）`BitBlt` 出来，转成 RGBA。
+fn blt(area: [i32; 4], rop: u32) -> Result<RgbaImage> {
+    let [x, y, width, height] = area;
     if width <= 0 || height <= 0 {
-        bail!("显示器大小无效：{width}×{height}");
+        bail!("截取范围无效：{width}×{height}");
     }
     // SAFETY: 创建的 DC、位图都在返回前释放；DIB 的像素缓冲区由系统分配，大小为 width × height × 4。
     unsafe {
@@ -124,18 +132,7 @@ pub fn capture(display: &Display) -> Result<RgbaImage> {
         let mut result = None;
         if !bitmap.is_null() && !bits.is_null() {
             let old = SelectObject(memory, bitmap);
-            if BitBlt(
-                memory,
-                0,
-                0,
-                width,
-                height,
-                screen,
-                x,
-                y,
-                SRCCOPY | CAPTUREBLT,
-            ) != 0
-            {
+            if BitBlt(memory, 0, 0, width, height, screen, x, y, rop) != 0 {
                 let len = width as usize * height as usize * 4;
                 let bgra = std::slice::from_raw_parts(bits.cast::<u8>(), len);
                 let mut rgba = Vec::with_capacity(len);

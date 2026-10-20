@@ -1,10 +1,13 @@
 //! 滚动截图（长截图），参照微信的长截图（分析见 `docs/微信滚动截图与文字提取实现分析.md`）。
 //!
 //! 选好区域后点工具栏上的“长截图”进入：
-//! - 遮罩不再显示静止的截图（窗口是透明的，看到的是真实的屏幕），只在选区外加遮罩、画边框；
-//! - 鼠标在选区里时遮罩让鼠标穿透（`ViewportCommand::MousePassthrough`，macOS 上即 `setIgnoresMouseEvents:`），
-//!   用户直接滚动下面的窗口；鼠标移到选区外时恢复，可以点工具栏。穿透期间遮罩收不到鼠标事件，
-//!   所以定时（[`POLL`]）重绘，用平台层读鼠标位置；
+//! - 选区里看到的是真实的屏幕，选区外加遮罩、画边框：
+//!   - macOS：遮罩是透明窗口，不再显示静止的截图。鼠标在选区里时遮罩让鼠标穿透
+//!     （`ViewportCommand::MousePassthrough`，即 `setIgnoresMouseEvents:`），用户直接滚动下面的窗口；
+//!     鼠标移到选区外时恢复，可以点工具栏。穿透期间遮罩收不到鼠标事件，所以定时（[`POLL`]）重绘，用平台层读鼠标位置；
+//!   - Windows：遮罩是不透明窗口，只保留边框、提示、预览和工具栏这几块，其余部分从窗口里去掉
+//!     （`floating::set_scroll_regions`），选区外的调暗交给平台层的另一个半透明窗口；
+//!     选区里的鼠标、滚轮直接落到下面的窗口；
 //! - 后台线程每隔 [`INTERVAL`] 截一次选区（只截遮罩下面的窗口，遮罩上的边框、工具栏、预览不会进入画面），
 //!   交给 [`Stitcher`] 拼接，旁边显示拼好的长图的预览；
 //! - 退出、贴图、保存、复制与普通截屏一样（esc、⌘T、⌘S、⌘C / ↩），输出拼好的长图。
@@ -21,14 +24,15 @@ use std::time::Duration;
 
 use anyhow::Result;
 use egui::{
-    pos2, vec2, Color32, Context, Key, Modifiers, Painter, Rect, Stroke, StrokeKind, TextureHandle,
-    TextureOptions, Ui, ViewportCommand, ViewportId,
+    pos2, vec2, Color32, Context, Id, Key, Modifiers, Order, Painter, Rect, Stroke, StrokeKind,
+    TextureHandle, TextureOptions, Ui, ViewportCommand, ViewportId,
 };
 use image::RgbaImage;
 
 use super::toolbar::{self, BarAction, BarState, Mode};
-use super::{badge, paint_mask, Outcome, Output, SnipSession, View, ACCENT};
-use crate::platform::screen;
+use super::{badge, paint_mask, Outcome, Output, SnipSession, View, ACCENT, BADGE_RADIUS, MASK};
+use crate::keys;
+use crate::platform::{self, floating, screen};
 use crate::snip::scroll::{Step, Stitcher};
 use crate::snip::{self, Capture};
 
@@ -39,6 +43,10 @@ const INTERVAL: Duration = Duration::from_millis(30);
 const POLL: Duration = Duration::from_millis(33);
 /// 边框画在选区外这么远（点），截取选区时不会截到边框。
 const BORDER_GAP: f32 = 2.0;
+/// 边框的粗细（点）。
+const BORDER_WIDTH: f32 = 1.5;
+/// 预览框的圆角半径（点）。
+const PREVIEW_RADIUS: f32 = 4.0;
 /// 预览的宽度（点）。
 const PREVIEW_WIDTH: f32 = 140.0;
 /// 预览与选区的间距（点）。
@@ -93,8 +101,12 @@ pub(super) struct ScrollCapture {
     stitcher: Arc<Mutex<Option<Stitcher>>>,
     stop: Arc<AtomicBool>,
     texture: Option<(u64, TextureHandle)>,
-    /// 现在是否让鼠标穿透遮罩。
+    /// 现在是否让鼠标穿透遮罩（透明的遮罩）。
     passthrough: bool,
+    /// 不透明的遮罩上一帧画出来的几块：编号、位置与圆角半径（像素），见 [`Self::set_regions`]。
+    drawn: Vec<(Id, Rect, f32)>,
+    /// 现在交给平台层的窗口形状：选区外遮罩挖掉的范围与截屏遮罩显示的几块（像素）。
+    regions: Option<(Rect, Vec<(Rect, f32)>)>,
 }
 
 impl ScrollCapture {
@@ -194,6 +206,8 @@ impl ScrollCapture {
             stop,
             texture: None,
             passthrough: false,
+            drawn: Vec::new(),
+            regions: None,
         }
     }
 
@@ -201,7 +215,12 @@ impl ScrollCapture {
     pub(super) fn finish(&mut self) -> Option<RgbaImage> {
         self.stop.store(true, Ordering::Relaxed);
         // 后台线程正在拼接时等它拼完这一帧。
-        let image = self.stitcher.lock().unwrap().as_ref().map(Stitcher::image);
+        let image = self
+            .stitcher
+            .lock()
+            .unwrap()
+            .take()
+            .map(Stitcher::into_image);
         image
     }
 
@@ -236,6 +255,30 @@ impl ScrollCapture {
         if self.passthrough != passthrough {
             self.passthrough = passthrough;
             ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(passthrough));
+        }
+    }
+
+    /// 不透明的遮罩：这一帧画了 `drawn` 这几块，选区外的遮罩挖掉 `hole`（像素）。
+    ///
+    /// 窗口形状立即生效，这一帧的画面却要等画完才显示：变大的部分如果立即显示，先露出的是一块没画过的底色。
+    /// 所以窗口只显示这一帧和上一帧都画了的部分（两帧的交集）：变大、新出现的部分晚一帧显示，
+    /// 变小、消失的部分立即去掉。与上次一样时不用再设置。
+    fn set_regions(&mut self, title: &str, hole: Rect, drawn: Vec<(Id, Rect, f32)>) {
+        let shown = drawn
+            .iter()
+            .filter_map(|(id, rect, radius)| {
+                let (_, previous, _) = self.drawn.iter().find(|(other, ..)| other == id)?;
+                let rect = rect.intersect(*previous);
+                rect.is_positive().then_some((rect, *radius))
+            })
+            .collect();
+        self.drawn = drawn;
+        let regions = Some((hole, shown));
+        if self.regions != regions {
+            if let Some((hole, shown)) = &regions {
+                floating::set_scroll_regions(title, *hole, shown);
+            }
+            self.regions = regions;
         }
     }
 }
@@ -300,7 +343,7 @@ fn fit_frame(image: RgbaImage, expected: [u32; 2], offset: [u32; 2], size: [u32;
 impl SnipSession {
     /// 能否进入滚动截图：支持的平台、不是编辑贴图、没有标注、选区不太小。
     pub(super) fn can_scroll(&self) -> bool {
-        crate::platform::SCROLL_CAPTURE_SUPPORTED
+        platform::SCROLL_CAPTURE_SUPPORTED
             && self.editing.is_none()
             && self.marks.is_empty()
             && self
@@ -320,7 +363,7 @@ impl SnipSession {
         self.tool = None;
         self.draft = None;
         self.drag = None;
-        let below = crate::platform::floating::overlay_window_id(&self.title);
+        let below = floating::begin_scroll(&self.title, MASK);
         if below.is_none() {
             tracing::warn!("没找到截屏遮罩的窗口编号，滚动截图可能截到遮罩");
         }
@@ -341,27 +384,47 @@ impl SnipSession {
         let Some(selection) = self.selection else {
             return Outcome::Cancel;
         };
-        let hole = view.to_points(selection);
-        let frame = hole.expand(BORDER_GAP);
+        // 选区（与截取的范围一样取整到整像素）、边框里面的范围（选区外的遮罩挖掉这么大）与边框的四条边（像素）。
+        let hole = Rect::from_min_max(selection.min.floor(), selection.max.ceil());
+        let (inner, edges) = border_edges(hole, view.scale);
+        let frame = if floating::OVERLAY_TRANSPARENT {
+            view.to_points(selection).expand(BORDER_GAP)
+        } else {
+            view.to_points(inner)
+        };
         let painter = ui.painter().with_clip_rect(screen_rect);
 
-        // 鼠标在选区里时穿透（遮罩收不到鼠标事件，用平台层读鼠标位置）。
-        let inside = screen::cursor()
-            .map(|(point, _)| self.capture.global_to_pixels(point))
-            .is_some_and(|point| selection.contains(point));
         let (status, size) = {
             let Some(scroll) = &mut self.scroll else {
                 return Outcome::Cancel;
             };
-            scroll.set_passthrough(ctx, inside);
+            if floating::OVERLAY_TRANSPARENT {
+                // 鼠标在选区里时穿透（遮罩收不到鼠标事件，用平台层读鼠标位置）。
+                let inside = screen::cursor()
+                    .map(|(point, _)| self.capture.global_to_pixels(point))
+                    .is_some_and(|point| selection.contains(point));
+                scroll.set_passthrough(ctx, inside);
+            }
             scroll.status()
         };
 
-        paint_mask(&painter, screen_rect, frame);
-        painter.rect_stroke(frame, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
-        badge(&painter, screen_rect, frame, &status_text(status, size));
-        self.paint_preview(ctx, &painter, screen_rect, frame);
-
+        if floating::OVERLAY_TRANSPARENT {
+            paint_mask(&painter, screen_rect, frame);
+            painter.rect_stroke(
+                frame,
+                0.0,
+                Stroke::new(BORDER_WIDTH, ACCENT),
+                StrokeKind::Outside,
+            );
+        } else {
+            // 选区外的调暗由平台层的另一个窗口负责。边框按整像素画，并向外多画一像素：
+            // 窗口只显示这几块（见下），边缘的像素不会因为抗锯齿混进没画过的底色。
+            for edge in edges {
+                painter.rect_filled(view.to_points(edge.expand(1.0)), 0.0, ACCENT);
+            }
+        }
+        let badge = badge(&painter, screen_rect, frame, &status_text(status, size));
+        let preview = self.paint_preview(ctx, &painter, screen_rect, frame);
         let bars = toolbar::layout(frame, screen_rect, None, Mode::Scroll);
         let state = BarState {
             tool: None,
@@ -375,6 +438,52 @@ impl SnipSession {
             Some(BarAction::Output(output)) => Some(output),
             _ => None,
         };
+        if !floating::OVERLAY_TRANSPARENT {
+            // 窗口只显示画了东西的几块：边框、提示、预览、工具栏与按钮的提示框，其余部分看到的是真实的屏幕。
+            let to_pixels =
+                |rect: Rect| Rect::from_min_max(view.to_pixels(rect.min), view.to_pixels(rect.max));
+            let scale = view.scale;
+            let mut drawn: Vec<(Id, Rect, f32)> = edges
+                .iter()
+                .enumerate()
+                .map(|(index, edge)| (Id::new(("snip-scroll-border", index)), *edge, 0.0))
+                .collect();
+            drawn.push((
+                Id::new("snip-scroll-badge"),
+                to_pixels(badge),
+                BADGE_RADIUS * scale,
+            ));
+            if let Some(preview) = preview {
+                drawn.push((
+                    Id::new("snip-scroll-preview"),
+                    to_pixels(preview),
+                    PREVIEW_RADIUS * scale,
+                ));
+            }
+            drawn.push((
+                Id::new("snip-scroll-toolbar"),
+                to_pixels(bars.main),
+                toolbar::RADIUS * scale,
+            ));
+            let tooltip_radius = f32::from(ui.style().visuals.menu_corner_radius.nw) * scale;
+            let tooltips: Vec<_> = ctx.memory(|memory| {
+                memory
+                    .areas()
+                    .visible_layer_ids()
+                    .into_iter()
+                    .filter(|layer| layer.order == Order::Tooltip)
+                    .filter_map(|layer| Some((layer.id, memory.area_rect(layer.id)?)))
+                    .collect()
+            });
+            drawn.extend(
+                tooltips
+                    .into_iter()
+                    .map(|(id, rect)| (id, to_pixels(rect), tooltip_radius)),
+            );
+            if let Some(scroll) = &mut self.scroll {
+                scroll.set_regions(&self.title, inner, drawn);
+            }
+        }
         let (escape, copy, pin, save) = ui.input_mut(|i| {
             let copy_event = i
                 .events
@@ -411,6 +520,7 @@ impl SnipSession {
             return Outcome::Cancel;
         };
         let image = self.scroll.as_mut().and_then(ScrollCapture::finish);
+        floating::end_scroll(&self.title);
         if output == Output::Cancel {
             return Outcome::Cancel;
         }
@@ -424,15 +534,18 @@ impl SnipSession {
         self.finish(output, image, rect)
     }
 
-    /// 选区旁边的预览：长图缩小到预览的宽度，太长时显示最下面（最新拼上的）部分。
-    fn paint_preview(&mut self, ctx: &Context, painter: &Painter, screen_rect: Rect, frame: Rect) {
-        let Some(texture) = self
+    /// 选区旁边的预览：长图缩小到预览的宽度，太长时显示最下面（最新拼上的）部分。返回预览的位置（还没有预览时为空）。
+    fn paint_preview(
+        &mut self,
+        ctx: &Context,
+        painter: &Painter,
+        screen_rect: Rect,
+        frame: Rect,
+    ) -> Option<Rect> {
+        let texture = self
             .scroll
             .as_mut()
-            .and_then(|scroll| scroll.preview_texture(ctx))
-        else {
-            return;
-        };
+            .and_then(|scroll| scroll.preview_texture(ctx))?;
         let height = frame.height().clamp(
             120.0_f32.min(screen_rect.height()),
             screen_rect.height() - 2.0 * PREVIEW_GAP,
@@ -460,15 +573,36 @@ impl SnipSession {
             pos2(0.0, 1.0 - visible_rows / tex_height.max(1.0)),
             pos2(1.0, 1.0),
         );
-        painter.rect_filled(image_rect.expand(3.0), 4.0, Color32::from_gray(250));
+        let card = image_rect.expand(3.0);
+        painter.rect_filled(card, PREVIEW_RADIUS, Color32::from_gray(250));
         painter.image(texture.id(), image_rect, uv, Color32::WHITE);
         painter.rect_stroke(
-            image_rect.expand(3.0),
-            4.0,
+            card,
+            PREVIEW_RADIUS,
             Stroke::new(1.0, Color32::from_black_alpha(60)),
             StrokeKind::Inside,
         );
+        Some(card)
     }
+}
+
+/// 边框按整像素的位置：返回边框里面的范围（选区 `hole` 加上与边框的空隙）与边框的上、下、左、右四条边（像素）。
+fn border_edges(hole: Rect, scale: f32) -> (Rect, [Rect; 4]) {
+    let inner = hole.expand((BORDER_GAP * scale).round());
+    let outer = inner.expand((BORDER_WIDTH * scale).round().max(1.0));
+    let edges = [
+        Rect::from_min_max(outer.min, pos2(outer.max.x, inner.min.y)),
+        Rect::from_min_max(pos2(outer.min.x, inner.max.y), outer.max),
+        Rect::from_min_max(
+            pos2(outer.min.x, inner.min.y),
+            pos2(inner.min.x, inner.max.y),
+        ),
+        Rect::from_min_max(
+            pos2(inner.max.x, inner.min.y),
+            pos2(outer.max.x, inner.max.y),
+        ),
+    ];
+    (inner, edges)
 }
 
 /// 选区上方的提示。
@@ -476,13 +610,19 @@ fn status_text(status: Status, size: [u32; 2]) -> String {
     let [width, height] = size;
     match status {
         Status::Starting | Status::Ready => "长截图：向下滚动选区里的内容".to_owned(),
-        Status::Scrolling => format!("长截图 {width} × {height} · 继续向下滚动，完成后按 ↩ 复制"),
+        Status::Scrolling => format!(
+            "长截图 {width} × {height} · 继续向下滚动，完成后按 {} 复制",
+            keys::RETURN
+        ),
         Status::Behind => format!("长截图 {width} × {height} · 已拼过这里，继续向下滚动"),
         Status::Lost => format!(
             "长截图 {width} × {height} · 跟丢了：滚得太快或滚到了开始位置之上，请滚回上次的位置"
         ),
         Status::Full => format!("长截图 {width} × {height} · 已达到最大长度"),
-        Status::Failed => "长截图失败：请确认已允许 DevTools Hub 录屏".to_owned(),
+        Status::Failed if platform::SCREEN_CAPTURE_NEEDS_PERMISSION => {
+            "长截图失败：请确认已允许 DevTools Hub 录屏".to_owned()
+        }
+        Status::Failed => "长截图失败：截取屏幕出错".to_owned(),
     }
 }
 

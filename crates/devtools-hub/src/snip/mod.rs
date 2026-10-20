@@ -356,6 +356,9 @@ pub fn rgb_color(rgba: [u8; 4]) -> String {
 /// 转成 egui 的纹理数据。
 /// 上传纹理用的图片：超过显卡支持的最大边长 `max_side`（`egui::InputState::max_texture_side`）时等比缩小，
 /// 否则 egui 直接 panic（例如长截图贴到屏幕上）。裁剪、复制、保存仍然用原图。
+///
+/// 缩小用 `thumbnail`（整数运算的面积平均，只能缩小）：1404×18178 的长图缩到 8192 高约 150 ms，
+/// `resize` 的 Triangle 滤波要 700 多毫秒。
 pub fn texture_image(image: &RgbaImage, max_side: usize) -> egui::ColorImage {
     let max = u32::try_from(max_side).unwrap_or(u32::MAX).max(1);
     if image.width() <= max && image.height() <= max {
@@ -363,12 +366,7 @@ pub fn texture_image(image: &RgbaImage, max_side: usize) -> egui::ColorImage {
     }
     let scale = f64::from(max) / f64::from(image.width().max(image.height()));
     let size = |side: u32| ((f64::from(side) * scale).round() as u32).clamp(1, max);
-    let resized = image::imageops::resize(
-        image,
-        size(image.width()),
-        size(image.height()),
-        image::imageops::FilterType::Triangle,
-    );
+    let resized = image::imageops::thumbnail(image, size(image.width()), size(image.height()));
     color_image(&resized)
 }
 

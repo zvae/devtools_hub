@@ -305,7 +305,10 @@ impl HubApp {
             image.width(),
             image.height()
         );
-        self.pins.push(Pin::new(id, image, base, zoom, top_left));
+        let max_side = self.ctx.input(|i| i.max_texture_side);
+        self.pins.push(Pin::new_in_background(
+            id, image, base, zoom, top_left, max_side,
+        ));
         self.request_ui_pass();
     }
 

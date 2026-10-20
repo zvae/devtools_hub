@@ -64,6 +64,8 @@ const ACCENT: Color32 = Color32::from_rgb(0x30, 0x7b, 0xf6);
 const MASK: Color32 = Color32::from_rgba_premultiplied(43, 43, 43, 100);
 /// 浮在截图上的文字底色（尺寸、放大镜信息）。
 const BADGE: Color32 = Color32::from_rgba_premultiplied(24, 24, 26, 230);
+/// 选区上方文字底色的圆角半径（点）。
+const BADGE_RADIUS: f32 = 4.0;
 /// 控制点的边长（点）。
 const HANDLE_SIZE: f32 = 7.0;
 /// 按下后移动超过这个距离（点）才算拖动，否则是单击。
@@ -381,7 +383,7 @@ impl SnipSession {
             // 窗口刚创建、还没画出第一帧时，macOS 显示的是窗口的背景色（灰色），全屏的遮罩就会让整个屏幕灰一下。
             // 透明窗口在这一刻什么都不显示，第一帧画上截图后看起来与真实屏幕一样。
             // Windows 上 wgpu 的透明窗口支持不稳定（面板也没有用），保持不透明。
-            .with_transparent(cfg!(target_os = "macos"))
+            .with_transparent(floating::OVERLAY_TRANSPARENT)
     }
 
     fn ui(&mut self, ui: &mut Ui) -> Outcome {
@@ -569,7 +571,8 @@ impl SnipSession {
     /// 截屏已经结束、窗口还没关闭时：只画截图和标注，看起来与真实的屏幕一样。
     fn paint_still(&mut self, ui: &Ui) {
         if self.scroll.is_some() {
-            // 滚动截图时窗口里本来就没有截图（看到的是真实的屏幕），什么都不画。
+            // 滚动截图时窗口里本来就没有截图（看到的是真实的屏幕），什么都不画
+            // （Windows 上结束时已经清空了窗口的形状，见 `floating::end_scroll`）。
             return;
         }
         let ctx = ui.ctx().clone();
@@ -1340,8 +1343,8 @@ fn size_badge(painter: &Painter, screen: Rect, hole: Rect, size: Vec2) {
     );
 }
 
-/// 选区左上角上方的一行文字（放不下时放在选区里面）。
-fn badge(painter: &Painter, screen: Rect, hole: Rect, text: &str) {
+/// 选区左上角上方的一行文字（放不下时放在选区里面），返回它的位置。
+fn badge(painter: &Painter, screen: Rect, hole: Rect, text: &str) -> Rect {
     let text = text.to_owned();
     let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), Color32::WHITE);
     let badge = galley.size() + vec2(12.0, 6.0);
@@ -1354,8 +1357,9 @@ fn badge(painter: &Painter, screen: Rect, hole: Rect, text: &str) {
         .x
         .clamp(screen.left(), (screen.right() - badge.x).max(screen.left()));
     let rect = Rect::from_min_size(min, badge);
-    painter.rect_filled(rect, 4.0, BADGE);
+    painter.rect_filled(rect, BADGE_RADIUS, BADGE);
     painter.galley(rect.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+    rect
 }
 
 /// 输入里截屏遮罩 `viewport` 的截图事件（导出时请求的那一帧画面）。
