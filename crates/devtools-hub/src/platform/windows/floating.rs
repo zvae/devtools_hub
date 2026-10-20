@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{HWND, LPARAM};
+use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetSaveFileNameW, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
@@ -70,6 +71,21 @@ pub(crate) fn window(title: &str) -> HWND {
     search.found
 }
 
+/// 关掉 DWM 给窗口显示、隐藏加的淡入淡出（与 macOS 上关掉窗口动画一样）：遮罩画的是整屏的静止截图，
+/// 收起时淡出看起来整屏闪一下；贴图与 Snipaste 一样立即出现、消失。
+fn disable_transitions(hwnd: HWND) {
+    let disabled: BOOL = 1;
+    // SAFETY: hwnd 是本线程的窗口；属性值是 4 字节的 BOOL。
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TRANSITIONS_FORCEDISABLED as u32,
+            (&disabled as *const BOOL).cast(),
+            size_of::<BOOL>() as u32,
+        );
+    }
+}
+
 /// 截屏遮罩出现后调用：按物理像素铺满显示器（`frame`）、置顶并设为前台。
 /// 返回是否找到了窗口（窗口还没创建时下一帧再试）。
 pub fn begin_overlay(title: &str, frame: [f64; 4]) -> bool {
@@ -77,6 +93,7 @@ pub fn begin_overlay(title: &str, frame: [f64; 4]) -> bool {
     if hwnd.is_null() {
         return false;
     }
+    disable_transitions(hwnd);
     let [x, y, width, height] = frame.map(|v| v as i32);
     // SAFETY: hwnd 是本线程的窗口。
     unsafe {
@@ -132,8 +149,14 @@ pub fn focus_restored() -> bool {
     true
 }
 
-/// 贴图窗口不需要额外设置（置顶、不在任务栏显示都由 winit 完成）。
-pub fn configure_pin(_title: &str) -> bool {
+/// 贴图窗口出现后调用：关掉显示、隐藏的过渡动画（置顶、不在任务栏显示都由 winit 完成）。
+/// 返回是否找到了窗口。
+pub fn configure_pin(title: &str) -> bool {
+    let hwnd = window(title);
+    if hwnd.is_null() {
+        return false;
+    }
+    disable_transitions(hwnd);
     true
 }
 
