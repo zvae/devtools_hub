@@ -215,6 +215,7 @@ fn c_copies_color_inside_selection() {
     assert!(harness.state().outcome.is_none());
 }
 
+/// 按下或松开 ⇧，事件顺序与 Windows 上的 winit 一致：先 `ModifiersChanged`，再是 ⇧ 自己的按键事件。
 fn shift(harness: &mut Harness<'_, Test>, down: bool) {
     let modifiers = if down {
         Modifiers::SHIFT
@@ -222,6 +223,13 @@ fn shift(harness: &mut Harness<'_, Test>, down: bool) {
         Modifiers::NONE
     };
     harness.event(Event::ModifiersChanged(modifiers));
+    harness.event(Event::Key {
+        key: Key::ShiftLeft,
+        physical_key: Some(Key::ShiftLeft),
+        pressed: down,
+        repeat: false,
+        modifiers,
+    });
     harness.step();
 }
 

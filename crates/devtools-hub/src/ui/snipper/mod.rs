@@ -23,6 +23,7 @@
 //! 在 `initialized_all_windows(event_loop)` 里创建，不受这个限制。
 
 mod marks;
+mod reveal;
 mod scroll;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,7 @@ use crate::platform::floating;
 use crate::snip::annotation::{Mark, Marks, Mosaic, Style, Tool};
 use crate::snip::{self, Capture, Handle};
 use marks::TextDraft;
+use reveal::Reveal;
 use scroll::{FrameFactory, ScrollCapture};
 use toolbar::{BarAction, BarState, Mode};
 
@@ -152,6 +154,8 @@ pub struct SnipSession {
     configured: bool,
     /// 摆好窗口后是否已经去掉显示前的遮挡（见 `floating::reveal_overlay`）。
     revealed: bool,
+    /// 等遮罩按显示器的尺寸画出一帧再露出来（见 [`reveal`]）。
+    reveal: Reveal,
     /// 看门狗的看守编号（遮罩摆好后开始看守，见 [`watchdog`]）。
     watch: Option<u64>,
     /// 截屏结束时的结果，等主界面取走（见 [`Snipper::show`]）。
@@ -326,6 +330,7 @@ impl SnipSession {
             shown: !floating::OVERLAY_STARTS_HIDDEN,
             configured: false,
             revealed: false,
+            reveal: Reveal::default(),
             watch: None,
             outcome: None,
             finished: false,
@@ -382,9 +387,14 @@ impl SnipSession {
     fn ui(&mut self, ui: &mut Ui) -> Outcome {
         let ctx = ui.ctx().clone();
         if self.configured && !self.revealed {
-            // 上一帧已经按铺满屏幕的尺寸画好了，可以露出来。
-            floating::reveal_overlay(&self.title);
-            self.revealed = true;
+            let [_, _, width, height] = self.capture.display.frame;
+            // 上一帧已经按铺满屏幕的尺寸画好了，可以露出来；否则继续重绘（遮住的窗口收不到鼠标事件，不会自己重绘）。
+            if !floating::OVERLAY_STARTS_HIDDEN || self.reveal.ready(ui.painter(), [width, height]) {
+                floating::reveal_overlay(&self.title);
+                self.revealed = true;
+            } else {
+                ctx.request_repaint();
+            }
         }
         if !self.configured {
             self.configured = floating::begin_overlay(&self.title, self.capture.display.frame);
@@ -727,6 +737,11 @@ impl SnipSession {
                     Event::ModifiersChanged(modifiers) => {
                         tapped |= self.shift_changed(modifiers.shift);
                     }
+                    // ⇧ 自己的按键事件不算“别的键”：Windows 上它跟在 `ModifiersChanged` 后面送来。
+                    Event::Key {
+                        key: Key::ShiftLeft | Key::ShiftRight,
+                        ..
+                    } => {}
                     Event::Key { pressed: true, .. }
                     | Event::PointerButton { pressed: true, .. } => {
                         self.shift_tap = false;
