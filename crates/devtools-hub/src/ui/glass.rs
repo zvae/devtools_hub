@@ -17,7 +17,7 @@ use egui::{Color32, Context, LayerId, Painter, Rect, Shape, Stroke, Vec2};
 
 use super::liquid_glass::LiquidGlass;
 use super::style::{self, Palette};
-use crate::platform::panel as native_panel;
+use crate::platform::{panel as native_panel, Backdrop};
 
 /// 栏的下边缘（底部栏是上边缘）渐隐到内容里的高度。
 const EDGE_FADE: f32 = 10.0;
@@ -210,11 +210,14 @@ pub fn vertical_gradient(rect: Rect, top: Color32, bottom: Color32) -> Shape {
 /// 模拟玻璃时是窗口底色调淡，再提一点亮。
 pub fn tint(palette: &Palette, liquid: bool) -> Color32 {
     let dark = palette.text.r() > 128;
+    // 颜色取不透明的窗口底色：`Color32` 存的是预乘值，背景透明度调到 100% 时
+    // `palette.background` 的 alpha 为 0，RGB 也跟着成了 0，反推出来是黑色，浅色模式下栏会发灰。
+    let [r, g, b, _] = Palette::new(dark, Backdrop::Opaque, 0)
+        .background
+        .to_srgba_unmultiplied();
     if liquid {
-        let [r, g, b, _] = palette.background.to_srgba_unmultiplied();
         return Color32::from_rgba_unmultiplied(r, g, b, if dark { 50 } else { 80 });
     }
-    let [r, g, b, _] = palette.background.to_srgba_unmultiplied();
     let lift = |c: u8| c.saturating_add(if dark { 10 } else { 4 });
     let alpha = (f32::from(palette.background.a()) * 0.4).round() as u8;
     Color32::from_rgba_unmultiplied(lift(r), lift(g), lift(b), alpha)
