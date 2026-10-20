@@ -44,6 +44,10 @@ pub const PASTE_NEEDS_PERMISSION: bool = cfg!(target_os = "macos");
 /// 截屏是否需要用户授予系统权限（macOS 的“屏幕录制”；Windows 不需要）。
 pub const SCREEN_CAPTURE_NEEDS_PERMISSION: bool = cfg!(target_os = "macos");
 
+/// 是否支持滚动截图（长截图）。Windows 上的截屏遮罩是不透明窗口（wgpu 的透明窗口不稳定），
+/// 看不到下面滚动的内容，暂不支持。
+pub const SCROLL_CAPTURE_SUPPORTED: bool = cfg!(target_os = "macos");
+
 /// 是否支持通用剪贴板（从 iPhone / iPad 同步内容；Windows 没有）。
 pub const HAS_UNIVERSAL_CLIPBOARD: bool = cfg!(target_os = "macos");
 

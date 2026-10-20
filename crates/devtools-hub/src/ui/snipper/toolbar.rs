@@ -1,6 +1,7 @@
 //! 截屏遮罩的工具栏（参照 Snipaste）：
 //!
-//! - 主工具栏：标注工具（矩形 / 椭圆、箭头、画笔、记号笔、马赛克、文字、橡皮擦）｜撤销、重做｜退出、贴图、保存、复制；
+//! - 主工具栏：标注工具（矩形 / 椭圆、箭头、画笔、记号笔、马赛克、文字、橡皮擦）｜撤销、重做｜长截图｜退出、贴图、保存、复制；
+//!   编辑贴图时没有长截图；滚动截图时只有退出、贴图、保存、复制；
 //! - 属性栏：选中标注工具后出现在主工具栏下方（主工具栏在选区上方时出现在它上方），
 //!   形状工具可以切换矩形和椭圆，其余是三档粗细（文字是字号）和色板。
 //!
@@ -13,6 +14,7 @@ use egui::{
 
 use super::Output;
 use crate::keys;
+use crate::platform;
 use crate::snip::annotation::{Size, Style, Tool, COLORS};
 use crate::ui::icons::{self, Icon};
 
@@ -40,10 +42,23 @@ pub(super) enum BarAction {
     Tool(Tool),
     Undo,
     Redo,
+    /// 进入滚动截图。
+    Scroll,
     Output(Output),
     Size(Size),
     Ellipse(bool),
     Color(Color32),
+}
+
+/// 工具栏的用途，决定上面有哪些按钮。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Mode {
+    /// 普通截屏。
+    Snip,
+    /// 编辑贴图（贴图按钮变成“完成”，没有长截图）。
+    Edit,
+    /// 滚动截图中：只有输出按钮。
+    Scroll,
 }
 
 /// 工具栏的当前状态（决定哪个按钮高亮、哪个不可用）。
@@ -52,8 +67,9 @@ pub(super) struct BarState {
     pub style: Style,
     pub can_undo: bool,
     pub can_redo: bool,
-    /// 正在编辑贴图（贴图按钮变成“完成”）。
-    pub editing: bool,
+    pub mode: Mode,
+    /// 可以进入滚动截图（没有标注、选区不太小）。
+    pub can_scroll: bool,
 }
 
 /// 两个工具栏的位置（点）。
@@ -76,11 +92,13 @@ enum Item {
     Tool(Tool),
     Undo,
     Redo,
+    Scroll,
     Output(Output),
     Separator,
 }
 
-const MAIN_ITEMS: [Item; 15] = [
+/// 编辑贴图时的主工具栏（也是不支持滚动截图的平台上普通截屏的工具栏）。
+const EDIT_ITEMS: [Item; 15] = [
     Item::Tool(Tool::Shape),
     Item::Tool(Tool::Arrow),
     Item::Tool(Tool::Pen),
@@ -97,6 +115,42 @@ const MAIN_ITEMS: [Item; 15] = [
     Item::Output(Output::Save),
     Item::Output(Output::Copy),
 ];
+
+const SNIP_ITEMS: [Item; 17] = [
+    Item::Tool(Tool::Shape),
+    Item::Tool(Tool::Arrow),
+    Item::Tool(Tool::Pen),
+    Item::Tool(Tool::Marker),
+    Item::Tool(Tool::Mosaic),
+    Item::Tool(Tool::Text),
+    Item::Tool(Tool::Eraser),
+    Item::Separator,
+    Item::Undo,
+    Item::Redo,
+    Item::Separator,
+    Item::Scroll,
+    Item::Separator,
+    Item::Output(Output::Cancel),
+    Item::Output(Output::Pin),
+    Item::Output(Output::Save),
+    Item::Output(Output::Copy),
+];
+
+const SCROLL_ITEMS: [Item; 4] = [
+    Item::Output(Output::Cancel),
+    Item::Output(Output::Pin),
+    Item::Output(Output::Save),
+    Item::Output(Output::Copy),
+];
+
+/// 主工具栏上的按钮。
+fn items(mode: Mode) -> &'static [Item] {
+    match mode {
+        Mode::Snip if platform::SCROLL_CAPTURE_SUPPORTED => &SNIP_ITEMS,
+        Mode::Snip | Mode::Edit => &EDIT_ITEMS,
+        Mode::Scroll => &SCROLL_ITEMS,
+    }
+}
 
 /// 一组项目的总宽度。
 fn width(items: &[Item]) -> f32 {
@@ -149,8 +203,8 @@ fn props_width(items: &[Prop]) -> f32 {
 
 /// 工具栏的位置：主工具栏在选区右下角下方，放不下时在选区上方，再放不下时在选区里面的右下角；
 /// 属性栏贴着主工具栏，在远离选区的一侧。
-pub(super) fn layout(selection: Rect, screen: Rect, tool: Option<Tool>) -> Bars {
-    let main_size = vec2(width(&MAIN_ITEMS), BUTTON + PAD * 2.0);
+pub(super) fn layout(selection: Rect, screen: Rect, tool: Option<Tool>, mode: Mode) -> Bars {
+    let main_size = vec2(width(items(mode)), BUTTON + PAD * 2.0);
     let props_items = tool.map(props).unwrap_or_default();
     let props_size =
         (!props_items.is_empty()).then(|| vec2(props_width(&props_items), BUTTON + PAD * 2.0));
@@ -189,7 +243,7 @@ pub(super) fn show(ui: &Ui, painter: &Painter, bars: &Bars, state: &BarState) ->
     let mut action = None;
     paint_bar(painter, bars.main);
     let mut x = bars.main.left() + PAD;
-    for (index, item) in MAIN_ITEMS.iter().enumerate() {
+    for (index, item) in items(state.mode).iter().enumerate() {
         if let Item::Separator = item {
             separator(painter, x, bars.main);
             x += SEPARATOR;
@@ -222,9 +276,20 @@ pub(super) fn show(ui: &Ui, painter: &Painter, bars: &Bars, state: &BarState) ->
                 false,
                 BarAction::Redo,
             ),
+            Item::Scroll => (
+                Icon::ScrollCapture,
+                if state.can_scroll {
+                    "长截图（滚动截图）".to_owned()
+                } else {
+                    "长截图（有标注或选区太小时不可用）".to_owned()
+                },
+                state.can_scroll,
+                false,
+                BarAction::Scroll,
+            ),
             Item::Output(output) => (
                 output_icon(output),
-                output_hint(output, state.editing),
+                output_hint(output, state.mode),
                 true,
                 false,
                 BarAction::Output(output),
@@ -315,9 +380,13 @@ fn output_icon(output: Output) -> Icon {
 }
 
 /// 输出按钮的提示：名称与快捷键（与 Snipaste 的 “Pin to screen (Ctrl+T)” 等一致）。
-fn output_hint(output: Output, editing: bool) -> String {
+fn output_hint(output: Output, mode: Mode) -> String {
     let command = |key: &str| keys::shortcut(&[keys::COMMAND, key]);
+    let editing = mode == Mode::Edit;
     match output {
+        Output::Copy if mode == Mode::Scroll => {
+            format!("完成并复制 {} / {}", command("C"), keys::RETURN)
+        }
         Output::Cancel if editing => format!("放弃修改 {}", keys::ESCAPE),
         Output::Cancel => format!("退出 {}", keys::ESCAPE),
         Output::Pin if editing => format!("完成编辑 {}", command("T")),
@@ -466,25 +535,29 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));
         // 选区上方有空间、下方没有：主工具栏在上，属性栏在它上面。
         let selection = Rect::from_min_max(pos2(600.0, 500.0), pos2(1100.0, 790.0));
-        let bars = layout(selection, screen, Some(Tool::Pen));
+        let bars = layout(selection, screen, Some(Tool::Pen), Mode::Snip);
         let props = bars.props.unwrap();
         assert!(bars.main.bottom() <= selection.top());
         assert!(props.bottom() <= bars.main.top());
         assert!(screen.contains_rect(bars.main) && screen.contains_rect(props));
         // 下方有空间：主工具栏在下，属性栏在它下面；右边与选区对齐。
         let selection = Rect::from_min_max(pos2(600.0, 100.0), pos2(1100.0, 300.0));
-        let bars = layout(selection, screen, Some(Tool::Shape));
+        let bars = layout(selection, screen, Some(Tool::Shape), Mode::Snip);
         assert!(bars.main.top() >= selection.bottom());
         assert!(bars.props.unwrap().top() >= bars.main.bottom());
         assert_eq!(bars.main.right(), selection.right());
         // 橡皮擦没有属性栏；没有选工具时也没有。
-        assert!(layout(selection, screen, Some(Tool::Eraser))
+        assert!(layout(selection, screen, Some(Tool::Eraser), Mode::Snip)
             .props
             .is_none());
-        assert!(layout(selection, screen, None).props.is_none());
+        assert!(layout(selection, screen, None, Mode::Snip).props.is_none());
         // 屏幕比工具栏还窄：不崩溃，靠左。
         let narrow = Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0));
         let tiny = Rect::from_min_max(pos2(10.0, 10.0), pos2(50.0, 20.0));
-        assert_eq!(layout(tiny, narrow, None).main.left(), 4.0);
+        assert_eq!(layout(tiny, narrow, None, Mode::Snip).main.left(), 4.0);
+        // 滚动截图的工具栏只有四个输出按钮。
+        let scroll = layout(selection, screen, None, Mode::Scroll);
+        assert_eq!(scroll.main.width(), BUTTON * 4.0 + PAD * 2.0);
+        assert_eq!(scroll.main.right(), selection.right());
     }
 }

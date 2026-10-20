@@ -265,7 +265,7 @@ fn toolbar_button_selects_tool() {
     select_area(&mut harness);
     // 第一个按钮是矩形 / 椭圆。
     let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0));
-    let bars = toolbar::layout(rect(100.0, 50.0, 300.0, 200.0), screen, None);
+    let bars = toolbar::layout(rect(100.0, 50.0, 300.0, 200.0), screen, None, Mode::Snip);
     let first = bars.main.left_top() + vec2(4.0 + 15.0, 4.0 + 15.0);
     click(&mut harness, first);
     assert_eq!(harness.state().session.tool, Some(Tool::Shape));
@@ -518,6 +518,100 @@ fn output_with_marks_exports_rendered_frame() {
     assert!(session.export.is_none());
 }
 
+/// 模拟滚动的画面：一张很长的“网页”，每截一次向下滚动 40 像素（选区 200×150）。
+fn scrolling_frames(_: &Capture, rect: Rect, _: Option<u32>) -> scroll::FrameSource {
+    let (width, height) = (rect.width() as u32, rect.height() as u32);
+    let page = RgbaImage::from_fn(width, 2000, |x, y| {
+        let line = y % 24;
+        let length = 30 + (y / 24 * 37 % 150);
+        if (4..16).contains(&line) && x > 8 && x < 8 + length && (x + y / 24) % 7 != 0 {
+            Rgba([(30 + y % 50) as u8, 40, (60 + x % 40) as u8, 255])
+        } else {
+            Rgba([250, 250, 250, 255])
+        }
+    });
+    let mut calls = 0u32;
+    Box::new(move || {
+        let top = (calls * 40).min(2000 - height);
+        calls += 1;
+        Ok(image::imageops::crop_imm(&page, 0, top, width, height).to_image())
+    })
+}
+
+/// 主工具栏上“长截图”按钮的中心（选区 (100, 50)–(300, 200)）。
+fn scroll_button() -> Pos2 {
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0));
+    let bars = toolbar::layout(rect(100.0, 50.0, 300.0, 200.0), screen, None, Mode::Snip);
+    // 7 个工具、分隔线、撤销、重做、分隔线之后是长截图。
+    bars.main.left_top() + vec2(4.0 + 7.0 * 30.0 + 9.0 + 2.0 * 30.0 + 9.0 + 15.0, 4.0 + 15.0)
+}
+
+/// 等后台线程把长图拼到至少 `height` 像素高（最多等 5 秒）。
+fn wait_for_height(harness: &mut Harness<'_, Test>, height: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        harness.step();
+        let (_, size) = harness.state().session.scroll.as_ref().unwrap().status();
+        if size[1] >= height {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "长图一直没有拼到 {height} 像素（现在 {size:?}）"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn scroll_capture_stitches_frames_and_copies_long_image() {
+    let mut harness = harness();
+    harness.state_mut().session.frame_source = scrolling_frames;
+    select_area(&mut harness);
+    assert!(harness.state().session.can_scroll());
+    click(&mut harness, scroll_button());
+    assert!(harness.state().session.scroll.is_some(), "应该进入长截图");
+    wait_for_height(&mut harness, 400);
+    harness.key_press(Key::Enter);
+    harness.step();
+    let Some(Outcome::Copy(image)) = harness.state_mut().outcome.take() else {
+        panic!("↩ 应该复制长图");
+    };
+    assert_eq!(image.width(), 200);
+    assert!(image.height() >= 400, "长图高度 {}", image.height());
+}
+
+#[test]
+fn scroll_capture_escape_cancels() {
+    let mut harness = harness();
+    harness.state_mut().session.frame_source = scrolling_frames;
+    select_area(&mut harness);
+    click(&mut harness, scroll_button());
+    assert!(harness.state().session.scroll.is_some());
+    harness.key_press(Key::Escape);
+    harness.step();
+    assert!(matches!(harness.state().outcome, Some(Outcome::Cancel)));
+}
+
+#[test]
+fn scroll_capture_needs_no_marks_and_a_large_enough_selection() {
+    let mut harness = harness();
+    harness.state_mut().session.frame_source = scrolling_frames;
+    select_area(&mut harness);
+    harness.state_mut().session.tool = Some(Tool::Pen);
+    drag(&mut harness, pos2(150.0, 100.0), pos2(200.0, 150.0));
+    harness.state_mut().session.tool = None;
+    assert!(!harness.state().session.can_scroll());
+    // 有标注时按钮不可用，点了也不进入长截图。
+    click(&mut harness, scroll_button());
+    assert!(harness.state().session.scroll.is_none());
+    // 选区太小也不行。
+    let session = &mut harness.state_mut().session;
+    session.marks = Marks::default();
+    session.selection = Some(rect(10.0, 10.0, 60.0, 200.0));
+    assert!(!session.can_scroll());
+}
+
 /// 离屏渲染截屏遮罩（选区、各种标注、工具栏与属性栏），输出 PNG 供人工检查。
 /// 需要 GPU，默认忽略：`cargo test -p devtools-hub snapshot -- --ignored`，输出到 `target/ui-snapshots/`。
 #[test]
@@ -636,4 +730,57 @@ fn snapshot_snipper() {
         });
     std::fs::create_dir_all(&dir).unwrap();
     rendered.save(dir.join("snipper.png")).unwrap();
+}
+
+/// 离屏渲染长截图中的遮罩（选区外的遮罩、边框、提示、工具栏与预览），输出 PNG 供人工检查。
+/// 需要 GPU，默认忽略：`cargo test -p devtools-hub snapshot -- --ignored`，输出到 `target/ui-snapshots/`。
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_scroll_capture() {
+    let display = Display {
+        id: 0,
+        frame: [0.0, 0.0, 800.0, 500.0],
+        logical: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 500.0)),
+        scale: 2.0,
+    };
+    let image = RgbaImage::from_pixel(1600, 1000, Rgba([90, 120, 160, 255]));
+    let capture = Capture::new(display, image, &[]);
+    let mut session = SnipSession::new(capture, [400.0, 250.0]);
+    session.selection = Some(rect(300.0, 160.0, 1100.0, 760.0));
+    let mut harness = Harness::builder()
+        .with_size(vec2(800.0, 500.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, session: &mut SnipSession| {
+                let _ = session.ui(ui);
+            },
+            session,
+        );
+    crate::ui::style::install(&harness.ctx);
+    let source = scrolling_frames(
+        &harness.state().capture,
+        rect(300.0, 160.0, 1100.0, 760.0),
+        None,
+    );
+    let ctx = harness.ctx.clone();
+    harness.state_mut().scroll = Some(ScrollCapture::start(source, ctx, ViewportId::ROOT));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while harness.state().scroll.as_ref().unwrap().status().1[1] < 1200 {
+        assert!(std::time::Instant::now() < deadline, "长图一直没有拼好");
+        harness.step();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    harness.run_steps(3);
+    let rendered = harness.render().expect("离屏渲染失败");
+    let dir = std::env::var_os("UI_SNAPSHOT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../target/ui-snapshots"
+            ))
+        });
+    std::fs::create_dir_all(&dir).unwrap();
+    rendered.save(dir.join("scroll_capture.png")).unwrap();
 }

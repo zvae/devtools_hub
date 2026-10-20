@@ -6,6 +6,9 @@
 //! - 窗口：`CGWindowListCopyWindowInfo` 取屏幕上各窗口的位置（`kCGWindowBounds`）、层级、
 //!   不透明度与所属进程，跳过本应用自己的窗口，供截屏时自动框出鼠标下的窗口。
 //!
+//! - 滚动截图：用 `CGWindowListCreateImage` 只截截屏遮罩下面的窗口（`kCGWindowListOptionOnScreenBelowWindow`），
+//!   遮罩上的边框、工具栏、预览不会进入画面（微信用 ScreenCaptureKit 的 `excludingWindows` 达到同样的效果）。
+//!
 //! 截屏需要“屏幕录制”权限：没有权限时只能截到桌面和菜单栏，其他应用的窗口内容是空的。
 
 use std::ffi::c_void;
@@ -73,6 +76,12 @@ unsafe extern "C" {
     fn CGEventCreate(source: CFTypeRef) -> CFTypeRef;
     fn CGEventGetLocation(event: CFTypeRef) -> CGPoint;
     fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> CFTypeRef;
+    fn CGWindowListCreateImage(
+        bounds: CGRect,
+        option: u32,
+        window: u32,
+        image_option: u32,
+    ) -> CFTypeRef;
     fn CGRectMakeWithDictionaryRepresentation(dict: CFTypeRef, rect: *mut CGRect) -> bool;
     static kCGWindowBounds: CFTypeRef;
     static kCGWindowLayer: CFTypeRef;
@@ -98,7 +107,10 @@ unsafe extern "C" {
 
 // 常量取值见 CGWindow.h、CGImage.h 与 CFNumber.h。
 const K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1 << 0;
+const K_CG_WINDOW_LIST_OPTION_ON_SCREEN_BELOW_WINDOW: u32 = 1 << 2;
 const K_CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
+/// `kCGWindowImageBestResolution`：按显示器的物理像素截取（Retina 屏为点的 2 倍）。
+const K_CG_WINDOW_IMAGE_BEST_RESOLUTION: u32 = 1 << 3;
 const K_CG_NULL_WINDOW_ID: u32 = 0;
 /// `kCGImageAlphaPremultipliedLast`：按 R、G、B、A 的顺序存放（屏幕像素都不透明，预乘与否没有区别）。
 const K_CG_IMAGE_ALPHA_PREMULTIPLIED_LAST: u32 = 1;
@@ -195,12 +207,47 @@ pub fn capture(display: &Display) -> Result<RgbaImage> {
         origin: CGPoint::default(),
         size: CGSize { width, height },
     };
+    // SAFETY: 返回的图像由 `to_rgba` 释放。
+    let image = unsafe { CGDisplayCreateImageForRect(display.id, local) };
+    if image.is_null() {
+        bail!("截屏失败（CGDisplayCreateImageForRect 返回空）");
+    }
+    // SAFETY: `image` 是刚创建、由我们持有的 CGImage。
+    unsafe { to_rgba(image) }
+}
+
+/// 截取桌面上的一块区域（`area` 是全局坐标 `[x, y, 宽, 高]`，点），只截窗口 `below`（本应用的截屏遮罩）下面的内容；
+/// 返回物理像素的 RGBA 图像。滚动截图时遮罩一直盖在上面，用它排除遮罩自己。
+pub fn capture_area(area: [f64; 4], below: Option<u32>) -> Result<RgbaImage> {
+    let [x, y, width, height] = area;
+    let bounds = CGRect {
+        origin: CGPoint { x, y },
+        size: CGSize { width, height },
+    };
+    let (option, window) = match below {
+        Some(window) => (K_CG_WINDOW_LIST_OPTION_ON_SCREEN_BELOW_WINDOW, window),
+        None => (K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY, K_CG_NULL_WINDOW_ID),
+    };
+    // SAFETY: 返回的图像由 `to_rgba` 释放。macOS 14 起这个函数标为过时，但仍然可用
+    // （微信 4.1、Snipaste 2.10 也在用；macOS 26 上实测可用）。
+    let image = unsafe {
+        CGWindowListCreateImage(bounds, option, window, K_CG_WINDOW_IMAGE_BEST_RESOLUTION)
+    };
+    if image.is_null() {
+        bail!("截屏失败（CGWindowListCreateImage 返回空）");
+    }
+    // SAFETY: 同上。
+    unsafe { to_rgba(image) }
+}
+
+/// 把 CGImage 标记为 sRGB 后画进 RGBA 位图（只换标记、不做色彩转换，取色得到的就是屏幕上显示的数值），
+/// 并释放 `image`。
+///
+/// # Safety
+/// `image` 必须是调用方持有的有效 CGImage，调用后不能再使用。
+unsafe fn to_rgba(image: CFTypeRef) -> Result<RgbaImage> {
     // SAFETY: 所有 Create / Copy 得到的对象都在返回前释放；位图缓冲区大小与上下文参数一致。
     unsafe {
-        let image = CGDisplayCreateImageForRect(display.id, local);
-        if image.is_null() {
-            bail!("截屏失败（CGDisplayCreateImageForRect 返回空）");
-        }
         let srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
         let tagged = CGImageCreateCopyWithColorSpace(image, srgb);
         let source = if tagged.is_null() { image } else { tagged };

@@ -196,8 +196,8 @@ impl HubApp {
             }
             Outcome::Pin { image, .. } if editing.is_some() => self.update_pin(edited, &image),
             Outcome::Pin { image, rect } => {
-                let size = rect.size();
-                self.create_pin(image, size, 1.0, rect.min);
+                let (zoom, top_left) = fit_long_pin(rect);
+                self.create_pin(image, rect.size(), zoom, top_left);
             }
             Outcome::CopyColor(hex) => {
                 let snapshot = devtools_clipboard::Snapshot::from_text(&hex);
@@ -455,6 +455,31 @@ impl HubApp {
             }
         }
     }
+}
+
+/// 截屏结果贴到屏幕时的缩放比例与位置：普通截屏原样贴在截屏的地方；长截图比屏幕高，
+/// 缩小到屏幕放得下（与贴剪贴板里的大图一样最多占 [`MAX_PIN_FRACTION`]），并保持在屏幕内。
+fn fit_long_pin(rect: Rect) -> (f32, Pos2) {
+    let Some((_, display)) = screen::cursor() else {
+        return (1.0, rect.min);
+    };
+    let area = display.logical;
+    if area.contains_rect(rect) {
+        return (1.0, rect.min);
+    }
+    let zoom = (area.size() * MAX_PIN_FRACTION / rect.size())
+        .min_elem()
+        .min(1.0);
+    let size = rect.size() * zoom;
+    let top_left = Pos2::new(
+        rect.min
+            .x
+            .clamp(area.left(), (area.right() - size.x).max(area.left())),
+        rect.min
+            .y
+            .clamp(area.top(), (area.bottom() - size.y).max(area.top())),
+    );
+    (zoom, top_left)
 }
 
 /// 第一次保存截图时对话框打开的目录：macOS 是桌面（与系统截屏一致），Windows 是“图片”文件夹。

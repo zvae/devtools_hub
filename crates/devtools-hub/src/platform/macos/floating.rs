@@ -138,6 +138,14 @@ pub fn begin_overlay(title: &str, frame: [f64; 4]) -> bool {
     true
 }
 
+/// 截屏遮罩的窗口编号（`CGWindowID`），滚动截图时用来把遮罩排除在截图之外。窗口还没创建时为空。
+pub fn overlay_window_id(title: &str) -> Option<u32> {
+    let (_, window) = find(title)?;
+    u32::try_from(window.windowNumber())
+        .ok()
+        .filter(|id| *id != 0)
+}
+
 /// 收起截屏遮罩（egui 随后销毁窗口）。
 pub fn hide_overlay(title: &str) {
     {

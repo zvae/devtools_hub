@@ -6,7 +6,8 @@
 //! - 移动鼠标时自动框出鼠标下的窗口，单击选中它（桌面上没有窗口时选中整个屏幕），拖动则框选任意区域；
 //! - 选区可以拖动、拖八个控制点调整大小；方向键移动 1 像素，⇧+方向键调整宽高；
 //! - 放大镜显示鼠标处的像素与颜色，按 C 复制颜色值，按 ⇧ 切换 RGB / HEX（选好区域后鼠标在选区内也显示）；
-//! - 工具栏（`toolbar`）：矩形 / 椭圆、箭头、画笔、记号笔、马赛克、文字、橡皮擦，撤销重做，退出、贴图、保存、复制；
+//! - 工具栏（`toolbar`）：矩形 / 椭圆、箭头、画笔、记号笔、马赛克、文字、橡皮擦，撤销重做，长截图，退出、贴图、保存、复制；
+//! - 长截图（`scroll`）：选区内鼠标穿透，用户滚动下面的窗口，后台截取选区并拼成长图；
 //! - 双击选区 / ↩ / ⌘C 复制，⌘T 贴图，⌘S 保存，⌘Z / ⇧⌘Z 撤销重做，右键先取消工具、再取消选区、最后退出，esc 退出。
 //!
 //! 编辑贴图（贴图右键菜单“编辑标注”或空格）：同样打开截屏遮罩，选区固定为贴图的范围、用贴图的原图作底，
@@ -22,6 +23,7 @@
 //! 在 `initialized_all_windows(event_loop)` 里创建，不受这个限制。
 
 mod marks;
+mod scroll;
 #[cfg(test)]
 mod tests;
 mod toolbar;
@@ -43,7 +45,8 @@ use crate::platform::floating;
 use crate::snip::annotation::{Mark, Marks, Mosaic, Style, Tool};
 use crate::snip::{self, Capture, Handle};
 use marks::TextDraft;
-use toolbar::{BarAction, BarState};
+use scroll::{FrameFactory, ScrollCapture};
+use toolbar::{BarAction, BarState, Mode};
 
 /// 截屏遮罩窗口标题的前缀，后面跟着这次截屏的编号（平台层按标题找到窗口）。
 const TITLE: &str = "DevTools Hub 截屏";
@@ -168,6 +171,10 @@ pub struct SnipSession {
     shift_down: bool,
     /// ⇧ 按下后还没和别的键、鼠标一起用：松开时算单独按了一下 ⇧（切换颜色格式）。
     shift_tap: bool,
+    /// 正在滚动截图（长截图）。
+    scroll: Option<ScrollCapture>,
+    /// 滚动截图截取选区的方式（测试里换成模拟的画面）。
+    frame_source: FrameFactory,
 }
 
 /// 截屏遮罩窗口：持有截屏状态，由主界面每帧调用 [`Snipper::show`] 维持。
@@ -292,11 +299,7 @@ impl Drop for Snipper {
 impl SnipSession {
     /// `cursor` 是截屏时鼠标的全局坐标（平台单位）。
     pub fn new(capture: Capture, cursor: [f64; 2]) -> Self {
-        let [x, y, width, height] = capture.display.frame;
-        let initial = pos2(
-            ((cursor[0] - x) / width) as f32 * capture.image.width() as f32,
-            ((cursor[1] - y) / height) as f32 * capture.image.height() as f32,
-        );
+        let initial = capture.global_to_pixels(cursor);
         let number = NEXT_SNIP.fetch_add(1, Ordering::Relaxed);
         Self {
             number,
@@ -320,6 +323,8 @@ impl SnipSession {
             rgb: false,
             shift_down: false,
             shift_tap: false,
+            scroll: None,
+            frame_source: scroll::platform_source,
         }
     }
 
@@ -366,6 +371,9 @@ impl SnipSession {
             }
             ctx.request_repaint();
         }
+        if self.scroll.is_some() {
+            return self.scroll_ui(ui, &ctx);
+        }
         // 整个窗口（不受外层布局的边距影响，测试里 kittest 会给界面加边距）。
         let screen = ctx.viewport_rect();
         let view = View::new(screen, self.capture.bounds());
@@ -381,9 +389,14 @@ impl SnipSession {
         }
 
         // 工具栏：选好区域后显示（框选、调整选区时不显示）。先算出位置，鼠标在工具栏上时不参与选区和标注操作。
+        let mode = if self.editing.is_some() {
+            Mode::Edit
+        } else {
+            Mode::Snip
+        };
         let bars = match (self.selection, self.drag) {
             (Some(selection), None | Some(Drag::Draw { .. }) | Some(Drag::Erase)) => Some(
-                toolbar::layout(view.to_points(selection), screen, self.tool),
+                toolbar::layout(view.to_points(selection), screen, self.tool, mode),
             ),
             _ => None,
         };
@@ -442,7 +455,8 @@ impl SnipSession {
                 style: self.style,
                 can_undo: self.marks.can_undo(),
                 can_redo: self.marks.can_redo(),
-                editing: self.editing.is_some(),
+                mode,
+                can_scroll: self.can_scroll(),
             };
             if let Some(action) = toolbar::show(ui, &painter, &bars, &state) {
                 if let Some(result) = self.apply_bar(&ctx, &view, action) {
@@ -521,6 +535,10 @@ impl SnipSession {
 
     /// 截屏已经结束、窗口还没关闭时：只画截图和标注，看起来与真实的屏幕一样。
     fn paint_still(&mut self, ui: &Ui) {
+        if self.scroll.is_some() {
+            // 滚动截图时窗口里本来就没有截图（看到的是真实的屏幕），什么都不画。
+            return;
+        }
         let ctx = ui.ctx().clone();
         let screen = ctx.viewport_rect();
         let view = View::new(screen, self.capture.bounds());
@@ -976,6 +994,7 @@ impl SnipSession {
                 self.commit_text(ctx, view);
                 self.marks.redo();
             }
+            BarAction::Scroll => self.start_scroll(ctx, view),
             BarAction::Output(output) => {
                 let pointer = self.pointer;
                 return Some(self.output(ctx, view, output, pointer));
@@ -1287,7 +1306,17 @@ fn paint_handles(painter: &Painter, rect: Rect) {
 
 /// 选区左上角上方的尺寸（像素）。
 fn size_badge(painter: &Painter, screen: Rect, hole: Rect, size: Vec2) {
-    let text = format!("{} × {}", size.x as u32, size.y as u32);
+    badge(
+        painter,
+        screen,
+        hole,
+        &format!("{} × {}", size.x as u32, size.y as u32),
+    );
+}
+
+/// 选区左上角上方的一行文字（放不下时放在选区里面）。
+fn badge(painter: &Painter, screen: Rect, hole: Rect, text: &str) {
+    let text = text.to_owned();
     let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), Color32::WHITE);
     let badge = galley.size() + vec2(12.0, 6.0);
     let mut min = pos2(hole.left(), hole.top() - badge.y - 6.0);

@@ -47,6 +47,8 @@ pub enum Icon {
     Redo,
     Save,
     Copy,
+    /// 长截图（滚动截图）。
+    ScrollCapture,
 }
 
 /// 16×16 网格坐标到屏幕坐标的映射。
@@ -382,6 +384,17 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             );
             line(&[(5.2, 2.6), (5.2, 6.0), (10.0, 6.0), (10.0, 2.6)]);
             closed(&[(4.6, 13.4), (4.6, 9.2), (11.4, 9.2), (11.4, 13.4)], false);
+        }
+        Icon::ScrollCapture => {
+            // 一页内容，下面一个向下的箭头。
+            painter.rect_stroke(
+                g.rect(3.0, 2.6, 13.0, 9.0),
+                g.r(1.2),
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            line(&[(8.0, 5.0), (8.0, 13.6)]);
+            line(&[(5.4, 11.0), (8.0, 13.6), (10.6, 11.0)]);
         }
         Icon::Copy => {
             painter.rect_stroke(

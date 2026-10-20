@@ -8,6 +8,7 @@
 //! 截屏遮罩（`ui::snip`）和贴图窗口（`ui::pin`）只负责绘制和交互，计算都在这里，便于测试。
 
 pub mod annotation;
+pub mod scroll;
 
 use std::io::Cursor;
 
@@ -154,6 +155,15 @@ impl Capture {
             ((rect.max - logical.min) * k).to_pos2(),
         )
         .intersect(self.bounds())
+    }
+
+    /// 全局坐标中的点（平台单位，例如 `platform::screen::cursor` 的结果）换算成图像中的像素坐标。
+    pub fn global_to_pixels(&self, point: [f64; 2]) -> Pos2 {
+        let [x, y, width, height] = self.display.frame;
+        pos2(
+            ((point[0] - x) / width) as f32 * self.image.width() as f32,
+            ((point[1] - y) / height) as f32 * self.image.height() as f32,
+        )
     }
 
     /// 选区在 egui 逻辑坐标中的位置（贴图出现在截屏的地方）。

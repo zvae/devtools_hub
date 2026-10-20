@@ -92,6 +92,12 @@ pub fn cursor() -> Option<([f64; 2], Display)> {
     }
 }
 
+/// 截取桌面上的一块区域，只截截屏遮罩下面的内容（滚动截图用）。Windows 上还没有实现：
+/// 遮罩是不透明窗口，看不到下面滚动的内容（见 `platform::SCROLL_CAPTURE_SUPPORTED`）。
+pub fn capture_area(_area: [f64; 4], _below: Option<u32>) -> Result<RgbaImage> {
+    bail!("Windows 上还不支持滚动截图")
+}
+
 /// 截取整个显示器，返回物理像素的 RGBA 图像。
 pub fn capture(display: &Display) -> Result<RgbaImage> {
     let [x, y, width, height] = display.frame.map(|v| v as i32);

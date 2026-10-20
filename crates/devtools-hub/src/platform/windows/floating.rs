@@ -19,9 +19,11 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetSaveFileNameW, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumThreadWindows, GetForegroundWindow, GetWindowTextW, IsWindow, SetForegroundWindow,
-    SetWindowPos, ShowWindow, ShowWindowAsync, HWND_TOPMOST, SWP_SHOWWINDOW, SW_HIDE,
+    SetWindowPos, ShowWindow, ShowWindowAsync, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SW_HIDE,
 };
 
 use super::{panel, wide, workspace};
@@ -87,6 +89,11 @@ pub fn begin_overlay(title: &str, frame: [f64; 4]) -> bool {
     }
     OVERLAY.store(hwnd as isize, Ordering::Relaxed);
     true
+}
+
+/// 截屏遮罩的窗口编号，排除在滚动截图之外用（Windows 上还不支持滚动截图）。
+pub fn overlay_window_id(_title: &str) -> Option<u32> {
+    None
 }
 
 /// 收起截屏遮罩（egui 随后销毁窗口）。
