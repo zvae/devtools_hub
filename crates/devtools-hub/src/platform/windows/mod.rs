@@ -15,6 +15,7 @@ pub mod mouse;
 pub mod ocr;
 pub mod panel;
 pub mod pasteboard;
+mod resize;
 pub mod screen;
 mod scroll_mask;
 pub mod updater;

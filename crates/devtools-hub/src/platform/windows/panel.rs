@@ -78,6 +78,8 @@ pub fn attach(handle: &impl HasWindowHandle, start_hidden: bool) -> Result<()> {
         }
     }
     PANEL.with(|panel| panel.set(hwnd));
+    // 无边框窗口在 Windows 上没有可以拖动的边框，四边和四个角都不出现缩放鼠标（见 `resize`）。
+    super::resize::add_borders(hwnd);
     tracing::debug!("已绑定面板窗口 {hwnd:?}");
     Ok(())
 }
