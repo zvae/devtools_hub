@@ -186,6 +186,11 @@ pub fn begin_overlay(title: &str, frame: [f64; 4]) -> bool {
         return false;
     }
     disable_transitions(hwnd);
+    // 显示之前一定先遮住：eframe 创建视口的那一帧就会运行遮罩的界面，而主界面在这一帧已经跑过了，
+    // 没有机会调用 [`show_overlay`]。这时窗口还从没被遮住过，下面的 `SWP_SHOWWINDOW` 一显示，
+    // 屏幕上就是还没画过的白底，接着是被拉伸的旧尺寸画面，然后才是正确的截图——闪两三帧。
+    // 已经被 `show_overlay` 遮住时再遮一次没有副作用。
+    set_cloaked(hwnd, true);
     // SAFETY: hwnd 是本线程的窗口。
     unsafe {
         let foreground = GetForegroundWindow();
