@@ -191,7 +191,7 @@ impl HubApp {
             }
             Outcome::Save(image) => {
                 self.update_pin(edited, &image);
-                self.save_image(&image);
+                self.save_image(&image, true);
                 // macOS 的保存对话框已经还过焦点（这里什么也不做）；Windows 在这里还。
                 floating::restore_focus();
             }
@@ -394,7 +394,7 @@ impl HubApp {
             }
             PinAction::Save => {
                 let image = self.pins[index].image();
-                if self.save_image(&image) {
+                if self.save_image(&image, true) {
                     // 保存对话框期间贴图可能已被关闭，重新查找。
                     if let Some(pin) = self.pins.iter().find(|pin| pin.id == id) {
                         pin.tip(&self.ctx, "已保存");
@@ -435,7 +435,10 @@ impl HubApp {
     }
 
     /// 弹出保存对话框，把图片存为 PNG。返回是否保存成功（取消时为 false）。
-    fn save_image(&mut self, image: &RgbaImage) -> bool {
+    ///
+    /// `restore_focus`：对话框关掉后把焦点还给之前的应用（截屏、贴图用）；
+    /// 从提取文字窗口调用时传 false，让焦点留在面板上（见 `floating::save_dialog`）。
+    pub(super) fn save_image(&mut self, image: &RgbaImage, restore_focus: bool) -> bool {
         let directory = self
             .settings
             .screenshot_dir
@@ -443,7 +446,7 @@ impl HubApp {
             .filter(|dir| dir.is_dir())
             .or_else(default_screenshot_dir);
         let name = snip::file_name(chrono::Local::now());
-        let Some(path) = floating::save_dialog(&name, directory.as_deref()) else {
+        let Some(path) = floating::save_dialog(&name, directory.as_deref(), restore_focus) else {
             return false;
         };
         let result = snip::encode_png(image, false)

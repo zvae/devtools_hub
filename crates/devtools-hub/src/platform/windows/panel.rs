@@ -215,6 +215,19 @@ pub fn show(anchor: Anchor, size: [f32; 2]) -> bool {
     true
 }
 
+/// 让面板重新成为前台窗口，返回是否成功（面板没显示时失败）。
+///
+/// 系统的保存对话框关掉之后会把焦点还给它前面的程序，面板跟着失去焦点，看上去就像被关掉了。
+pub fn refocus() -> bool {
+    let hwnd = window();
+    if hwnd.is_null() || unsafe { IsWindowVisible(hwnd) } == 0 {
+        return false;
+    }
+    // SAFETY: hwnd 是已绑定的面板窗口。
+    unsafe { bring_to_front(hwnd) };
+    is_active()
+}
+
 /// 隐藏面板；`restore_focus` 为 true 时激活弹出面板之前的前台窗口。
 pub fn hide(restore_focus: bool) {
     let hwnd = window();

@@ -7,10 +7,12 @@ use anyhow::{anyhow, Result};
 use egui::{pos2, vec2, Rect};
 use image::RgbaImage;
 use objc2::rc::autoreleasepool;
-use objc2::AnyThread;
-use objc2_foundation::{NSArray, NSData, NSDictionary, NSString};
+use objc2::runtime::AnyObject;
+use objc2::{msg_send, sel, AnyThread};
+use objc2_foundation::{NSArray, NSData, NSDictionary, NSRange, NSRect, NSString};
 use objc2_vision::{
-    VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
+    VNImageRequestHandler, VNRecognizeTextRequest, VNRecognizedText, VNRequest,
+    VNRequestTextRecognitionLevel,
 };
 
 use crate::snip::{self, ocr::Line};
@@ -70,13 +72,60 @@ fn recognize_tile(image: &RgbaImage) -> Result<Vec<Line>> {
                 (bounds.size.width * width) as f32,
                 (bounds.size.height * height) as f32,
             );
-            lines.push(Line {
-                text: candidate.string().to_string(),
-                rect: Rect::from_min_size(min, size),
-            });
+            let rect = Rect::from_min_size(min, size);
+            let mut line = Line::new(candidate.string().to_string(), rect);
+            line.chars = char_boxes(&candidate, width, height);
+            lines.push(line);
         }
         Ok(lines)
     })
+}
+
+/// 一行里每个字符的位置：Vision 能按字符范围给出矩形（`boundingBoxForRange:error:`），
+/// 拿不到时返回空，由 [`crate::snip::ocr::fill_chars`] 按字符宽度平铺。
+fn char_boxes(candidate: &VNRecognizedText, width: f64, height: f64) -> Vec<Rect> {
+    // SAFETY: 只查询方法是否存在，没有参数。
+    let supported = unsafe {
+        let responds: bool =
+            msg_send![candidate, respondsToSelector: sel!(boundingBoxForRange:error:)];
+        responds
+    };
+    if !supported {
+        return Vec::new();
+    }
+    let text = candidate.string().to_string();
+    let mut boxes = Vec::with_capacity(text.chars().count());
+    // `NSRange` 按 UTF-16 计数：一个汉字是一位，emoji 这类是两位。
+    let mut location = 0;
+    for c in text.chars() {
+        let length = c.len_utf16();
+        // SAFETY: `boundingBoxForRange:error:` 的参数是 NSRange（值）与 NSError 指针（可以为空）；
+        // 返回的是 autoreleased 的 VNRectangleObservation，本函数在调用方的 autoreleasepool 里读完。
+        unsafe {
+            let mut error: *mut AnyObject = std::ptr::null_mut();
+            let observation: *mut AnyObject = msg_send![
+                candidate,
+                boundingBoxForRange: NSRange::new(location, length),
+                error: &mut error
+            ];
+            location += length;
+            if observation.is_null() {
+                return Vec::new();
+            }
+            let bounds: NSRect = msg_send![observation, boundingBox];
+            boxes.push(Rect::from_min_size(
+                pos2(
+                    (bounds.origin.x * width) as f32,
+                    ((1.0 - bounds.origin.y - bounds.size.height) * height) as f32,
+                ),
+                vec2(
+                    (bounds.size.width * width) as f32,
+                    (bounds.size.height * height) as f32,
+                ),
+            ));
+        }
+    }
+    boxes
 }
 
 #[cfg(test)]
@@ -95,6 +144,14 @@ mod tests {
         println!("{} 行，用时 {:?}", lines.len(), started.elapsed());
         println!("{}", snip::ocr::to_text(&lines));
         assert!(!lines.is_empty());
+        // 每个字符都有位置（Vision 的 `boundingBoxForRange:`；拿不到时按宽度平铺）。
+        let chars = lines[0].chars.len();
+        println!(
+            "第一行“{}”：{chars} 个字符位置，前两个 {:?}",
+            lines[0].text,
+            &lines[0].chars[..chars.min(2)]
+        );
+        assert_eq!(chars, lines[0].text.chars().count());
 
         // 把图片顶部的一条（`DEVTOOLS_HUB_OCR_STRIP` 像素高）重复拼成长图：每一行都只识别一次。
         let Some(strip) = std::env::var("DEVTOOLS_HUB_OCR_STRIP")

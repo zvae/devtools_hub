@@ -104,7 +104,8 @@ fn recognize_tile(engine: &OcrEngine, image: &RgbaImage) -> Result<Vec<Line>> {
             rect = Some(rect.map_or(word_rect, |rect| rect.union(word_rect)));
         }
         if let Some(rect) = rect {
-            lines.push(Line { text, rect });
+            // 字符的位置由 `snip::ocr::fill_chars` 按字符宽度平铺（Windows 只给单词的框）。
+            lines.push(Line::new(text, rect));
         }
     }
     Ok(lines)

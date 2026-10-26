@@ -34,7 +34,7 @@ use devtools_clipboard::{uti, Snapshot, Store};
 
 use crate::hotkey::{HotkeyAction, HotkeyService};
 use crate::platform::pasteboard::Pasteboard;
-use crate::platform::{keyboard, panel as native_panel, Anchor, Backdrop, Placement};
+use crate::platform::{floating, keyboard, panel as native_panel, Anchor, Backdrop, Placement};
 use crate::selection::{self, Selection};
 use crate::settings::Settings;
 use crate::shared::{AppEvent, Shared};
@@ -138,6 +138,9 @@ pub struct HubApp {
     accessibility_ok: bool,
     /// 上一帧窗口是否有焦点，用来发现失焦。
     was_focused: bool,
+    /// 刚刚关掉系统的保存对话框：下一次失焦不要据此自动收起
+    /// （对话框收尾时的焦点变化不是用户点了别的应用，见 `floating::save_dialog`）。
+    just_closed_dialog: bool,
     /// 窗口的原生背景材质（离屏渲染测试中是不透明的）。
     backdrop: Backdrop,
     /// 栏的液态玻璃效果（需要 eframe 的 wgpu 渲染器，离屏测试里没有）。
@@ -257,6 +260,7 @@ impl HubApp {
             toast: None,
             accessibility_ok: keyboard::accessibility_trusted(false),
             was_focused: false,
+            just_closed_dialog: false,
             backdrop: Backdrop::Opaque,
             liquid: None,
             startup_hide_pending: false,
@@ -569,6 +573,8 @@ impl HubApp {
         };
         let lost_focus = self.was_focused && !focused;
         self.was_focused = focused;
+        // 这一次失焦是不是对话框收尾造成的（见字段说明）。
+        let just_closed_dialog = std::mem::replace(&mut self.just_closed_dialog, false);
         let auto_hide = match self.page {
             Page::Panel => self.settings.hide_on_blur && !self.panel.pinned,
             Page::Settings => false,
@@ -577,8 +583,16 @@ impl HubApp {
             Page::JsonEditor => self.settings.hide_on_blur && !self.json.pinned,
             Page::Ocr => self.settings.hide_on_blur && !self.ocr.pinned,
         };
-        if lost_focus && auto_hide && native_panel::is_visible() {
+        // 系统对话框（保存图片）开着的时候失焦是正常的，关掉之后的第一下失焦也是它收尾造成的：
+        // 都不是用户点了别的应用，不能收起窗口。
+        if lost_focus
+            && auto_hide
+            && !just_closed_dialog
+            && !floating::dialog_open()
+            && native_panel::is_visible()
+        {
             // 用户点击了别的应用：只隐藏，不抢回焦点。
+            tracing::info!("面板失去焦点，自动收起");
             controller::note_auto_hide();
             self.hide_panel(false);
         }

@@ -31,6 +31,82 @@ pub(super) fn icon_button(ui: &mut Ui, icon: Icon, active: bool, palette: &Palet
     response
 }
 
+/// macOS 窗口左上角的关闭按钮：一个红点（与系统窗口的红绿灯一致），悬停时点里出现 ×。
+///
+/// 只在 macOS 上使用：其他平台的窗口把关闭按钮放在右上角。
+#[cfg(target_os = "macos")]
+pub(super) fn traffic_light_close(ui: &mut Ui) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
+    let center = rect.center();
+    let painter = ui.painter();
+    painter.circle_filled(center, 6.0, egui::Color32::from_rgb(0xff, 0x5f, 0x57));
+    if response.hovered() {
+        let stroke = Stroke::new(1.2, egui::Color32::from_rgb(0x8c, 0x1c, 0x16));
+        let r = 2.7;
+        painter.line_segment(
+            [center + Vec2::new(-r, -r), center + Vec2::new(r, r)],
+            stroke,
+        );
+        painter.line_segment(
+            [center + Vec2::new(r, -r), center + Vec2::new(-r, r)],
+            stroke,
+        );
+    }
+    response
+}
+
+/// 图标加文字的按钮（底栏的“复制全部”“保存”），悬停时显示浅色底；`enabled` 为 false 时变淡、不响应点击。
+pub(super) fn labeled_button(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    enabled: bool,
+    palette: &Palette,
+) -> Response {
+    const HEIGHT: f32 = 26.0;
+    const ICON: f32 = 15.0;
+    const GAP: f32 = 5.0;
+    const PAD: f32 = 10.0;
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), FontId::proportional(12.5), palette.text);
+    let width = PAD * 2.0 + ICON + GAP + galley.size().x;
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), sense);
+    if enabled && response.hovered() {
+        ui.painter()
+            .rect_filled(rect, style::CAPSULE, palette.field);
+    }
+    let icon_rect = Rect::from_center_size(
+        egui::pos2(rect.left() + PAD + ICON / 2.0, rect.center().y),
+        Vec2::splat(ICON),
+    );
+    icons::paint(
+        ui.painter(),
+        icon_rect,
+        icon,
+        if enabled {
+            palette.weak
+        } else {
+            palette.weak.gamma_multiply(0.5)
+        },
+    );
+    let text_pos = egui::pos2(
+        icon_rect.right() + GAP,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    ui.painter().galley(
+        text_pos,
+        galley,
+        if enabled { palette.text } else { palette.weak },
+    );
+    response
+}
+
 /// 固定高度、内容垂直居中的一行。
 ///
 /// `ui.horizontal` 的初始高度是 `interact_size.y`，先放进去的控件按这个高度居中，
