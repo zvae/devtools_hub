@@ -892,6 +892,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "devtools-clipboard",
+ "devtools-json",
  "directories",
  "eframe",
  "egui",
@@ -917,6 +918,14 @@ dependencies = [
  "windows-sys 0.61.2",
  "winit",
  "winresource",
+]
+
+[[package]]
+name = "devtools-json"
+version = "0.1.5"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

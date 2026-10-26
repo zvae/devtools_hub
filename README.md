@@ -291,7 +291,7 @@ codesign --display --requirements - "/Applications/DevTools Hub.app"
 
 ```
 crates/
-├── devtools-clipboard/       与平台无关的核心库
+├── devtools-clipboard/       与平台无关的核心库：剪贴板数据
 │   ├── model.rs              快照（多 item × 多类型）、条目、列表
 │   ├── uti.rs                类型识别、标题、全文、指纹、file URL 与路径互转
 │   ├── windows_formats.rs    Windows 剪贴板格式 ↔ UTI（CF_HTML、DIB、CF_HDROP、隐私标记等）
@@ -300,13 +300,19 @@ crates/
 │   ├── codec.rs              快照二进制编码 + zstd 压缩
 │   ├── store.rs              SQLite 存储：去重、搜索、列表、清理、外部数据
 │   └── thumbnail.rs          图片缩略图
+├── devtools-json/            与平台无关的 JSON 文本处理（只依赖 serde）
+│   ├── lexer.rs              把任意文本切成词法单元（也用于语法高亮）
+│   ├── parser.rs             校验并解析成保留原文的语法树，报告错误位置
+│   ├── format.rs             格式化、压缩
+│   ├── path.rs               `.data.list[0]` 这样的路径过滤
+│   └── tests.rs              单元测试
 └── devtools-hub/             应用（macOS / Windows）
     ├── assets/               应用图标与托盘图标（原图及生成的各平台格式）
     ├── build.rs              Windows 上把程序图标嵌入 exe
     ├── monitor.rs            剪贴板监听线程
     ├── middle_click.rs       鼠标中键快捷面板的触发
     ├── selection.rs          模拟复制读取选中的内容，读完恢复剪贴板
-    ├── tools/                中键面板里的功能：按选中内容匹配；json/ 是 JSON 校验、格式化、压缩、转义、路径过滤
+    ├── tools/                中键面板里的功能：按选中内容匹配（JSON 的处理在 devtools-json）
     ├── snip/                 截屏与贴图中与界面无关的部分：截图与窗口位置、选区计算、图片处理；annotation.rs 是标注
     ├── hotkey.rs             全局快捷键（唤起面板、截屏、贴图）
     ├── keys.rs               按键在界面上的写法（⌘ / Ctrl）
@@ -341,9 +347,10 @@ crates/
 cargo test --workspace
 ```
 
-- 核心库的单元测试，包括 Windows 剪贴板格式转换（纯 Rust，任何平台都能运行）
+- `devtools-clipboard` 的单元测试，包括 Windows 剪贴板格式转换（纯 Rust，任何平台都能运行）
+- `devtools-json` 的单元测试：格式化、保留数字与注释、错误位置、转义、路径过滤（纯 Rust，不依赖界面，可以单独跑 `cargo test -p devtools-json`）
 - 截屏与贴图：选区计算、窗口识别、标注（马赛克、橡皮擦命中、撤销重做）的单元测试，以及用 egui_kittest 模拟鼠标、键盘驱动截屏遮罩和贴图窗口的交互测试（不创建真实窗口）
-- JSON 处理（格式化、保留数字与注释、错误位置、转义、路径过滤）与中键面板功能匹配的单元测试；macOS 上还在私有命名剪贴板上验证“模拟复制 → 读取 → 恢复剪贴板”
+- 中键面板功能匹配的单元测试；macOS 上还在私有命名剪贴板上验证“模拟复制 → 读取 → 恢复剪贴板”
 - macOS 上还有在私有命名剪贴板上的端到端测试：监听线程的记录、去重、隐私过滤、跳过本应用自己写入的内容、暂停。这些测试不会碰系统剪贴板
 - Windows 上有程序图标提取的测试；剪贴板读写的往返测试会改写系统剪贴板，默认跳过：
 

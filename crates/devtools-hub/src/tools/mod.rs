@@ -5,8 +5,11 @@
 //! `{"type":"regex","minLength":2,"match":"/^\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*$/","label":"Json"}`
 //! 与 `{"type":"files","fileType":"file","maxLength":1,"match":"/\.json$/i","label":"Json"}`。
 //! 这里功能是内置的，匹配规则直接写成代码。
+//!
+//! 匹配规则和功能名在这里（依赖选中内容，属于界面编排）；JSON 的处理在
+//! [`devtools_json`] 里，不依赖界面与平台。
 
-pub mod json;
+pub use devtools_json as json;
 
 use crate::selection::Selection;
 

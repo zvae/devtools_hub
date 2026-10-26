@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/devtools-clipboard", "crates/devtools-hub"]
+members = ["crates/devtools-clipboard", "crates/devtools-hub", "crates/devtools-json"]
 resolver = "2"
 
 [workspace.package]
@@ -119,6 +119,7 @@ zstd = "0.13"
 wgpu = "30"
 
 devtools-clipboard = { path = "crates/devtools-clipboard" }
+devtools-json = { path = "crates/devtools-json" }
 
 # macOS 上 dev 默认 split-debuginfo = "unpacked"：每次增量编译都会在 target/debug/deps
 # 留下一批新的 .o 文件且不会被清理，几次构建后就是数 GB。这里改为打包调试信息，
