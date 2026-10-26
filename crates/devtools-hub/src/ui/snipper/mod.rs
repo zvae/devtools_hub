@@ -24,6 +24,7 @@
 //! 在 `initialized_all_windows(event_loop)` 里创建，不受这个限制。
 
 mod marks;
+mod reveal;
 mod scroll;
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,7 @@ use crate::platform::floating;
 use crate::snip::annotation::{Mark, Marks, Mosaic, Style, Tool};
 use crate::snip::{self, Capture, Handle};
 use marks::TextDraft;
+use reveal::Reveal;
 use scroll::{FrameFactory, ScrollCapture};
 use toolbar::{BarAction, BarState, Mode};
 
@@ -63,6 +65,8 @@ const ACCENT: Color32 = Color32::from_rgb(0x30, 0x7b, 0xf6);
 const MASK: Color32 = Color32::from_rgba_premultiplied(43, 43, 43, 100);
 /// 浮在截图上的文字底色（尺寸、放大镜信息）。
 const BADGE: Color32 = Color32::from_rgba_premultiplied(24, 24, 26, 230);
+/// 选区上方文字底色的圆角半径（点）。
+const BADGE_RADIUS: f32 = 4.0;
 /// 控制点的边长（点）。
 const HANDLE_SIZE: f32 = 7.0;
 /// 按下后移动超过这个距离（点）才算拖动，否则是单击。
@@ -151,8 +155,14 @@ pub struct SnipSession {
     /// 最近一次知道的鼠标位置（像素坐标）。一开始是截屏时的位置：窗口刚出现、还没收到鼠标移动事件时
     /// 用它识别窗口、显示放大镜；鼠标移出窗口后也沿用它，松开鼠标时仍能结束拖动。
     pointer: Option<Pos2>,
+    /// 遮罩窗口是否已经显示（Windows 上隐藏着创建，由主界面显示，见 `floating::OVERLAY_STARTS_HIDDEN`）。
+    shown: bool,
     /// 平台层是否已经摆好窗口（层级、位置、焦点）。
     configured: bool,
+    /// 摆好窗口后是否已经去掉显示前的遮挡（见 `floating::reveal_overlay`）。
+    revealed: bool,
+    /// 等遮罩按显示器的尺寸画出一帧再露出来（见 [`reveal`]）。
+    reveal: Reveal,
     /// 看门狗的看守编号（遮罩摆好后开始看守，见 [`watchdog`]）。
     watch: Option<u64>,
     /// 截屏结束时的结果，等主界面取走（见 [`Snipper::show`]）。
@@ -225,6 +235,11 @@ impl Snipper {
         &self.title
     }
 
+    /// 遮罩窗口还没显示出来（隐藏着创建、等主界面显示）。这期间主界面要一直运行（见 `panel::wake`）。
+    pub fn waiting_to_show(&self) -> bool {
+        !self.session.lock().unwrap().shown
+    }
+
     /// 编辑的贴图编号；普通截屏时为空。
     pub fn pin(&self) -> Option<u64> {
         self.pin
@@ -261,6 +276,11 @@ impl Snipper {
                 // 在那之前主界面和遮罩都要继续重绘（面板隐藏时没有别的事件会触发它们）。
                 ctx.request_repaint();
                 ctx.request_repaint_of(self.viewport);
+                if !session.shown {
+                    // 隐藏着的窗口 eframe 不运行它的界面，由主界面把它显示出来。
+                    session.shown =
+                        floating::show_overlay(&session.title, session.capture.display.frame);
+                }
             }
             (session.builder(), outcome)
         };
@@ -314,7 +334,10 @@ impl SnipSession {
             texture: None,
             selection: None,
             drag: None,
+            shown: !floating::OVERLAY_STARTS_HIDDEN,
             configured: false,
+            revealed: false,
+            reveal: Reveal::default(),
             watch: None,
             outcome: None,
             finished: false,
@@ -361,14 +384,25 @@ impl SnipSession {
             .with_has_shadow(false)
             .with_taskbar(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_visible(!floating::OVERLAY_STARTS_HIDDEN)
             // 窗口刚创建、还没画出第一帧时，macOS 显示的是窗口的背景色（灰色），全屏的遮罩就会让整个屏幕灰一下。
             // 透明窗口在这一刻什么都不显示，第一帧画上截图后看起来与真实屏幕一样。
             // Windows 上 wgpu 的透明窗口支持不稳定（面板也没有用），保持不透明。
-            .with_transparent(cfg!(target_os = "macos"))
+            .with_transparent(floating::OVERLAY_TRANSPARENT)
     }
 
     fn ui(&mut self, ui: &mut Ui) -> Outcome {
         let ctx = ui.ctx().clone();
+        if self.configured && !self.revealed {
+            let [_, _, width, height] = self.capture.display.frame;
+            // 上一帧已经按铺满屏幕的尺寸画好了，可以露出来；否则继续重绘（遮住的窗口收不到鼠标事件，不会自己重绘）。
+            if !floating::OVERLAY_STARTS_HIDDEN || self.reveal.ready(ui.painter(), [width, height]) {
+                floating::reveal_overlay(&self.title);
+                self.revealed = true;
+            } else {
+                ctx.request_repaint();
+            }
+        }
         if !self.configured {
             self.configured = floating::begin_overlay(&self.title, self.capture.display.frame);
             if self.configured {
@@ -542,7 +576,8 @@ impl SnipSession {
     /// 截屏已经结束、窗口还没关闭时：只画截图和标注，看起来与真实的屏幕一样。
     fn paint_still(&mut self, ui: &Ui) {
         if self.scroll.is_some() {
-            // 滚动截图时窗口里本来就没有截图（看到的是真实的屏幕），什么都不画。
+            // 滚动截图时窗口里本来就没有截图（看到的是真实的屏幕），什么都不画
+            // （Windows 上结束时已经清空了窗口的形状，见 `floating::end_scroll`）。
             return;
         }
         let ctx = ui.ctx().clone();
@@ -715,6 +750,11 @@ impl SnipSession {
                     Event::ModifiersChanged(modifiers) => {
                         tapped |= self.shift_changed(modifiers.shift);
                     }
+                    // ⇧ 自己的按键事件不算“别的键”：Windows 上它跟在 `ModifiersChanged` 后面送来。
+                    Event::Key {
+                        key: Key::ShiftLeft | Key::ShiftRight,
+                        ..
+                    } => {}
                     Event::Key { pressed: true, .. }
                     | Event::PointerButton { pressed: true, .. } => {
                         self.shift_tap = false;
@@ -1314,8 +1354,8 @@ fn size_badge(painter: &Painter, screen: Rect, hole: Rect, size: Vec2) {
     );
 }
 
-/// 选区左上角上方的一行文字（放不下时放在选区里面）。
-fn badge(painter: &Painter, screen: Rect, hole: Rect, text: &str) {
+/// 选区左上角上方的一行文字（放不下时放在选区里面），返回它的位置。
+fn badge(painter: &Painter, screen: Rect, hole: Rect, text: &str) -> Rect {
     let text = text.to_owned();
     let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), Color32::WHITE);
     let badge = galley.size() + vec2(12.0, 6.0);
@@ -1328,8 +1368,9 @@ fn badge(painter: &Painter, screen: Rect, hole: Rect, text: &str) {
         .x
         .clamp(screen.left(), (screen.right() - badge.x).max(screen.left()));
     let rect = Rect::from_min_size(min, badge);
-    painter.rect_filled(rect, 4.0, BADGE);
+    painter.rect_filled(rect, BADGE_RADIUS, BADGE);
     painter.galley(rect.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+    rect
 }
 
 /// 输入里截屏遮罩 `viewport` 的截图事件（导出时请求的那一帧画面）。

@@ -23,6 +23,8 @@ use crate::ui::icons::{self, Icon};
 const BUTTON: f32 = 30.0;
 /// 工具栏内边距。
 const PAD: f32 = 4.0;
+/// 工具栏的圆角半径（点）。
+pub(super) const RADIUS: f32 = 7.0;
 /// 分隔线占的宽度。
 const SEPARATOR: f32 = 9.0;
 /// 色块边长。
@@ -427,7 +429,7 @@ fn output_hint(output: Output, mode: Mode) -> String {
 
 /// 浅色圆角条与阴影。
 fn paint_bar(painter: &Painter, rect: Rect) {
-    let radius = CornerRadius::same(7);
+    let radius = CornerRadius::same(RADIUS as u8);
     painter.add(
         Shadow {
             offset: [0, 2],

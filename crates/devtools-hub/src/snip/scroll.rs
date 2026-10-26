@@ -215,7 +215,8 @@ impl Stitcher {
         (self.canvas.len() / (self.width as usize * 4) + self.footer) as u32
     }
 
-    /// 拼好的长图：已拼好的部分加上最后一帧底部固定的行。
+    /// 拼好的长图：已拼好的部分加上最后一帧底部固定的行（测试里用；结束时用 [`Self::into_image`]）。
+    #[cfg(test)]
     pub fn image(&self) -> RgbaImage {
         let stride = self.width as usize * 4;
         let raw = self.last.as_raw();
@@ -223,6 +224,15 @@ impl Stitcher {
         pixels.extend_from_slice(&self.canvas);
         pixels.extend_from_slice(&raw[(self.frame_height - self.footer) * stride..]);
         RgbaImage::from_raw(self.width, self.height(), pixels).expect("长图大小与像素数一致")
+    }
+
+    /// 取走拼好的长图：已拼好的部分加上最后一帧底部固定的行。不复制已拼好的部分：长图可能有上百 MB。
+    pub fn into_image(self) -> RgbaImage {
+        let stride = self.width as usize * 4;
+        let height = self.height();
+        let mut pixels = self.canvas;
+        pixels.extend_from_slice(&self.last.as_raw()[(self.frame_height - self.footer) * stride..]);
+        RgbaImage::from_raw(self.width, height, pixels).expect("长图大小与像素数一致")
     }
 
     /// 预览图：长图缩小到 [`THUMBNAIL_WIDTH`] 像素宽（本来更窄时不缩小），太高时只保留最下面 `max_height` 像素
@@ -608,6 +618,8 @@ mod tests {
                 );
             }
         }
+        // 结束时取走的长图与它一样（包括底部固定的行）。
+        assert!(stitcher.into_image() == image);
     }
 
     #[test]

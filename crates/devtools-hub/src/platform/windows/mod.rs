@@ -16,6 +16,7 @@ pub mod ocr;
 pub mod panel;
 pub mod pasteboard;
 pub mod screen;
+mod scroll_mask;
 pub mod updater;
 pub mod workspace;
 
