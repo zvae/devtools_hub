@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-clipboard"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "image",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-hub"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-json"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
