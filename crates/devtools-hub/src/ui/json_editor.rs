@@ -17,12 +17,14 @@ use egui::{
 
 use super::fonts;
 use super::icons::{self, Icon};
+#[cfg(not(target_os = "macos"))]
 use super::quick_panel::paint_badge;
 use super::style::{self, Palette};
 use super::widgets::{centered_row, drag_window, icon_button};
 use super::HubApp;
 use crate::keys;
 use crate::tools::json::{self, Indent, JsonError, TokenKind};
+#[cfg(not(target_os = "macos"))]
 use crate::tools::QuickAction;
 
 /// 超过这个大小不做语法高亮：egui 排版大量带格式的片段会明显变慢。
@@ -200,12 +202,27 @@ impl HubApp {
         self.apply_editor_actions(ui.ctx(), actions);
     }
 
-    /// 标题栏：图标、标题、打开时的提示，右侧是关闭与固定按钮；空白处可以拖动窗口。
+    /// 标题栏：图标、标题、打开时的提示，右侧是固定按钮；空白处可以拖动窗口。
+    ///
+    /// macOS 的窗口把关闭按钮放在左上角（一个红点，与系统的红绿灯一致），其他平台放在右上角。
     fn json_header(&mut self, ui: &mut Ui, palette: &Palette, actions: &mut Vec<EditorAction>) {
         drag_window(ui, ui.max_rect());
         centered_row(ui, 28.0, |ui| {
-            let (badge, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-            paint_badge(ui, badge, QuickAction::JsonEditor, palette);
+            #[cfg(target_os = "macos")]
+            {
+                if super::widgets::traffic_light_close(ui)
+                    .on_hover_text(format!("关闭  {}", keys::ESCAPE))
+                    .clicked()
+                {
+                    actions.push(EditorAction::Close);
+                }
+                ui.add_space(4.0);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let (badge, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+                paint_badge(ui, badge, QuickAction::JsonEditor, palette);
+            }
             ui.label(
                 RichText::new("JSON 编辑器")
                     .size(14.0)
@@ -217,6 +234,7 @@ impl HubApp {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
+                #[cfg(not(target_os = "macos"))]
                 if icon_button(ui, Icon::Close, false, palette)
                     .on_hover_text(format!("关闭  {}", keys::ESCAPE))
                     .clicked()
