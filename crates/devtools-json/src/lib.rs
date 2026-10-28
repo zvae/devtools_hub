@@ -5,6 +5,8 @@
 //! 数字字面量（`2.0`、超出 f64 精度的大整数）、键的顺序和重复的键都原样保留；
 //! 允许 `//` 与 `/* */` 注释，格式化时保留，“去除注释”时删掉。
 //!
+//! 只依赖 `serde` / `serde_json`，不依赖界面与平台，可以单独测试。
+//!
 //! 分为几步：
 //! - `lexer`：把任意文本切成词法单元（也用于编辑器的语法高亮）；
 //! - `parser`：校验并解析成保留原文的语法树，报告错误位置；
@@ -25,7 +27,7 @@ pub use lexer::{tokenize, TokenKind};
 pub use parser::{parse, JsonError, Node};
 pub use path::filter;
 
-use format::reformat;
+use crate::format::reformat;
 
 /// 压缩成一行：去掉所有空白和注释。
 pub fn minify(src: &str) -> Result<String, JsonError> {

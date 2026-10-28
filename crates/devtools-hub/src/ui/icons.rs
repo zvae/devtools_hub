@@ -49,6 +49,12 @@ pub enum Icon {
     Copy,
     /// 长截图（滚动截图）。
     ScrollCapture,
+    /// 提取文字（OCR）。
+    Ocr,
+    /// 放大。
+    ZoomIn,
+    /// 缩小。
+    ZoomOut,
 }
 
 /// 16×16 网格坐标到屏幕坐标的映射。
@@ -395,6 +401,28 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             );
             line(&[(8.0, 5.0), (8.0, 13.6)]);
             line(&[(5.4, 11.0), (8.0, 13.6), (10.6, 11.0)]);
+        }
+        Icon::Ocr => {
+            // 取景框的四个角，中间一个“T”。
+            for (x, y, dx, dy) in [
+                (2.6, 2.6, 1.0, 1.0),
+                (13.4, 2.6, -1.0, 1.0),
+                (2.6, 13.4, 1.0, -1.0),
+                (13.4, 13.4, -1.0, -1.0),
+            ] {
+                line(&[(x, y + 3.0 * dy), (x, y), (x + 3.0 * dx, y)]);
+            }
+            line(&[(5.4, 5.6), (10.6, 5.6)]);
+            line(&[(8.0, 5.6), (8.0, 10.8)]);
+        }
+        Icon::ZoomIn | Icon::ZoomOut => {
+            // 放大镜，镜片里一个加号（放大）或减号（缩小）。
+            painter.circle_stroke(g.p(7.0, 7.0), g.r(4.6), stroke);
+            line(&[(10.4, 10.4), (13.6, 13.6)]);
+            line(&[(4.8, 7.0), (9.2, 7.0)]);
+            if icon == Icon::ZoomIn {
+                line(&[(7.0, 4.8), (7.0, 9.2)]);
+            }
         }
         Icon::Copy => {
             painter.rect_stroke(

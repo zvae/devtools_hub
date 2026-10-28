@@ -335,6 +335,22 @@ pub fn is_active() -> bool {
     with_panel(|_, window| window.isVisible() && window.isKeyWindow()).unwrap_or(false)
 }
 
+/// 让面板重新成为键盘窗口，返回是否成功（面板没显示时失败）。
+///
+/// 系统的保存对话框关掉之后会把键盘焦点还给它前面的应用，面板跟着失去焦点，看上去就像被关掉了。
+/// 这时代码里再让面板成为键盘窗口，用户就能接着用（面板本来就不激活本应用，不会抢前台应用）。
+pub fn refocus() -> bool {
+    with_panel(|_, window| {
+        if !window.isVisible() {
+            return false;
+        }
+        window.makeKeyAndOrderFront(None);
+        window.orderFrontRegardless();
+        window.isKeyWindow()
+    })
+    .unwrap_or(false)
+}
+
 /// 面板窗口是否可见（不论是否有焦点）。为截屏、贴图临时摆出的透明窗口不算（见 [`wake`]）。
 pub fn is_visible() -> bool {
     !is_waking() && with_panel(|_, window| window.isVisible()).unwrap_or(false)

@@ -16,7 +16,7 @@ use std::cell::Cell;
 use std::mem::{size_of, zeroed};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
@@ -186,6 +186,11 @@ pub fn begin_overlay(title: &str, frame: [f64; 4]) -> bool {
         return false;
     }
     disable_transitions(hwnd);
+    // 显示之前一定先遮住：eframe 创建视口的那一帧就会运行遮罩的界面，而主界面在这一帧已经跑过了，
+    // 没有机会调用 [`show_overlay`]。这时窗口还从没被遮住过，下面的 `SWP_SHOWWINDOW` 一显示，
+    // 屏幕上就是还没画过的白底，接着是被拉伸的旧尺寸画面，然后才是正确的截图——闪两三帧。
+    // 已经被 `show_overlay` 遮住时再遮一次没有副作用。
+    set_cloaked(hwnd, true);
     // SAFETY: hwnd 是本线程的窗口。
     unsafe {
         let foreground = GetForegroundWindow();
@@ -437,7 +442,14 @@ pub fn set_window_frame(title: &str, frame: [f64; 4]) -> bool {
 }
 
 /// 弹出保存对话框，返回选择的路径（自动补上 `.png`）；取消时返回 `None`。
-pub fn save_dialog(file_name: &str, directory: Option<&Path>) -> Option<PathBuf> {
+///
+/// `restore_focus` 与 macOS 那边保持一致的签名：Windows 的对话框关掉后焦点自己回到原来的窗口，
+/// 这里不需要额外处理（调用方要还焦点的话另外调 [`restore_focus`]）。
+pub fn save_dialog(
+    file_name: &str,
+    directory: Option<&Path>,
+    _restore_focus: bool,
+) -> Option<PathBuf> {
     let mut buffer = [0u16; 1024];
     let name: Vec<u16> = file_name.encode_utf16().take(buffer.len() - 1).collect();
     buffer[..name.len()].copy_from_slice(&name);
@@ -445,8 +457,10 @@ pub fn save_dialog(file_name: &str, directory: Option<&Path>) -> Option<PathBuf>
     let filter = wide("PNG 图片\0*.png\0");
     let extension = wide("png");
     let directory = directory.map(|dir| wide(&dir.to_string_lossy()));
+    // 对话框打开期间面板会失去焦点，界面据此不要把它自动收起（见 [`dialog_open`]）。
+    DIALOG_OPEN.store(true, Ordering::Relaxed);
     // SAFETY: 结构体中的指针都指向本函数里的缓冲区，对话框返回前一直有效。
-    unsafe {
+    let chosen = unsafe {
         let mut dialog: OPENFILENAMEW = zeroed();
         dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
         dialog.lpstrFilter = filter.as_ptr();
@@ -455,12 +469,23 @@ pub fn save_dialog(file_name: &str, directory: Option<&Path>) -> Option<PathBuf>
         dialog.lpstrDefExt = extension.as_ptr();
         dialog.lpstrInitialDir = directory.as_ref().map_or(null(), |dir| dir.as_ptr());
         dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-        if GetSaveFileNameW(&mut dialog) == 0 {
-            return None;
-        }
+        GetSaveFileNameW(&mut dialog) != 0
+    };
+    DIALOG_OPEN.store(false, Ordering::Relaxed);
+    if !chosen {
+        return None;
     }
     let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
     Some(crate::snip::ensure_png(PathBuf::from(
         String::from_utf16_lossy(&buffer[..len]),
     )))
+}
+
+/// 保存对话框是否正在显示（见 [`save_dialog`]）。
+static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// 是否正在显示本应用弹出的系统对话框。对话框打开期间面板失去焦点是正常的，
+/// 界面层据此不要自动收起面板（见 `HubApp::handle_focus`）。
+pub fn dialog_open() -> bool {
+    DIALOG_OPEN.load(Ordering::Relaxed)
 }

@@ -162,6 +162,8 @@ pub struct Settings {
     /// JSON 编辑器窗口大小（逻辑像素）。
     pub json_editor_size: [f32; 2],
     pub json_indent: Indent,
+    /// 提取文字窗口大小（逻辑像素）。
+    pub ocr_size: [f32; 2],
     /// 面板底色的透明度（0–100）。窗口背景是液态玻璃 / 毛玻璃时生效，越大越能透出背后的内容。
     pub panel_transparency: u8,
     /// 自动检查 GitHub Releases 上的新版本（启动时和之后每天一次）。
@@ -195,6 +197,7 @@ impl Default for Settings {
             middle_click: true,
             json_editor_size: [760.0, 560.0],
             json_indent: Indent::default(),
+            ocr_size: [860.0, 560.0],
             panel_transparency: 60,
             auto_check_updates: true,
             skipped_version: None,

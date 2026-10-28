@@ -1,0 +1,11 @@
+[package]
+name = "devtools-json"
+description = "JSON 文本处理：校验、格式化、压缩、转义、去除注释、路径过滤"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

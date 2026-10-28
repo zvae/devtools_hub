@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/devtools-clipboard", "crates/devtools-hub"]
+members = ["crates/devtools-clipboard", "crates/devtools-hub", "crates/devtools-json"]
 resolver = "2"
 
 [workspace.package]
@@ -7,7 +7,7 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/zvae/devtools_hub"
 rust-version = "1.95"
-version = "0.1.5"
+version = "0.1.6"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -63,6 +63,16 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSString",
     "NSURL",
 ] }
+# 文字识别（macOS）：Vision 的 VNRecognizeTextRequest，只启用用到的类。
+objc2-vision = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "VNObservation",
+    "VNRecognizeTextRequest",
+    "VNRequest",
+    "VNRequestHandler",
+    "VNTypes",
+] }
 raw-window-handle = "0.6"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -76,6 +86,16 @@ tray-icon = "0.26"
 # 不额外编译 rustls；Windows 上还会读取系统代理设置，两个平台都支持 HTTPS_PROXY 等环境变量。
 ureq = { version = "3.4", default-features = false, features = ["native-tls", "win-system-proxy"] }
 winit = { version = "0.30", default-features = false }
+# 文字识别（Windows）：WinRT 的 Windows.Media.Ocr（windows-sys 只有 Win32 接口，没有 WinRT）。
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Win32_System_WinRT",
+] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
@@ -99,6 +119,7 @@ zstd = "0.13"
 wgpu = "30"
 
 devtools-clipboard = { path = "crates/devtools-clipboard" }
+devtools-json = { path = "crates/devtools-json" }
 
 # macOS 上 dev 默认 split-debuginfo = "unpacked"：每次增量编译都会在 target/debug/deps
 # 留下一批新的 .o 文件且不会被清理，几次构建后就是数 GB。这里改为打包调试信息，

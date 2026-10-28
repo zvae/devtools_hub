@@ -1,5 +1,5 @@
 //! 截屏与贴图在主界面这一侧的流程：响应快捷键和菜单，截屏后显示截屏遮罩（`snipper`），
-//! 处理截屏结果（复制、保存、贴图），维持贴图窗口（`pin`）并执行它们交上来的操作。
+//! 处理截屏结果（复制、保存、贴图、提取文字），维持贴图窗口（`pin`）并执行它们交上来的操作。
 //!
 //! 截屏遮罩和贴图都是 egui 的子视口，只能在主界面的 `ui` 里创建；面板隐藏时 eframe 只调用 `logic`，
 //! 所以创建前先用 `panel::wake` 让下一帧运行界面（见那里的说明）。
@@ -169,8 +169,9 @@ impl HubApp {
         let Some(snipper) = self.snip.take() else {
             return;
         };
-        if matches!(outcome, Outcome::Save(_)) {
+        if matches!(outcome, Outcome::Save(_) | Outcome::Ocr(_)) {
             // 保存对话框要显示在遮罩上面：立即收起遮罩，焦点由保存对话框结束时还回去。
+            // 提取文字的结果显示在主窗口里，同样立即收起遮罩，焦点在主窗口收起时还回去。
             floating::hide_overlay(snipper.title());
         } else {
             // 先把焦点还给原来的应用，遮罩（这时只画静止的截图）再停留一会儿，见 `floating::restore_focus`。
@@ -190,7 +191,7 @@ impl HubApp {
             }
             Outcome::Save(image) => {
                 self.update_pin(edited, &image);
-                self.save_image(&image);
+                self.save_image(&image, true);
                 // macOS 的保存对话框已经还过焦点（这里什么也不做）；Windows 在这里还。
                 floating::restore_focus();
             }
@@ -199,6 +200,7 @@ impl HubApp {
                 let (zoom, top_left) = fit_long_pin(rect);
                 self.create_pin(image, rect.size(), zoom, top_left);
             }
+            Outcome::Ocr(image) => self.open_ocr(Arc::new(image)),
             Outcome::CopyColor(hex) => {
                 let snapshot = devtools_clipboard::Snapshot::from_text(&hex);
                 self.pasteboard().write(&snapshot);
@@ -345,6 +347,7 @@ impl HubApp {
             PinRequest::Copy => self.pin_action(id, PinAction::Copy),
             PinRequest::Save => self.pin_action(id, PinAction::Save),
             PinRequest::Edit => self.pin_action(id, PinAction::Edit),
+            PinRequest::Ocr => self.pin_action(id, PinAction::Ocr),
         }
     }
 
@@ -391,7 +394,7 @@ impl HubApp {
             }
             PinAction::Save => {
                 let image = self.pins[index].image();
-                if self.save_image(&image) {
+                if self.save_image(&image, true) {
                     // 保存对话框期间贴图可能已被关闭，重新查找。
                     if let Some(pin) = self.pins.iter().find(|pin| pin.id == id) {
                         pin.tip(&self.ctx, "已保存");
@@ -399,6 +402,10 @@ impl HubApp {
                 }
             }
             PinAction::CloseAll => self.close_pins(),
+            PinAction::Ocr => {
+                let image = self.pins[index].image();
+                self.open_ocr(image);
+            }
             PinAction::Edit => {
                 let pin = &self.pins[index];
                 if let Some(rect) = pin.screen_rect() {
@@ -428,7 +435,10 @@ impl HubApp {
     }
 
     /// 弹出保存对话框，把图片存为 PNG。返回是否保存成功（取消时为 false）。
-    fn save_image(&mut self, image: &RgbaImage) -> bool {
+    ///
+    /// `restore_focus`：对话框关掉后把焦点还给之前的应用（截屏、贴图用）；
+    /// 从提取文字窗口调用时传 false，让焦点留在面板上（见 `floating::save_dialog`）。
+    pub(super) fn save_image(&mut self, image: &RgbaImage, restore_focus: bool) -> bool {
         let directory = self
             .settings
             .screenshot_dir
@@ -436,7 +446,7 @@ impl HubApp {
             .filter(|dir| dir.is_dir())
             .or_else(default_screenshot_dir);
         let name = snip::file_name(chrono::Local::now());
-        let Some(path) = floating::save_dialog(&name, directory.as_deref()) else {
+        let Some(path) = floating::save_dialog(&name, directory.as_deref(), restore_focus) else {
             return false;
         };
         let result = snip::encode_png(image, false)

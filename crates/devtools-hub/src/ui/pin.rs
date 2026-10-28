@@ -61,6 +61,8 @@ pub enum PinAction {
     ToggleShadow,
     /// 编辑标注（由主界面打开截屏遮罩）。
     Edit,
+    /// 提取文字（由主界面识别，结果显示在主窗口里）。
+    Ocr,
     Close,
     CloseAll,
 }
@@ -282,6 +284,7 @@ impl Pin {
             Entry::Separator,
             Entry::shortcut("复制", native_menu::COMMAND, Code::KeyC, PinAction::Copy),
             Entry::shortcut("保存…", native_menu::COMMAND, Code::KeyS, PinAction::Save),
+            Entry::shortcut("提取文字", native_menu::COMMAND, Code::KeyE, PinAction::Ocr),
             Entry::Separator,
             Entry::Submenu {
                 label: "旋转与翻转".into(),
@@ -592,7 +595,7 @@ impl PinState {
         }
     }
 
-    /// 按键：esc / ⌘W 关闭，⌘C 复制，⌘S 保存，空格编辑标注，R / ⇧R 旋转，0 恢复原始大小，= / - 缩放。
+    /// 按键：esc / ⌘W 关闭，⌘C 复制，⌘S 保存，⌘E 提取文字，空格编辑标注，R / ⇧R 旋转，0 恢复原始大小，= / - 缩放。
     fn keys(&mut self, ui: &Ui, ctx: &egui::Context, shared: &Arc<Shared>) {
         let pressed = ui.input_mut(|i| {
             let copy = i.events.iter().any(|event| matches!(event, Event::Copy))
@@ -605,6 +608,7 @@ impl PinState {
                 (i.consume_key(Modifiers::COMMAND, Key::W), PinAction::Close),
                 (copy, PinAction::Copy),
                 (i.consume_key(Modifiers::COMMAND, Key::S), PinAction::Save),
+                (i.consume_key(Modifiers::COMMAND, Key::E), PinAction::Ocr),
                 // 与 Snipaste 一样，空格显示标注工具条。
                 (i.consume_key(Modifiers::NONE, Key::Space), PinAction::Edit),
                 (
@@ -640,6 +644,7 @@ impl PinState {
             Some(PinAction::Copy) => shared.post(AppEvent::Pin(self.id, PinRequest::Copy)),
             Some(PinAction::Save) => shared.post(AppEvent::Pin(self.id, PinRequest::Save)),
             Some(PinAction::Edit) => shared.post(AppEvent::Pin(self.id, PinRequest::Edit)),
+            Some(PinAction::Ocr) => shared.post(AppEvent::Pin(self.id, PinRequest::Ocr)),
             Some(action) => self.apply(ctx, action),
             None => {}
         }
@@ -677,7 +682,11 @@ impl PinState {
             }
             PinAction::ToggleShadow => self.shadow = !self.shadow,
             PinAction::Close => self.close(ctx),
-            PinAction::Copy | PinAction::Save | PinAction::Edit | PinAction::CloseAll => {}
+            PinAction::Copy
+            | PinAction::Save
+            | PinAction::Edit
+            | PinAction::Ocr
+            | PinAction::CloseAll => {}
         }
         ctx.request_repaint_of(self.viewport);
     }

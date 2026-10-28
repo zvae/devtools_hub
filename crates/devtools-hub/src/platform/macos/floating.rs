@@ -11,6 +11,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use objc2::rc::Retained;
@@ -18,8 +19,9 @@ use objc2::runtime::AnyClass;
 use objc2::{define_class, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSEvent, NSEventType, NSModalResponseOK,
-    NSPanel, NSResponder, NSRunningApplication, NSSavePanel, NSScreen, NSScreenSaverWindowLevel,
-    NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
+    NSNormalWindowLevel, NSPanel, NSResponder, NSRunningApplication, NSSavePanel, NSScreen,
+    NSScreenSaverWindowLevel, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
+    NSWindowLevel,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 
@@ -333,8 +335,19 @@ pub fn popup_menu(title: &str, menu: &tray_icon::menu::Menu) -> bool {
 
 /// 弹出保存对话框，返回选择的路径（自动补上 `.png`）；取消时返回 `None`。
 ///
-/// 本应用平时不在前台（菜单栏应用、贴图不激活应用），对话框要能输入文件名，先激活本应用，关闭后再把焦点还回去。
-pub fn save_dialog(file_name: &str, directory: Option<&Path>) -> Option<PathBuf> {
+/// 本应用平时不在前台（菜单栏应用、贴图不激活应用），对话框要能输入文件名，先激活本应用，
+/// 关闭后再按 `restore_focus` 决定要不要把焦点还给它前面的应用：
+/// - 截屏、贴图用它，还回去之后用户继续用原来的应用；
+/// - 从面板（提取文字）里弹的时候不还：面板还要接着用，而且“还焦点”是异步的，
+///   晚一步落地就会把面板的键盘焦点抢走，界面把这一下当成“用户点了别的应用”，窗口就收起了。
+///
+/// 面板（层级 101）与截屏遮罩 / 贴图（层级 1000）都浮在普通窗口之上，对话框会被它们盖住、点不到，
+/// 所以弹出期间先把这些窗口降到普通层级，关闭后恢复。
+pub fn save_dialog(
+    file_name: &str,
+    directory: Option<&Path>,
+    restore_focus: bool,
+) -> Option<PathBuf> {
     let mtm = MainThreadMarker::new()?;
     if let Some(app) = workspace::frontmost_other_app() {
         PREVIOUS_APP.with(|prev| *prev.borrow_mut() = Some(app));
@@ -351,12 +364,52 @@ pub fn save_dialog(file_name: &str, directory: Option<&Path>) -> Option<PathBuf>
     {
         dialog.setDirectoryURL(Some(&url));
     }
+    let lowered = lower_floating_windows(mtm);
+    DIALOG_OPEN.store(true, Ordering::Relaxed);
     let response = dialog.runModal();
+    DIALOG_OPEN.store(false, Ordering::Relaxed);
+    restore_levels(lowered);
     let path = (response == NSModalResponseOK)
         .then(|| dialog.URL())
         .flatten()
         .and_then(|url| url.path())
         .map(|path| PathBuf::from(path.to_string()));
-    restore_previous_app();
+    if restore_focus {
+        restore_previous_app();
+    }
     path.map(crate::snip::ensure_png)
+}
+
+/// 把本应用那些浮在普通层之上的窗口（面板、截屏遮罩、贴图）降到普通层级，
+/// 返回原来的层级以便 [`restore_levels`] 恢复。菜单栏图标的窗口不降，否则图标会跟着消失。
+fn lower_floating_windows(mtm: MainThreadMarker) -> Vec<(Retained<NSWindow>, NSWindowLevel)> {
+    let app = NSApplication::sharedApplication(mtm);
+    let mut lowered = Vec::new();
+    for window in app.windows().iter() {
+        let level = window.level();
+        let class = window.class().name().to_bytes().to_vec();
+        if level <= NSNormalWindowLevel || class.starts_with(b"NSStatusBarWindow") {
+            continue;
+        }
+        window.setLevel(NSNormalWindowLevel);
+        lowered.push((window.clone(), level));
+    }
+    tracing::debug!("保存对话框：临时降低 {} 个窗口的层级", lowered.len());
+    lowered
+}
+
+/// 恢复 [`lower_floating_windows`] 降下来的层级。
+fn restore_levels(lowered: Vec<(Retained<NSWindow>, NSWindowLevel)>) {
+    for (window, level) in lowered {
+        window.setLevel(level);
+    }
+}
+
+/// 保存对话框是否正在显示（见 [`save_dialog`]）。
+static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// 是否正在显示本应用弹出的系统对话框。对话框打开期间面板失去焦点是正常的，
+/// 界面层据此不要自动收起面板（见 `HubApp::handle_focus`）。
+pub fn dialog_open() -> bool {
+    DIALOG_OPEN.load(Ordering::Relaxed)
 }

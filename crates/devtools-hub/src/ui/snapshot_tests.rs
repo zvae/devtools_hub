@@ -1,4 +1,4 @@
-//! 离屏渲染测试：用示例数据渲染面板、设置页、鼠标中键快捷面板和 JSON 编辑器，
+//! 离屏渲染测试：用示例数据渲染面板、设置页、鼠标中键快捷面板、JSON 编辑器和提取文字，
 //! 输出 PNG 供人工检查，并验证键盘操作。
 //!
 //! 需要 GPU（wgpu/Metal），默认忽略。手动运行：
@@ -614,6 +614,28 @@ fn click_at(harness: &mut Harness<'_, HubApp>, pos: egui::Pos2, button: egui::Po
     harness.run_steps(4);
 }
 
+/// 在 `from` 按下，拖到 `to` 松开。
+fn drag_between(harness: &mut Harness<'_, HubApp>, from: egui::Pos2, to: egui::Pos2) {
+    harness.hover_at(from);
+    harness.run_steps(1);
+    harness.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    });
+    harness.run_steps(2);
+    harness.hover_at(to);
+    harness.run_steps(2);
+    harness.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    });
+    harness.run_steps(3);
+}
+
 /// 380×640 的面板里右上角“+”的位置。
 const PLUS_BUTTON: egui::Pos2 = egui::pos2(350.0, 68.0);
 /// 设置页滚动到“分类标签”分组后，“收藏”一行的上移按钮与“链接”一行的开关。
@@ -715,6 +737,137 @@ fn snapshot_quick_panel_and_json_editor() {
         save(&mut harness, &format!("json-error-{suffix}"));
 
         // esc 关闭编辑器。
+        harness.key_press(Key::Escape);
+        harness.run_steps(2);
+        assert_eq!(harness.state().page, Page::Panel);
+    }
+}
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_ocr() {
+    use crate::snip::ocr::Line;
+
+    // 1200×700 像素的“截图”：白底上 8 行深色的“文字”，第 3 行右边还有一段（表格的第二列）。
+    let mut image = RgbaImage::from_pixel(1200, 700, Rgba([255, 255, 255, 255]));
+    let mut lines = Vec::new();
+    for row in 0..8u32 {
+        let top = 40 + row * 80;
+        let width = 400 + (row % 3) * 200;
+        for y in top..top + 30 {
+            for x in 40..40 + width {
+                image.put_pixel(x, y, Rgba([50, 50, 56, 255]));
+            }
+        }
+        lines.push(Line::new(
+            format!("第 {} 行识别出的文字 Line {}", row + 1, row + 1),
+            egui::Rect::from_min_size(egui::pos2(40.0, top as f32), egui::vec2(width as f32, 30.0)),
+        ));
+    }
+    lines.push(Line::new(
+        "第二列",
+        egui::Rect::from_min_size(egui::pos2(1000.0, 200.0), egui::vec2(120.0, 30.0)),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        // 正在识别。
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(860.0, 560.0), |app| {
+            app.pasteboard_name = Some(format!("devtools-hub-test-ocr-{}", std::process::id()));
+            app.ocr.set_result(image.clone(), None);
+            app.page = Page::Ocr;
+        });
+        harness.run_steps(3);
+        save(&mut harness, &format!("ocr-running-{suffix}"));
+
+        // 识别完成：左边的图片上不画框，右边是合并好的文字（同一行离得远的两段用制表符隔开）。
+        harness
+            .state_mut()
+            .ocr
+            .set_result(image.clone(), Some(lines.clone()));
+        harness.run_steps(3);
+        let text = harness.state().ocr.text().unwrap().to_owned();
+        assert!(text.starts_with("第 1 行识别出的文字 Line 1\n"));
+        assert!(text.contains("第 3 行识别出的文字 Line 3\t第二列\n"));
+        save(&mut harness, &format!("ocr-done-{suffix}"));
+
+        // 单击图片上的一行：选中整行（在右边定位）。
+        click_at(
+            &mut harness,
+            egui::pos2(60.0, 78.0),
+            egui::PointerButton::Primary,
+        );
+        let line = harness.state().ocr.highlight().expect("单击应当选中整行");
+        assert_eq!(&text[line], "第 1 行识别出的文字 Line 1");
+
+        // 用鼠标在图片上从第 1 行拖到第 4 行：跨行选中，右边标亮（可以细到字）。
+        // 窗口 860×560 时图片在 (16, 60) 起、按 0.3375 缩放：第 1 行中线 y≈79，第 4 行 y≈160。
+        drag_between(
+            &mut harness,
+            egui::pos2(60.0, 78.0),
+            egui::pos2(60.0, 160.0),
+        );
+        let highlight = harness.state().ocr.highlight().expect("拖动应当选中文字");
+        assert!(text[highlight].contains('\n'), "应当跨行选中");
+        save(&mut harness, &format!("ocr-dragged-{suffix}"));
+
+        // 在图片上选中第 4 行：右边对应的文字标亮。
+        harness.state_mut().ocr.select_line(3);
+        harness.run_steps(3);
+        let highlight = harness.state().ocr.highlight().unwrap();
+        assert_eq!(&text[highlight], "第 4 行识别出的文字 Line 4");
+        save(&mut harness, &format!("ocr-selected-{suffix}"));
+
+        // 只选中这一行里的几个字：右边只标亮这几个字（汉字按字节算也对得上）。
+        harness.state_mut().ocr.select_chars(3, 2, 6);
+        harness.run_steps(3);
+        let highlight = harness.state().ocr.highlight().unwrap();
+        assert_eq!(&text[highlight], "4 行识");
+        save(&mut harness, &format!("ocr-selected-part-{suffix}"));
+
+        // ⇧⌘C 复制全部。
+        harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().toast.as_ref().map(|t| t.text.as_str()),
+            Some("已复制")
+        );
+        assert_eq!(
+            uti::plain_text(&harness.state().pasteboard().read()).as_deref(),
+            Some(text.as_str())
+        );
+
+        // 在右边的文字里输入：识别出的位置对不上，标亮消失。
+        click_at(
+            &mut harness,
+            egui::pos2(600.0, 300.0),
+            egui::PointerButton::Primary,
+        );
+        harness.event(egui::Event::Text("改".into()));
+        harness.run_steps(3);
+        assert_eq!(harness.state().ocr.highlight(), None);
+        assert!(harness.state().ocr.text().unwrap().contains('改'));
+        save(&mut harness, &format!("ocr-edited-{suffix}"));
+
+        // 窗口拉大：左右两栏按原来的比例一起变宽，图片跟着重新适应栏宽（放得更大）。
+        let fit = harness.state().ocr.fit();
+        harness.set_size(egui::vec2(1120.0, 640.0));
+        harness.run_steps(3);
+        let wider = harness.state().ocr.fit();
+        assert!(
+            wider > fit * 1.1,
+            "窗口变大后图片应当跟着放大：{fit} → {wider}"
+        );
+        save(&mut harness, &format!("ocr-wider-{suffix}"));
+
+        // 没有识别到文字。
+        harness
+            .state_mut()
+            .ocr
+            .set_result(image.clone(), Some(Vec::new()));
+        harness.run_steps(3);
+        save(&mut harness, &format!("ocr-empty-{suffix}"));
+
+        // esc 关闭。
         harness.key_press(Key::Escape);
         harness.run_steps(2);
         assert_eq!(harness.state().page, Page::Panel);

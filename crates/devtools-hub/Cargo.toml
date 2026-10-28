@@ -14,12 +14,14 @@ path = "src/main.rs"
 [features]
 # 在非 Windows 平台上对 Windows 实现做类型检查（只检查、不链接）：
 # cargo check -p devtools-hub --features windows-typecheck
+# 文字识别（`platform/windows/ocr.rs`）用的 windows crate 的 WinRT 部分只能在 Windows 上编译，不在检查范围内。
 windows-typecheck = ["dep:windows-sys"]
 
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
 devtools-clipboard.workspace = true
+devtools-json.workspace = true
 directories.workspace = true
 eframe.workspace = true
 egui.workspace = true
@@ -39,9 +41,11 @@ objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-core-graphics.workspace = true
 objc2-foundation.workspace = true
+objc2-vision.workspace = true
 winit.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+windows.workspace = true
 windows-sys.workspace = true
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
