@@ -13,7 +13,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -242,22 +242,42 @@ pub fn cancel_install(shared: &Shared) {
     });
 }
 
-/// 新版本安装好以后由 UI 线程调用：启动新版本并退出当前进程。
+/// 待重启的新版本（退出后再启动，§4.6：不再 `process::exit`）。
+static PENDING_RESTART: Mutex<Option<(std::path::PathBuf, Vec<OsString>)>> = Mutex::new(None);
+
+/// 新版本安装好以后由 UI 线程调用：请求正常退出，退出后由 [`relaunch_if_pending`] 启动新版本。
 /// `args` 是传给新版本的命令行参数（数据目录等），保证重启前后用的是同一份数据。
 pub fn restart_if_installed(shared: &Shared, args: &[OsString]) {
     let Some(Install::Installed(target)) = shared.update_state().install else {
         return;
     };
-    match updater::relaunch(&target, args) {
+    *PENDING_RESTART
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((target, args.to_vec()));
+    shared.post(crate::shared::AppEvent::Quit);
+}
+
+/// `run_native` 返回后调用：有等待重启的新版本时启动它。返回是否已重新拉起。
+///
+/// 先让事件循环正常结束（托盘退出、更新重启都走这条路），搜索模块的线程池在
+/// `on_exit` 里已经有界停止，不会留下后台线程。
+pub fn relaunch_if_pending() -> bool {
+    let Some((target, args)) = PENDING_RESTART
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    else {
+        return false;
+    };
+    match updater::relaunch(&target, &args) {
         Ok(()) => {
             tracing::info!("已安装新版本，重新启动");
-            std::process::exit(0);
+            true
         }
-        Err(err) => shared.modify_update(|state| {
-            state.install = Some(Install::Failed(format!(
-                "新版本已经装好，但没能自动启动，请手动打开：{err:#}"
-            )))
-        }),
+        Err(err) => {
+            tracing::warn!("新版本已安装，但没能自动启动：{err:#}");
+            false
+        }
     }
 }
 

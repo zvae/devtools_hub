@@ -250,7 +250,7 @@ impl HubApp {
         self.startup_hide_pending = false;
         self.cancel_hotkey_recording();
         self.ocr.start(image, self.shared.clone());
-        self.page = super::Page::Ocr;
+        self.set_page(super::Page::Ocr);
         native_panel::show(
             Anchor::Placement(Placement::ScreenCenter),
             self.settings.ocr_size,

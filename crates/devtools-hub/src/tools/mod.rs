@@ -20,6 +20,8 @@ pub enum QuickAction {
     JsonEditor,
     /// 打开剪贴板历史面板。
     ClipboardHistory,
+    /// 文件搜索：把选中的文本/路径带到搜索页。
+    FileSearch,
 }
 
 impl QuickAction {
@@ -28,6 +30,7 @@ impl QuickAction {
         match self {
             QuickAction::JsonEditor => "JSON 编辑器",
             QuickAction::ClipboardHistory => "剪贴板历史",
+            QuickAction::FileSearch => "文件搜索",
         }
     }
 
@@ -36,6 +39,7 @@ impl QuickAction {
         match self {
             QuickAction::JsonEditor => "格式化、压缩、转义、路径过滤",
             QuickAction::ClipboardHistory => "查看并粘贴复制过的内容",
+            QuickAction::FileSearch => "按文件名、路径查找本机文件",
         }
     }
 
@@ -47,6 +51,8 @@ impl QuickAction {
                 matches!(paths.as_slice(), [path] if is_json_file(path))
             }
             (QuickAction::ClipboardHistory, _) => false,
+            // 文件搜索能处理任何选中内容：文本按字面短语搜，路径作为范围。
+            (QuickAction::FileSearch, _) => true,
         }
     }
 }
@@ -56,20 +62,25 @@ const CONTENT_ACTIONS: [QuickAction; 1] = [QuickAction::JsonEditor];
 
 /// 面板里列出的功能：能处理选中内容的排在前面，最后是总是可用的“剪贴板历史”。
 /// 没有选中内容时列出所有功能（对应 uTools 未选中时显示的常用功能）。
-pub fn actions_for(selection: Option<&Selection>) -> Vec<QuickAction> {
+/// 文件搜索按开关提供（关闭时不在面板里出现，与 §4.3 的入口语义一致）。
+pub fn actions_for(selection: Option<&Selection>, search_enabled: bool) -> Vec<QuickAction> {
     let mut actions: Vec<QuickAction> = CONTENT_ACTIONS
         .into_iter()
         .filter(|action| selection.is_none_or(|selection| action.matches(selection)))
         .collect();
+    if search_enabled {
+        actions.push(QuickAction::FileSearch);
+    }
     actions.push(QuickAction::ClipboardHistory);
     actions
 }
 
 /// 是否有功能能处理选中的内容（没有时面板显示提示）。
-pub fn has_match(selection: &Selection) -> bool {
+pub fn has_match(selection: &Selection, search_enabled: bool) -> bool {
     CONTENT_ACTIONS
         .iter()
         .any(|action| action.matches(selection))
+        || search_enabled
 }
 
 /// 扩展名是 .json（不区分大小写）的已存在文件。
@@ -87,25 +98,35 @@ mod tests {
     #[test]
     fn lists_actions_by_selection() {
         assert_eq!(
-            actions_for(None),
+            actions_for(None, false),
             [QuickAction::JsonEditor, QuickAction::ClipboardHistory]
+        );
+        assert_eq!(
+            actions_for(None, true),
+            [
+                QuickAction::JsonEditor,
+                QuickAction::FileSearch,
+                QuickAction::ClipboardHistory
+            ]
         );
         let json = Selection::Text("{\"a\": 1}".into());
         assert_eq!(
-            actions_for(Some(&json)),
+            actions_for(Some(&json), false),
             [QuickAction::JsonEditor, QuickAction::ClipboardHistory]
         );
-        assert!(has_match(&json));
+        assert!(has_match(&json, false));
         let text = Selection::Text("hello".into());
-        assert_eq!(actions_for(Some(&text)), [QuickAction::ClipboardHistory]);
-        assert!(!has_match(&text));
+        assert_eq!(actions_for(Some(&text), false), [QuickAction::ClipboardHistory]);
+        assert!(!has_match(&text, false));
+        // 开启文件搜索后，任何文本都能搜索，面板不再显示"没有能处理的功能"。
+        assert!(has_match(&text, true));
 
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("data.JSON");
         std::fs::write(&file, "{}").unwrap();
         let file = file.to_string_lossy().into_owned();
-        assert!(has_match(&Selection::Files(vec![file.clone()])));
-        assert!(!has_match(&Selection::Files(vec![file.clone(), file])));
-        assert!(!has_match(&Selection::Files(vec!["/nope/a.json".into()])));
+        assert!(has_match(&Selection::Files(vec![file.clone()]), false));
+        assert!(!has_match(&Selection::Files(vec![file.clone(), file]), false));
+        assert!(!has_match(&Selection::Files(vec!["/nope/a.json".into()]), false));
     }
 }

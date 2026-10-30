@@ -112,6 +112,9 @@ impl HubApp {
                 section(ui, &palette, "鼠标中键", |ui| {
                     middle_click_section(ui, &palette, &mut settings)
                 });
+                section(ui, &palette, "文件搜索", |ui| {
+                    self.search_section(ui, &palette, &mut settings)
+                });
                 let snip = section(ui, &palette, "截屏与贴图", |ui| {
                     self.snip_section(ui, &palette, &mut settings)
                 });
@@ -211,7 +214,7 @@ impl HubApp {
                         centered_row(ui, 30.0, |ui| {
                             if icon_button(ui, Icon::Back, false, palette).clicked() || escape {
                                 self.cancel_hotkey_recording();
-                                self.page = Page::Panel;
+                                self.set_page(Page::Panel);
                                 self.panel.reset_for_show();
                             }
                             ui.label(
@@ -243,8 +246,17 @@ impl HubApp {
 
     /// 按当前设置重新注册某个全局快捷键，失败时把原因显示在快捷键一行下面。
     pub(in crate::ui) fn apply_hotkey(&mut self, action: HotkeyAction) {
+        // 文件搜索关闭时注销它的热键，避免关掉功能还占着组合键（§4.3）。
+        let enabled = action != HotkeyAction::Search || self.settings.search_enabled;
         self.hotkey_errors[action.index()] = match &mut self.hotkeys {
-            Some(service) => service.apply(action, self.settings.hotkey(action)).err(),
+            Some(service) => {
+                if enabled {
+                    service.apply(action, self.settings.hotkey(action)).err()
+                } else {
+                    service.suspend(action);
+                    None
+                }
+            }
             None => Some("全局快捷键服务不可用".into()),
         };
     }

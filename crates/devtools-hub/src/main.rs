@@ -212,7 +212,11 @@ fn main() -> anyhow::Result<()> {
         }),
     )
     .map_err(|err| anyhow!("{err}"))?;
+    // 先释放单实例锁，再（如果需要）拉起新版本，否则新进程会以为已有实例在运行。
     drop(lock_file);
+    // 托盘退出、更新重启都先正常结束事件循环（搜索模块已在 `on_exit` 里有界停止），
+    // 更新重启在这里重新拉起新版本（§4.6）。
+    update::relaunch_if_pending();
     Ok(())
 }
 

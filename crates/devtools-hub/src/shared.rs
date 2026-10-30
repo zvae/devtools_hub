@@ -10,6 +10,17 @@ use crate::platform::panel::Placement;
 use crate::settings::Settings;
 use crate::update::UpdateState;
 
+/// 打开搜索页的来源（决定预填内容与是否按字面短语搜索，见 devtools-search 的 SearchOptions）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchEntry {
+    /// 热键 / 托盘菜单：打开上次的页面状态。
+    Hotkey,
+    /// 快捷面板选中的文本：按字面短语搜索。
+    Text(String),
+    /// 快捷面板选中的路径：作为范围或取文件所在目录。
+    Paths(Vec<String>),
+}
+
 /// 从热键、菜单栏发往 UI 的事件。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEvent {
@@ -39,6 +50,12 @@ pub enum AppEvent {
     Pin(u64, PinRequest),
     /// 后台的文字识别完成（成功或失败），结果在界面持有的通道里。
     OcrDone,
+    /// 收起当前窗口（热键、托盘点击、失焦逻辑都走事件，§4.4 不再直接 hide）。
+    HidePanel,
+    /// 打开 / 切换到文件搜索页。
+    ShowSearch(SearchEntry),
+    /// 退出应用（托盘菜单）：走正常关闭流程，不再 `process::exit`。
+    Quit,
 }
 
 /// 贴图窗口自己做不了、交给界面执行的操作（需要剪贴板、对话框或弹出菜单）。

@@ -24,6 +24,13 @@ pub const DEFAULT_HOTKEY: &str = "Cmd+Shift+V";
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_HOTKEY: &str = "Alt+Shift+V";
 
+/// 默认的文件搜索快捷键。Cmd+Shift+F 与大多数编辑器的“在文件中查找”一致；
+/// Windows 上 Ctrl+Shift+F 也符合 VS Code 的习惯。
+#[cfg(target_os = "macos")]
+pub const DEFAULT_SEARCH_HOTKEY: &str = "Cmd+Shift+F";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_SEARCH_HOTKEY: &str = "Ctrl+Shift+F";
+
 /// 默认的截屏 / 贴图快捷键。Windows 与 Snipaste 的默认值一致（F1 截屏、F3 贴图）；
 /// Mac 键盘上的 F1–F12 默认是亮度、音量等媒体键，改用 ⌃⇧A / ⌃⇧V，避开 ⇧⌘V（唤起面板）
 /// 和微信、QQ 截图常用的 ⌃⌘A。
@@ -178,6 +185,10 @@ pub struct Settings {
     pub pin_hotkey: String,
     /// 上次保存截图的目录（保存对话框从这里开始）。
     pub screenshot_dir: Option<PathBuf>,
+    /// 是否启用文件搜索（默认关闭，由用户主动开启后建立索引）。
+    pub search_enabled: bool,
+    /// 打开搜索页的全局快捷键。
+    pub search_hotkey: String,
 }
 
 impl Default for Settings {
@@ -205,6 +216,8 @@ impl Default for Settings {
             snip_hotkey: DEFAULT_SNIP_HOTKEY.to_string(),
             pin_hotkey: DEFAULT_PIN_HOTKEY.to_string(),
             screenshot_dir: None,
+            search_enabled: false,
+            search_hotkey: DEFAULT_SEARCH_HOTKEY.to_string(),
         }
     }
 }
@@ -216,6 +229,7 @@ impl Settings {
             HotkeyAction::Panel => &self.hotkey,
             HotkeyAction::Snip => &self.snip_hotkey,
             HotkeyAction::Pin => &self.pin_hotkey,
+            HotkeyAction::Search => &self.search_hotkey,
         }
     }
 
@@ -225,6 +239,7 @@ impl Settings {
             HotkeyAction::Panel => &mut self.hotkey,
             HotkeyAction::Snip => &mut self.snip_hotkey,
             HotkeyAction::Pin => &mut self.pin_hotkey,
+            HotkeyAction::Search => &mut self.search_hotkey,
         }
     }
 

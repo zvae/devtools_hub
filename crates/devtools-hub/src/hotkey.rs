@@ -13,7 +13,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 use crate::controller;
 use crate::keys;
-use crate::shared::{AppEvent, Shared};
+use crate::shared::{AppEvent, SearchEntry, Shared};
 
 /// 全局快捷键对应的操作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -24,10 +24,17 @@ pub enum HotkeyAction {
     Snip,
     /// 把剪贴板里的图片贴到屏幕上。
     Pin,
+    /// 打开 / 收起文件搜索页。
+    Search,
 }
 
 impl HotkeyAction {
-    pub const ALL: [HotkeyAction; 3] = [HotkeyAction::Panel, HotkeyAction::Snip, HotkeyAction::Pin];
+    pub const ALL: [HotkeyAction; 4] = [
+        HotkeyAction::Panel,
+        HotkeyAction::Snip,
+        HotkeyAction::Pin,
+        HotkeyAction::Search,
+    ];
 
     /// 设置页与报错里的名称。
     pub fn label(self) -> &'static str {
@@ -35,6 +42,7 @@ impl HotkeyAction {
             HotkeyAction::Panel => "唤起快捷键",
             HotkeyAction::Snip => "截屏快捷键",
             HotkeyAction::Pin => "贴图快捷键",
+            HotkeyAction::Search => "文件搜索快捷键",
         }
     }
 
@@ -67,6 +75,7 @@ impl HotkeyService {
                 Some(HotkeyAction::Panel) => controller::toggle_panel(&shared),
                 Some(HotkeyAction::Snip) => shared.post(AppEvent::Snip),
                 Some(HotkeyAction::Pin) => shared.post(AppEvent::PinClipboard),
+                Some(HotkeyAction::Search) => shared.post(AppEvent::ShowSearch(SearchEntry::Hotkey)),
                 None => {}
             }
         }));

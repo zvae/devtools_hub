@@ -489,3 +489,71 @@ static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 pub fn dialog_open() -> bool {
     DIALOG_OPEN.load(Ordering::Relaxed)
 }
+
+// `windows-sys` 0.61 没有导出 `SHBrowseForFolderW`（旧 API，被 IFileDialog 取代），
+// 这里手动声明这两个 shell32 函数；结构体 `BROWSEINFOW` 仍在 `Win32_UI_Shell` 里。
+#[link(name = "shell32")]
+extern "system" {
+    fn SHBrowseForFolderW(info: *mut windows_sys::Win32::UI::Shell::BROWSEINFOW)
+        -> *mut std::ffi::c_void;
+    fn SHGetPathFromIDListW(pidl: *const std::ffi::c_void, path: *mut u16) -> i32;
+}
+
+/// 选择文件夹（文件搜索模块的索引根）。取消返回 `Ok(None)`。
+///
+/// 用 `SHBrowseForFolderW`（不需要 COM 接口对象）；`initial` 暂不支持——
+/// 指定初始目录需要 BFFM_SETSELECTION 回调，v1 从默认位置开始。
+pub fn pick_folder(_initial: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    use windows_sys::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        BIF_EDITBOX, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+    };
+    // SAFETY: 结构体里的指针都指向本函数内的缓冲区；对话框返回后立即释放 pidl。
+    unsafe {
+        CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
+    }
+    let title: Vec<u16> = "选择要建立索引的文件夹"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut display = [0u16; 260];
+    DIALOG_OPEN.store(true, Ordering::Relaxed);
+    // SAFETY: 同上；pidl 由 shell32 分配，下面立即释放。
+    let pidl = unsafe {
+        let mut info: BROWSEINFOW = zeroed();
+        info.pszDisplayName = display.as_mut_ptr();
+        info.lpszTitle = title.as_ptr();
+        info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
+        SHBrowseForFolderW(&mut info)
+    };
+    DIALOG_OPEN.store(false, Ordering::Relaxed);
+    if pidl.is_null() {
+        unsafe { CoUninitialize() };
+        return Ok(None);
+    }
+    let mut path = [0u16; 260];
+    // SAFETY: pidl 来自上面的 SHBrowseForFolderW。
+    let ok = unsafe { SHGetPathFromIDListW(pidl, path.as_mut_ptr()) };
+    unsafe {
+        CoTaskMemFree(pidl);
+        CoUninitialize();
+    }
+    if ok == 0 {
+        return Err("无法读取所选文件夹的路径".into());
+    }
+    let len = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    Ok(Some(PathBuf::from(String::from_utf16_lossy(&path[..len]))))
+}
+
+/// 搜索模块的原生模态开始：标记"对话框已打开"，面板不会因为失焦被收起。
+pub fn begin_system_modal() -> bool {
+    DIALOG_OPEN.store(true, Ordering::Relaxed);
+    true
+}
+
+/// 原生模态结束。
+pub fn end_system_modal(_restore_focus: bool) {
+    DIALOG_OPEN.store(false, Ordering::Relaxed);
+}

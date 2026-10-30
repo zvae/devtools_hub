@@ -17,7 +17,7 @@ use crate::controller;
 use crate::hotkey::{self, HotkeyAction};
 use crate::platform::TrayRect;
 use crate::settings::Settings;
-use crate::shared::{AppEvent, Shared};
+use crate::shared::{AppEvent, SearchEntry, Shared};
 
 /// macOS 在按下时响应（与系统菜单栏一致）；Windows 在松开时响应，
 /// 否则松开鼠标时任务栏会抢走焦点，刚弹出的面板又被隐藏。
@@ -36,6 +36,7 @@ pub struct Tray {
     menu: Menu,
     pause: CheckMenuItem,
     show: MenuItem,
+    search: MenuItem,
     snip: MenuItem,
     pin: MenuItem,
     update: MenuItem,
@@ -52,6 +53,12 @@ impl Tray {
         settings: &Settings,
     ) -> Result<Self> {
         let show = MenuItem::with_id("show", label(settings, HotkeyAction::Panel), true, None);
+        let search = MenuItem::with_id(
+            "search",
+            search_label(settings),
+            settings.search_enabled,
+            None,
+        );
         let snip = MenuItem::with_id("snip", label(settings, HotkeyAction::Snip), true, None);
         let pin = MenuItem::with_id("pin", label(settings, HotkeyAction::Pin), true, None);
         let close_pins = MenuItem::with_id("close-pins", "关闭所有贴图", true, None);
@@ -69,6 +76,7 @@ impl Tray {
         let update = MenuItem::with_id("update", "发现新版本", true, None);
         let menu = Menu::with_items(&[
             &show,
+            &search,
             &pause,
             &PredefinedMenuItem::separator(),
             &snip,
@@ -103,6 +111,7 @@ impl Tray {
         }));
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id.as_ref() {
             "show" => controller::toggle_from_status_item(&shared, None),
+            "search" => shared.post(AppEvent::ShowSearch(SearchEntry::Hotkey)),
             "pause" => {
                 shared.paused.fetch_xor(true, Ordering::Relaxed);
                 shared.post(AppEvent::PauseChanged);
@@ -122,7 +131,8 @@ impl Tray {
                 controller::show_panel(&shared, true);
                 shared.post(AppEvent::RevealUpdate);
             }
-            "quit" => std::process::exit(0),
+            // 正常关闭：交由 UI 线程收起窗口并走 on_exit（不再 process::exit）。
+            "quit" => shared.post(AppEvent::Quit),
             // 面板的右键菜单（见 `ui::native_menu`）：交给界面在下一帧处理。
             id => shared.post(AppEvent::MenuCommand(id.to_string())),
         }));
@@ -143,6 +153,7 @@ impl Tray {
             menu,
             pause,
             show,
+            search,
             snip,
             pin,
             update,
@@ -155,6 +166,9 @@ impl Tray {
     pub fn sync(&self, settings: &Settings) {
         self.pause.set_checked(settings.paused);
         self.show.set_text(label(settings, HotkeyAction::Panel));
+        self.search.set_text(search_label(settings));
+        // 未启用时置灰并提示（§4.3：托盘层展示"文件搜索（未启用）"）。
+        self.search.set_enabled(settings.search_enabled);
         self.snip.set_text(label(settings, HotkeyAction::Snip));
         self.pin.set_text(label(settings, HotkeyAction::Pin));
     }
@@ -186,12 +200,28 @@ impl Tray {
     }
 }
 
+/// 文件搜索菜单项：未启用时显示"文件搜索（未启用）"。
+fn search_label(settings: &Settings) -> String {
+    if !settings.search_enabled {
+        return "文件搜索（未启用）".to_string();
+    }
+    let name = "文件搜索";
+    let spec = settings.hotkey(HotkeyAction::Search);
+    if spec.trim().is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}    {}", hotkey::display(spec))
+    }
+}
+
 /// 菜单项的文字，后面附上快捷键提示（没有设置快捷键时不附）。
 fn label(settings: &Settings, action: HotkeyAction) -> String {
     let name = match action {
         HotkeyAction::Panel => "打开剪贴板历史",
         HotkeyAction::Snip => "截屏",
         HotkeyAction::Pin => "贴图（剪贴板中的图片）",
+        // 文件搜索菜单项有单独的文字（含"未启用"提示），不会走到这里。
+        HotkeyAction::Search => "文件搜索",
     };
     let spec = settings.hotkey(action);
     if spec.trim().is_empty() {

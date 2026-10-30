@@ -141,6 +141,37 @@ impl HubApp {
         }
     }
 
+    /// 文件搜索：开关、快捷键、索引说明与入口（§4.3：默认关闭，用户主动开启）。
+    pub(super) fn search_section(
+        &mut self,
+        ui: &mut Ui,
+        palette: &Palette,
+        settings: &mut Settings,
+    ) {
+        switch_row(ui, palette, "启用文件搜索", &mut settings.search_enabled);
+        hint(
+            ui,
+            palette,
+            "关闭时不占用任何后台线程、不建立索引；另存为独立的搜索设置文件，首次开启会建立索引",
+        );
+        divider(ui, palette);
+        self.hotkey_row(ui, palette, settings, HotkeyAction::Search);
+        divider(ui, palette);
+        row(ui, "打开搜索页", |ui| {
+            if ui.button("立即搜索…").clicked() {
+                // 交给 UI 线程打开（内部会处理"未启用"的提示）。
+                self.shared
+                    .post(crate::shared::AppEvent::ShowSearch(crate::shared::SearchEntry::Hotkey));
+            }
+        });
+        hint(
+            ui,
+            palette,
+            "搜索页支持 ext:pdf、folder:、size:>1MB、dm:today、project/report 等写法；\
+             索引根与排除规则在搜索页的“设置”里调整",
+        );
+    }
+
     /// 截屏与贴图：两个快捷键、屏幕录制权限（macOS）与操作说明。
     pub(super) fn snip_section(&mut self, ui: &mut Ui, palette: &Palette, settings: &mut Settings) {
         let command = |key: &str| keys::shortcut(&[keys::COMMAND, key]);

@@ -19,9 +19,9 @@ use objc2::runtime::AnyClass;
 use objc2::{define_class, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSEvent, NSEventType, NSModalResponseOK,
-    NSNormalWindowLevel, NSPanel, NSResponder, NSRunningApplication, NSSavePanel, NSScreen,
-    NSScreenSaverWindowLevel, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
-    NSWindowLevel,
+    NSNormalWindowLevel, NSOpenPanel, NSPanel, NSResponder, NSRunningApplication, NSSavePanel,
+    NSScreen, NSScreenSaverWindowLevel, NSWindow, NSWindowAnimationBehavior,
+    NSWindowCollectionBehavior, NSWindowLevel,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 
@@ -412,4 +412,79 @@ static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 /// 界面层据此不要自动收起面板（见 `HubApp::handle_focus`）。
 pub fn dialog_open() -> bool {
     DIALOG_OPEN.load(Ordering::Relaxed)
+}
+
+/// 选择文件夹（文件搜索模块的索引根）。取消返回 `Ok(None)`，失败返回带诊断的错误。
+///
+/// 与 [`save_dialog`] 一样：先激活本应用（对话框要能接收键盘输入），弹出期间把浮层降到普通层级，
+/// 关闭后恢复，最后把焦点还给之前的应用。
+pub fn pick_folder(initial: Option<&std::path::Path>) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return Err("不在主线程，无法打开文件夹选择对话框".into());
+    };
+    if let Some(app) = workspace::frontmost_other_app() {
+        PREVIOUS_APP.with(|prev| *prev.borrow_mut() = Some(app));
+    }
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    let dialog = NSOpenPanel::openPanel(mtm);
+    dialog.setCanChooseDirectories(true);
+    dialog.setCanChooseFiles(false);
+    dialog.setAllowsMultipleSelection(false);
+    dialog.setCanCreateDirectories(true);
+    dialog.setResolvesAliases(true);
+    dialog.setMessage(Some(&NSString::from_str("选择要建立索引的文件夹")));
+    dialog.setPrompt(Some(&NSString::from_str("选择")));
+    if let Some(url) = initial
+        .and_then(|dir| dir.to_str())
+        .map(|dir| NSURL::fileURLWithPath(&NSString::from_str(dir)))
+    {
+        dialog.setDirectoryURL(Some(&url));
+    }
+    let lowered = lower_floating_windows(mtm);
+    DIALOG_OPEN.store(true, Ordering::Relaxed);
+    let response = dialog.runModal();
+    DIALOG_OPEN.store(false, Ordering::Relaxed);
+    restore_levels(lowered);
+    let path = (response == NSModalResponseOK)
+        .then(|| dialog.URL())
+        .flatten()
+        .and_then(|url| url.path())
+        .map(|path| std::path::PathBuf::from(path.to_string()));
+    restore_previous_app();
+    Ok(path)
+}
+
+thread_local! {
+    /// 系统模态期间被降到普通层级的窗口（只在主线程访问，见 [`begin_system_modal`]）。
+    static MODAL_LOWERED: RefCell<Vec<(Retained<NSWindow>, NSWindowLevel)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 搜索模块的原生模态开始：激活本应用、降低浮层层级并标记"对话框已打开"，
+/// 使面板不会因为失焦被自动收起（§0：模态保护由宿主实现）。
+pub fn begin_system_modal() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    if let Some(app) = workspace::frontmost_other_app() {
+        PREVIOUS_APP.with(|prev| *prev.borrow_mut() = Some(app));
+    }
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    let lowered = lower_floating_windows(mtm);
+    MODAL_LOWERED.with(|slot| *slot.borrow_mut() = lowered);
+    DIALOG_OPEN.store(true, Ordering::Relaxed);
+    true
+}
+
+/// 原生模态结束：恢复层级与对话框标记；`restore_focus` 为 true 时把焦点还给之前的应用。
+pub fn end_system_modal(restore_focus: bool) {
+    DIALOG_OPEN.store(false, Ordering::Relaxed);
+    MODAL_LOWERED.with(|slot| {
+        let lowered: Vec<_> = slot.borrow_mut().drain(..).collect();
+        restore_levels(lowered);
+    });
+    if restore_focus {
+        restore_previous_app();
+    }
 }

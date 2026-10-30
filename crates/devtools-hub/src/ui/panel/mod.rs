@@ -434,7 +434,7 @@ impl HubApp {
                 }
                 Action::OpenSettings => {
                     self.settings_view.refresh(&self.store);
-                    self.page = super::Page::Settings;
+                    self.set_page(super::Page::Settings);
                 }
                 Action::Close => self.hide_panel(true),
                 Action::OpenUrl(url) => {

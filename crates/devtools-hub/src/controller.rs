@@ -45,13 +45,16 @@ fn just_auto_hidden() -> bool {
 }
 
 /// 快捷键：面板在前台则隐藏，否则按设置的位置显示。
+///
+/// 收起一律走事件（`AppEvent::HidePanel`，§4.4）：隐藏还要保存尺寸、通知搜索模块、
+/// 复位窗口策略，这些都属于 UI 线程的页面状态。
 pub fn toggle_panel(shared: &Shared) {
     if !on_main_thread() {
         shared.post(AppEvent::TogglePanel);
         return;
     }
     if panel::is_active() {
-        panel::hide(true);
+        shared.post(AppEvent::HidePanel);
     } else {
         show_panel(shared, false);
     }
@@ -82,7 +85,7 @@ pub fn toggle_from_status_item(shared: &Shared, tray: Option<TrayRect>) {
         return;
     }
     if panel::is_visible() {
-        panel::hide(true);
+        shared.post(AppEvent::HidePanel);
     } else if !just_auto_hidden() {
         panel::show(Anchor::StatusItem(tray), shared.panel_size());
         shared.post(AppEvent::PanelShown);

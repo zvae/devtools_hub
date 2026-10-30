@@ -663,3 +663,9 @@ fn intersects(a: NSRect, b: NSRect) -> bool {
         && a.origin.y < b.origin.y + b.size.height
         && b.origin.y < a.origin.y + a.size.height
 }
+
+/// 搜索页的窗口行为（§4.2：由宿主平台层实现）。
+///
+/// 面板本身就是 101 层级、并跟随共享窗口，这里不需要调整层级；宿主也没有全局绑定空格键，
+/// 空格在搜索框里照常输入。保留这个入口，方便以后接入原生空格/焦点处理。
+pub fn set_search_space_behavior(_searching: bool) {}

@@ -16,6 +16,7 @@ mod panel;
 mod pin;
 mod quick_panel;
 mod screenshot;
+mod search_host;
 mod settings_page;
 #[cfg(test)]
 mod snapshot_tests;
@@ -37,10 +38,14 @@ use crate::platform::pasteboard::Pasteboard;
 use crate::platform::{floating, keyboard, panel as native_panel, Anchor, Backdrop, Placement};
 use crate::selection::{self, Selection};
 use crate::settings::Settings;
-use crate::shared::{AppEvent, Shared};
+use crate::shared::{AppEvent, SearchEntry, Shared};
 use crate::tray::Tray;
 use crate::update::{self, Release};
 use crate::{controller, middle_click, Args};
+
+use devtools_search::{SearchModule, SearchOptions};
+
+use search_host::HostBridge;
 
 use code_text::CodeStyles;
 use json_editor::JsonEditorView;
@@ -66,6 +71,8 @@ enum Page {
     JsonEditor,
     /// 提取文字（截屏、贴图的识别结果）。
     Ocr,
+    /// 文件搜索页（不透明底、共享窗口，§5.2）。
+    Search,
 }
 
 /// 粘贴方式。
@@ -116,7 +123,7 @@ pub struct HubApp {
     /// 全局快捷键服务；初始化失败时为 `None`，原因记在 `hotkey_errors`。
     hotkeys: Option<HotkeyService>,
     /// 各个全局快捷键（按 [`HotkeyAction::index`]）注册失败的原因。
-    hotkey_errors: [Option<String>; 3],
+    hotkey_errors: [Option<String>; 4],
     tray: Option<Tray>,
     page: Page,
     // 各个页面的界面状态。
@@ -162,6 +169,16 @@ pub struct HubApp {
     next_pin_id: u64,
     /// 最近一次弹出的贴图右键菜单：（贴图编号，菜单）。
     pin_menu: Option<(u64, NativeMenu<PinAction>)>,
+    /// 文件搜索模块（开关关闭时为 `None`，§4.4）。
+    search: Option<SearchModule>,
+    /// 宿主的平台能力实现（文件夹选择、模态保护、窗口拖动等）。
+    search_host: Arc<dyn devtools_search::HostServices>,
+    /// 下次打开搜索页要传入的入口信息。
+    search_entry: Option<SearchOptions>,
+    /// 正在等待搜索模块释放（关闭开关后）。
+    search_stopping: bool,
+    /// 本帧绘制结束时收起窗口（Esc）。
+    pending_hide: bool,
 }
 
 impl HubApp {
@@ -204,6 +221,7 @@ impl HubApp {
             }
         }
         app.sync_middle_click();
+        app.sync_search_module();
         app.tray = Tray::new(shared.clone(), app.data_dir.clone(), &app.settings)
             .inspect_err(|err| tracing::warn!("无法创建菜单栏图标：{err:#}"))
             .ok();
@@ -237,6 +255,7 @@ impl HubApp {
     ) -> Self {
         style::install(&ctx);
         shared.set_ctx(ctx.clone());
+        let search_host = HostBridge::new(shared.clone());
         Self {
             ctx,
             shared,
@@ -272,6 +291,11 @@ impl HubApp {
             pins: Vec::new(),
             next_pin_id: 1,
             pin_menu: None,
+            search: None,
+            search_host,
+            search_entry: None,
+            search_stopping: false,
+            pending_hide: false,
         }
     }
 
@@ -312,6 +336,10 @@ impl HubApp {
                 AppEvent::ClosePins => self.close_pins(),
                 AppEvent::Pin(id, request) => self.pin_request(id, request),
                 AppEvent::OcrDone => self.ocr.poll(),
+                AppEvent::HidePanel => self.hide_panel(true),
+                AppEvent::ShowSearch(entry) => self.open_search(entry),
+                // 托盘"退出"：走正常关闭流程，让 on_exit 保存尺寸并停止索引（§4.6）。
+                AppEvent::Quit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             }
         }
         let revision = self.shared.revision.load(Ordering::Relaxed);
@@ -326,11 +354,124 @@ impl HubApp {
         // 已经被主动显示，就不要再执行启动时的隐藏。
         self.startup_hide_pending = false;
         self.cancel_hotkey_recording();
-        self.page = page;
+        self.set_page(page);
         self.accessibility_ok = keyboard::accessibility_trusted(false);
         self.panel.reset_for_show();
         if page == Page::Settings {
             self.settings_view.refresh(&self.store);
+        }
+    }
+
+    /// 统一切换页面（§4.4：所有 `self.page = ...` 都必须经过这里）。
+    ///
+    /// 离开搜索页时完成尺寸保存、空格行为复位与最小尺寸恢复；进入时聚焦输入框。
+    fn set_page(&mut self, to: Page) {
+        let from = self.page;
+        if from == to {
+            return;
+        }
+        self.page = to;
+        if from == Page::Search {
+            if let Some(search) = &mut self.search {
+                search.on_hidden();
+            }
+            self.apply_min_size(false);
+        }
+        if to == Page::Search {
+            if let Some(search) = &mut self.search {
+                search.warm_up();
+                search.on_shown(self.search_entry.take());
+            }
+            self.apply_min_size(true);
+        }
+    }
+
+    /// 搜索页需要 800×480 起，其他页面沿用窗口原来的最小尺寸。
+    fn apply_min_size(&self, searching: bool) {
+        let min = if searching {
+            egui::vec2(800.0, 480.0)
+        } else {
+            egui::vec2(240.0, 120.0)
+        };
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min));
+    }
+
+    /// 打开 / 收起搜索页（热键、托盘、快捷面板都走这里，§4.5）。
+    fn open_search(&mut self, entry: SearchEntry) {
+        self.sync_search_module();
+        if !self.settings.search_enabled {
+            self.show_toast("文件搜索未启用，可在设置的“文件搜索”中开启");
+            return;
+        }
+        if self.search.is_none() {
+            return;
+        }
+        // 已经在前台：热键再次按下时收起。
+        if self.page == Page::Search && native_panel::is_active() {
+            self.hide_panel(true);
+            return;
+        }
+        self.search_entry = match entry {
+            SearchEntry::Hotkey => None,
+            SearchEntry::Text(text) => Some(SearchOptions {
+                query: text,
+                selected_paths: Vec::new(),
+                query_is_literal: true,
+                case_sensitive: self.settings.search_enabled
+                    && self
+                        .search
+                        .as_ref()
+                        .map(|s| s.service().settings().default_case_sensitive)
+                        .unwrap_or(false),
+            }),
+            SearchEntry::Paths(paths) => Some(SearchOptions {
+                query: String::new(),
+                selected_paths: paths.into_iter().map(PathBuf::from).collect(),
+                query_is_literal: false,
+                case_sensitive: false,
+            }),
+        };
+        self.startup_hide_pending = false;
+        self.on_shown(Page::Search);
+        let size = self
+            .search
+            .as_ref()
+            .map(SearchModule::window_size)
+            .unwrap_or([1100.0, 680.0]);
+        native_panel::show(Anchor::Placement(self.settings.placement), size);
+    }
+
+    /// 按开关创建 / 释放搜索模块（关闭时不再占线程，§4.4）。
+    fn sync_search_module(&mut self) {
+        if self.settings.search_enabled {
+            if self.search.is_none() && !self.search_stopping {
+                let mut module = SearchModule::new(&self.data_dir, self.search_host.clone());
+                module.warm_up();
+                self.search = Some(module);
+            }
+        } else if let Some(module) = &mut self.search {
+            module.shutdown();
+            self.search_stopping = true;
+        }
+        self.apply_hotkey(crate::hotkey::HotkeyAction::Search);
+    }
+
+    /// 拉取搜索模块的事件、响应策略变化、回收已停止的模块。
+    fn poll_search(&mut self) {
+        let mut policy_changed = false;
+        if let Some(search) = &mut self.search {
+            policy_changed = search.poll().policy_changed;
+        }
+        if policy_changed && self.page == Page::Search {
+            self.apply_min_size(true);
+        }
+        if self.search_stopping && self.search.as_ref().is_some_and(SearchModule::is_stopped) {
+            self.search = None;
+            self.search_stopping = false;
+            if self.page == Page::Search {
+                self.set_page(Page::Panel);
+            }
         }
     }
 
@@ -343,7 +484,7 @@ impl HubApp {
                 Page::Panel | Page::Settings => Some(&mut self.settings.window_size),
                 Page::JsonEditor => Some(&mut self.settings.json_editor_size),
                 Page::Ocr => Some(&mut self.settings.ocr_size),
-                Page::QuickActions => None,
+                Page::QuickActions | Page::Search => None,
             };
             if let Some(saved) = saved {
                 if size != *saved && size[0] > 100.0 && size[1] > 100.0 {
@@ -351,10 +492,16 @@ impl HubApp {
                     self.persist_settings();
                 }
             }
+            // 搜索页的尺寸由模块自己记住（§4.1 remember_size 无参，尺寸走这里）。
+            if self.page == Page::Search {
+                if let Some(search) = &mut self.search {
+                    search.remember_size(size);
+                }
+            }
         }
+        self.set_page(Page::Panel);
         native_panel::hide(restore_focus);
         self.cancel_hotkey_recording();
-        self.page = Page::Panel;
     }
 
     /// 设置变化后：同步给后台线程和托盘菜单，并写入设置文件。
@@ -366,6 +513,8 @@ impl HubApp {
         if let Err(err) = self.settings.save(&self.data_dir) {
             self.show_toast(format!("保存设置失败：{err:#}"));
         }
+        // 文件搜索开关变化时创建/释放模块并重新注册热键（§4.4）。
+        self.sync_search_module();
         self.sync_update_prompt();
     }
 
@@ -390,14 +539,14 @@ impl HubApp {
     /// 在当前窗口中打开设置页，并滚动到“分类标签”分组。
     fn reveal_tabs(&mut self) {
         self.settings_view.refresh(&self.store);
-        self.page = Page::Settings;
+        self.set_page(Page::Settings);
         self.settings_view.reveal_tabs = true;
     }
 
     /// 在当前窗口中打开设置页，并滚动到底部的更新信息。
     fn reveal_update(&mut self) {
         self.settings_view.refresh(&self.store);
-        self.page = Page::Settings;
+        self.set_page(Page::Settings);
         self.settings_view.reveal_update = true;
     }
 
@@ -488,8 +637,8 @@ impl HubApp {
                 .as_ref()
                 .map_or_else(|| "没有选中内容".to_string(), Selection::label)
         );
-        self.quick.open(selection);
-        self.page = Page::QuickActions;
+        self.quick.open(selection, self.settings.search_enabled);
+        self.set_page(Page::QuickActions);
         native_panel::show(
             Anchor::Placement(Placement::NearCursor),
             self.quick.window_size(),
@@ -519,7 +668,7 @@ impl HubApp {
             }
             None => self.json.focus(),
         }
-        self.page = Page::JsonEditor;
+        self.set_page(Page::JsonEditor);
         native_panel::show(
             Anchor::Placement(Placement::ScreenCenter),
             self.settings.json_editor_size,
@@ -582,6 +731,11 @@ impl HubApp {
             Page::QuickActions => true,
             Page::JsonEditor => self.settings.hide_on_blur && !self.json.pinned,
             Page::Ocr => self.settings.hide_on_blur && !self.ocr.pinned,
+            // 搜索页按窗口策略决定（Floating 失焦收起，Pinned 保留，§5.2）。
+            Page::Search => self
+                .search
+                .as_ref()
+                .is_some_and(|search| search.window_policy().hide_on_blur),
         };
         // 系统对话框（保存图片）开着的时候失焦是正常的，关掉之后的第一下失焦也是它收尾造成的：
         // 都不是用户点了别的应用，不能收起窗口。
@@ -640,6 +794,24 @@ impl eframe::App for HubApp {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.check_snip_rescued();
         self.handle_events();
+        self.poll_search();
+    }
+
+    /// 退出前：保存搜索页尺寸并停止索引（§4.6：托盘退出、更新重启都走这里）。
+    fn on_exit(&mut self) {
+        if let Some(rect) = self.ctx.input(|i| i.viewport().inner_rect) {
+            if self.page == Page::Search {
+                if let Some(search) = &mut self.search {
+                    search.remember_size([rect.width().round(), rect.height().round()]);
+                }
+            }
+        }
+        if let Some(mut search) = self.search.take() {
+            // 有界阻塞：取消后等待线程池收尾，最多 1.5 秒。
+            if !search.shutdown_blocking(Duration::from_millis(1500)) {
+                tracing::warn!("搜索模块未在 1.5 秒内停止，继续退出");
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -678,6 +850,11 @@ impl eframe::App for HubApp {
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        // 搜索页不透明（§5.2）：清屏色与内容底色一致，透明窗口边缘不会透出来。
+        if self.page == Page::Search {
+            return devtools_search::ui::page_background(visuals.dark_mode)
+                .to_normalized_gamma_f32();
+        }
         if self.backdrop != Backdrop::Opaque {
             // 窗口透明（macOS 毛玻璃 / 液态玻璃），圆角背景在 `draw` 里绘制。
             [0.0; 4]
@@ -694,7 +871,7 @@ impl HubApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let palette = self.palette(ui.ctx());
         let inner_margin = match self.page {
-            Page::Panel | Page::JsonEditor | Page::Ocr => egui::Margin::ZERO,
+            Page::Panel | Page::JsonEditor | Page::Ocr | Page::Search => egui::Margin::ZERO,
             Page::Settings => egui::Margin::same(style::PAD),
             Page::QuickActions => egui::Margin::same(quick_panel::MARGIN as i8),
         };
@@ -704,11 +881,17 @@ impl HubApp {
         } else {
             egui::Stroke::new(1.0, palette.border)
         };
+        // 搜索页是不透明底（§5.2）：与模块使用同一份底色，圆角窗口与内容不会出现色差。
+        let background = if self.page == Page::Search {
+            devtools_search::ui::page_background(ui.visuals().dark_mode)
+        } else {
+            palette.background
+        };
         // 背景与系统窗口一样用连续曲率的圆角，与下面的液态玻璃 / 毛玻璃形状一致。
         ui.painter().add(style::continuous_rect(
             ui.max_rect(),
             native_panel::CORNER_RADIUS as f32,
-            palette.background,
+            background,
             border,
         ));
         egui::CentralPanel::default()
@@ -719,8 +902,23 @@ impl HubApp {
                 Page::QuickActions => self.quick_ui(ui),
                 Page::JsonEditor => self.json_editor_ui(ui),
                 Page::Ocr => self.ocr_ui(ui),
+                Page::Search => self.search_ui(ui),
             });
+        if std::mem::take(&mut self.pending_hide) {
+            self.hide_panel(true);
+        }
         let ctx = self.ctx.clone();
         self.toast_ui(&ctx);
+    }
+
+    /// 搜索页：模块负责内容，宿主只负责背景与窗口（§4.2）。
+    fn search_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        let output = search.ui(ui);
+        if output.close {
+            self.pending_hide = true;
+        }
     }
 }

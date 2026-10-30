@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/devtools-clipboard", "crates/devtools-hub", "crates/devtools-json"]
+members = [
+    "crates/devtools-clipboard",
+    "crates/devtools-hub",
+    "crates/devtools-json",
+    "crates/devtools-search",
+    "crates/devtools-search/core",
+]
 resolver = "2"
 
 [workspace.package]
@@ -42,6 +48,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSImage",
     "NSImageRep",
     "NSPanel",
+    "NSOpenPanel",
     "NSPasteboard",
     "NSPasteboardItem",
     "NSResponder",
@@ -101,6 +108,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_LibraryLoader",
@@ -111,6 +119,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Controls_Dialogs",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
 winresource = "0.1"
@@ -118,8 +127,15 @@ zstd = "0.13"
 # 只为打开 wgpu 的默认特性（各平台的图形后端）：eframe 不带 egui-wgpu 的默认特性后不再替我们打开（见上面的 eframe）。
 wgpu = "30"
 
+globset = "0.4"
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+rayon = "1.10"
+regex = "1"
+unicode-normalization = "0.1"
+
 devtools-clipboard = { path = "crates/devtools-clipboard" }
 devtools-json = { path = "crates/devtools-json" }
+devtools-search = { path = "crates/devtools-search" }
 
 # macOS 上 dev 默认 split-debuginfo = "unpacked"：每次增量编译都会在 target/debug/deps
 # 留下一批新的 .o 文件且不会被清理，几次构建后就是数 GB。这里改为打包调试信息，

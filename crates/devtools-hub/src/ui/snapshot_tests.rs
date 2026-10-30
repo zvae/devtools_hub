@@ -659,7 +659,7 @@ fn snapshot_quick_panel_and_json_editor() {
         // 没有选中内容：列出常用功能。
         let mut probe = None;
         let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
-            app.quick.open(None);
+            app.quick.open(None, false);
             app.page = Page::QuickActions;
             probe = Some(quick_size(app));
         });
@@ -670,7 +670,7 @@ fn snapshot_quick_panel_and_json_editor() {
         // 选中的文本不是 JSON：提示没有匹配的功能。
         let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
             app.quick
-                .open(Some(Selection::Text("今天的会议改到下午三点".into())));
+                .open(Some(Selection::Text("今天的会议改到下午三点".into())), false);
             app.page = Page::QuickActions;
             probe = Some(quick_size(app));
         });
@@ -684,7 +684,7 @@ fn snapshot_quick_panel_and_json_editor() {
 
         // 选中 JSON：第一项是 JSON 编辑器，回车打开并自动格式化。
         let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
-            app.quick.open(Some(Selection::Text(SELECTED_JSON.into())));
+            app.quick.open(Some(Selection::Text(SELECTED_JSON.into())), false);
             app.page = Page::QuickActions;
             probe = Some(quick_size(app));
         });
@@ -956,4 +956,260 @@ fn snapshot_update_prompt() {
         harness.run_steps(3);
         save(&mut harness, &format!("update-failed-{suffix}"));
     }
+}
+
+/// 搜索页离屏渲染：验证布局不 panic、结果行能画出来（输出 PNG 供人工检查）。
+#[test]
+#[ignore = "需要 GPU；输出 PNG 供人工检查"]
+fn snapshot_search_page() {
+    use std::time::{Duration, Instant};
+
+    use devtools_search::application::protocol::Command as SearchCommand;
+    use devtools_search::settings::{RootConfig, RootLocation, VolumeId};
+
+    // 索引根：一个临时目录，里面放几个文件。
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("季度报告.pdf"), "pdf").unwrap();
+    std::fs::write(root.path().join("notes.md"), "md").unwrap();
+    std::fs::write(root.path().join("README.txt"), "readme").unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+    let data = tempfile::tempdir().unwrap();
+    let shared = Shared::new(&Settings::default());
+    let mut app = HubApp::build(
+        egui::Context::default(),
+        shared,
+        Store::open(data.path()).unwrap(),
+        data.path().to_path_buf(),
+        Settings::default(),
+    );
+    app.settings.search_enabled = true;
+    app.sync_search_module();
+    // 配置索引根并完成首次引导。
+    {
+        let module = app.search.as_mut().expect("已启用搜索");
+        let mut draft = module.service().settings().clone();
+        draft.permission_onboarding_completed = true;
+        draft.lazy_start = false;
+        draft.show_all_on_empty = false;
+        draft.history_enabled = true;
+        draft.roots = vec![RootConfig {
+            location: RootLocation {
+                volume_id: VolumeId::fallback_absolute(root.path()),
+                relative_path: String::new(),
+                fallback_absolute_path: root.path().to_path_buf(),
+            },
+            enabled: true,
+        }];
+        draft.exclude_patterns = vec!["node_modules".into()];
+        module
+            .service_mut()
+            .handle(SearchCommand::ApplySettings {
+                draft: Box::new(draft),
+            });
+    }
+    // 等索引就绪。
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        app.poll_search();
+        let ready = app
+            .search
+            .as_ref()
+            .map(|module| {
+                module
+                    .service()
+                    .roots()
+                    .iter()
+                    .all(|root| matches!(root.state, devtools_search::RootState::Ready))
+            })
+            .unwrap_or(false);
+        if ready {
+            break;
+        }
+        assert!(Instant::now() < deadline, "索引没有就绪");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // 提交一次查询并等结果。
+    if let Some(module) = app.search.as_mut() {
+        module
+            .service_mut()
+            .handle(SearchCommand::Search {
+                text: "r".into(),
+                literal: false,
+                case_sensitive: false,
+                scope: None,
+            });
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        app.poll_search();
+        let len = app
+            .search
+            .as_ref()
+            .map(|module| module.service().results_len())
+            .unwrap_or(0);
+        if len > 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "查询没有结果");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if let Some(module) = app.search.as_mut() {
+        module.service_mut().handle(SearchCommand::LoadRows {
+            start: 0,
+            count: 128,
+        });
+    }
+    // 入口带来的范围胶囊（模拟快捷面板选中文件夹后打开搜索）。
+    if let Some(module) = app.search.as_mut() {
+        module.on_shown(Some(devtools_search::SearchOptions {
+            query: String::new(),
+            selected_paths: vec![root.path().to_path_buf()],
+            query_is_literal: false,
+            case_sensitive: false,
+        }));
+    }
+    app.poll_search();
+    app.set_page(Page::Search);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 680.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut HubApp| {
+                app.poll_search();
+                app.draw(ui);
+            },
+            app,
+        );
+    let ctx = harness.ctx.clone();
+    style::install(&ctx);
+    ctx.set_theme(egui::Theme::Light);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(6);
+    // 等到行数据到达后再截图。
+    for _ in 0..100 {
+        let has_rows = harness
+            .state()
+            .search
+            .as_ref()
+            .map(|module| module.service().results_len())
+            .unwrap_or(0)
+            > 0;
+        if has_rows {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        harness.run_steps(1);
+    }
+    harness.run_steps(4);
+    save(&mut harness, "search-page");
+
+    // 模块内的设置页。
+    if let Some(module) = harness.state_mut().search.as_mut() {
+        module.show_settings();
+    }
+    harness.run_steps(4);
+    save(&mut harness, "search-settings");
+
+    // 暗色主题：确认取色跟随主题（§5.6）。
+    let ctx = harness.ctx.clone();
+    ctx.set_theme(egui::Theme::Dark);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(3);
+    save(&mut harness, "search-settings-dark");
+}
+
+/// 首次使用的权限引导页（新数据目录、引导未完成）。
+#[test]
+#[ignore = "需要 GPU；输出 PNG 供人工检查"]
+fn snapshot_search_permissions() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = HubApp::build(
+        egui::Context::default(),
+        Shared::new(&Settings::default()),
+        Store::open(data.path()).unwrap(),
+        data.path().to_path_buf(),
+        Settings::default(),
+    );
+    app.settings.search_enabled = true;
+    app.sync_search_module();
+    app.set_page(Page::Search);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 680.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut HubApp| {
+                app.poll_search();
+                app.draw(ui);
+            },
+            app,
+        );
+    let ctx = harness.ctx.clone();
+    style::install(&ctx);
+    ctx.set_theme(egui::Theme::Light);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(4);
+    save(&mut harness, "search-permissions");
+
+    let ctx = harness.ctx.clone();
+    ctx.set_theme(egui::Theme::Dark);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(3);
+    save(&mut harness, "search-permissions-dark");
+}
+
+/// 空态：首次打开、索引尚未建立时的引导（大图标 + 主按钮）。
+#[test]
+#[ignore = "需要 GPU；输出 PNG 供人工检查"]
+fn snapshot_search_empty() {
+    use devtools_search::application::protocol::Command as SearchCommand;
+
+    let data = tempfile::tempdir().unwrap();
+    let mut app = HubApp::build(
+        egui::Context::default(),
+        Shared::new(&Settings::default()),
+        Store::open(data.path()).unwrap(),
+        data.path().to_path_buf(),
+        Settings::default(),
+    );
+    app.settings.search_enabled = true;
+    app.sync_search_module();
+    // 完成引导但保持惰性启动：空态显示"索引尚未建立 + 立即建立索引"。
+    if let Some(module) = app.search.as_mut() {
+        let mut draft = module.service().settings().clone();
+        draft.permission_onboarding_completed = true;
+        draft.lazy_start = true;
+        draft.show_all_on_empty = false;
+        draft.history_enabled = true;
+        module
+            .service_mut()
+            .handle(SearchCommand::ApplySettings {
+                draft: Box::new(draft),
+            });
+    }
+    app.poll_search();
+    app.set_page(Page::Search);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 680.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut HubApp| {
+                app.poll_search();
+                app.draw(ui);
+            },
+            app,
+        );
+    let ctx = harness.ctx.clone();
+    style::install(&ctx);
+    ctx.set_theme(egui::Theme::Light);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(4);
+    save(&mut harness, "search-empty");
 }

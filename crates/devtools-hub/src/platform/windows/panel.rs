@@ -389,3 +389,9 @@ pub(super) unsafe fn work_area_at(point: POINT) -> RECT {
     GetMonitorInfoW(monitor, &mut info);
     info.rcWork
 }
+
+/// 搜索页的窗口行为（§4.2：由宿主平台层实现）。
+///
+/// Windows 上没有需要额外调整的层级或空格处理；宿主也没有全局绑定空格键。
+/// 保留这个入口，方便以后接入原生焦点/输入法处理。
+pub fn set_search_space_behavior(_searching: bool) {}
