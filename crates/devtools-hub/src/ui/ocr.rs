@@ -958,7 +958,6 @@ impl OcrView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::Backdrop;
 
     fn line(text: &str, x: f32, y: f32, w: f32, h: f32) -> Line {
         Line::new(text, Rect::from_min_size(pos2(x, y), vec2(w, h)))
@@ -1061,7 +1060,7 @@ mod tests {
 
     #[test]
     fn highlights_the_selected_lines_in_the_text() {
-        let palette = Palette::new(true, Backdrop::Opaque, 0);
+        let palette = Palette::new(true);
         let text = "一二\n三四";
         let layout = text_layout(text, Some(3..6), &palette, 400.0);
         let marked: Vec<_> = layout

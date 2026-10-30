@@ -1,0 +1,14 @@
+[package]
+name = "devtools-ui"
+description = "DevTools Hub 的基础界面样式：字体、矢量图标、配色与圆角规范、通用小控件"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+egui.workspace = true
+# 液态玻璃栏（`liquid_glass`）借 eframe 的 wgpu 渲染器把内容渲染到离屏纹理再模糊。
+eframe.workspace = true
+tracing.workspace = true

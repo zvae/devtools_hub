@@ -301,11 +301,16 @@ impl HubApp {
 
     /// 按当前主题、窗口材质与透明度设置得到的配色。
     fn palette(&self, ctx: &egui::Context) -> Palette {
-        Palette::new(
-            ctx.theme() == egui::Theme::Dark,
-            self.backdrop,
-            self.settings.panel_transparency,
-        )
+        // 窗口背景是系统材质（毛玻璃 / 液态玻璃）时底色半透明，让背后的材质透出来；
+        // 不透明窗口用满 alpha。透明度设置只在材质背景下生效。
+        let transparency = self.settings.panel_transparency;
+        let alpha = match self.backdrop {
+            Backdrop::Opaque => 255,
+            Backdrop::Vibrancy | Backdrop::Glass => {
+                (255.0 * (1.0 - f32::from(transparency.min(100)) / 100.0)).round() as u8
+            }
+        };
+        Palette::with_alpha(ctx.theme() == egui::Theme::Dark, alpha)
     }
 
     /// 处理后台线程发来的事件；数据库有新记录时让面板重新加载。
@@ -859,7 +864,7 @@ impl eframe::App for HubApp {
             // 窗口透明（macOS 毛玻璃 / 液态玻璃），圆角背景在 `draw` 里绘制。
             [0.0; 4]
         } else {
-            Palette::new(visuals.dark_mode, Backdrop::Opaque, 0)
+            Palette::new(visuals.dark_mode)
                 .background
                 .to_normalized_gamma_f32()
         }

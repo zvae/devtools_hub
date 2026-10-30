@@ -913,6 +913,7 @@ dependencies = [
  "devtools-clipboard",
  "devtools-json",
  "devtools-search",
+ "devtools-ui",
  "directories",
  "eframe",
  "egui",
@@ -980,6 +981,15 @@ dependencies = [
  "tempfile",
  "unicode-normalization",
  "zstd",
+]
+
+[[package]]
+name = "devtools-ui"
+version = "0.1.6"
+dependencies = [
+ "eframe",
+ "egui",
+ "tracing",
 ]
 
 [[package]]

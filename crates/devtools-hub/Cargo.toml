@@ -23,6 +23,7 @@ chrono.workspace = true
 devtools-clipboard.workspace = true
 devtools-json.workspace = true
 devtools-search.workspace = true
+devtools-ui.workspace = true
 directories.workspace = true
 eframe.workspace = true
 egui.workspace = true

@@ -5,6 +5,7 @@ members = [
     "crates/devtools-json",
     "crates/devtools-search",
     "crates/devtools-search/core",
+    "crates/devtools-ui",
 ]
 resolver = "2"
 
@@ -136,6 +137,7 @@ unicode-normalization = "0.1"
 devtools-clipboard = { path = "crates/devtools-clipboard" }
 devtools-json = { path = "crates/devtools-json" }
 devtools-search = { path = "crates/devtools-search" }
+devtools-ui = { path = "crates/devtools-ui" }
 
 # macOS 上 dev 默认 split-debuginfo = "unpacked"：每次增量编译都会在 target/debug/deps
 # 留下一批新的 .o 文件且不会被清理，几次构建后就是数 GB。这里改为打包调试信息，

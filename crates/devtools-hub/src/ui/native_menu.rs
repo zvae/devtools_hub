@@ -14,7 +14,7 @@ use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers, CMD_OR_CTRL};
 use super::style::Palette;
 use crate::keys;
 use crate::platform::drawn_menu::{Colors, Node};
-use crate::platform::{panel as native_panel, Backdrop};
+use crate::platform::panel as native_panel;
 
 /// 菜单内容的描述，`A` 是选中菜单项后要执行的操作。
 pub enum Entry<A> {
@@ -314,7 +314,7 @@ fn shortcut_text(accelerator: &Accelerator) -> String {
 /// 自绘菜单的配色：与面板上的 egui 弹窗一致（底板、阴影见 `style::install`），文字与高亮用面板配色。
 #[cfg_attr(not(windows), allow(dead_code))]
 fn drawn_colors(ctx: &egui::Context) -> Colors {
-    let palette = Palette::new(ctx.theme() == egui::Theme::Dark, Backdrop::Opaque, 0);
+    let palette = Palette::new(ctx.theme() == egui::Theme::Dark);
     let visuals = &ctx.global_style().visuals;
     Colors {
         fill: visuals.window_fill.to_srgba_unmultiplied(),

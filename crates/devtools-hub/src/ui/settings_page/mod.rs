@@ -229,7 +229,15 @@ impl HubApp {
                 let rect = Rect::from_min_size(window.min, Vec2::new(window.width(), height));
                 let liquid = self.liquid.as_ref().map(|liquid| (liquid, 0));
                 let tint = glass::tint(palette, liquid.is_some());
-                bar.finish(ui.painter(), rect, glass::Edge::Top, source, tint, liquid);
+                bar.finish(
+                    ui.painter(),
+                    rect,
+                    glass::Edge::Top,
+                    crate::platform::panel::CORNER_RADIUS as f32,
+                    source,
+                    tint,
+                    liquid,
+                );
                 if (height - self.settings_view.header_height).abs() > 0.5 {
                     self.settings_view.header_height = height;
                     ui.ctx().request_discard("标题栏的高度变了");

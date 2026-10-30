@@ -78,7 +78,15 @@ impl HubApp {
                 let rect = Rect::from_min_size(window.min, Vec2::new(window.width(), height));
                 let liquid = self.liquid.as_ref().map(|liquid| (liquid, 0));
                 let tint = glass::tint(palette, liquid.is_some());
-                bar.finish(ui.painter(), rect, glass::Edge::Top, list, tint, liquid);
+                bar.finish(
+                    ui.painter(),
+                    rect,
+                    glass::Edge::Top,
+                    native_panel::CORNER_RADIUS as f32,
+                    list,
+                    tint,
+                    liquid,
+                );
                 if (height - self.panel.header_height).abs() > 0.5 {
                     self.panel.header_height = height;
                     ui.ctx().request_discard("顶部栏的高度变了");
@@ -123,7 +131,15 @@ impl HubApp {
                 );
                 let liquid = self.liquid.as_ref().map(|liquid| (liquid, 1));
                 let tint = glass::tint(palette, liquid.is_some());
-                bar.finish(ui.painter(), rect, glass::Edge::Bottom, list, tint, liquid);
+                bar.finish(
+                    ui.painter(),
+                    rect,
+                    glass::Edge::Bottom,
+                    native_panel::CORNER_RADIUS as f32,
+                    list,
+                    tint,
+                    liquid,
+                );
                 if (height - self.panel.footer_height).abs() > 0.5 {
                     self.panel.footer_height = height;
                     ui.ctx().request_discard("底部栏的高度变了");
