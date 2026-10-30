@@ -69,6 +69,15 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> StatusActio
         }
         let _ = Icon::Pin;
 
+        let rows = service.results_len();
+        let selected = view.selected_count(rows);
+        if selected > 1 {
+            ui.label(
+                RichText::new(format!("已选 {} 项", theme::thousands(selected)))
+                    .size(theme::TEXT_HINT)
+                    .color(palette.accent),
+            );
+        }
         if view.total > 0 {
             ui.label(
                 RichText::new(format!(

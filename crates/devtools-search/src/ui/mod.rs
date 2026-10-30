@@ -6,9 +6,11 @@
 mod cache;
 mod header;
 mod history;
+mod icon_cache;
 mod icons;
 mod permissions;
 mod results;
+mod saved;
 mod settings_panel;
 mod status;
 mod theme;
@@ -26,6 +28,7 @@ use crate::settings::SearchSettings;
 use crate::HostServices;
 
 use cache::RowCache;
+use icon_cache::IconCache;
 
 /// 打开搜索页时传入的入口信息（§4.5）。
 #[derive(Clone, Debug, Default)]
@@ -71,7 +74,11 @@ pub(crate) struct ViewState {
     pub last_edit: Option<Instant>,
     pub submitted: String,
     pub cursor: usize,
+    /// 多选的锚点（Shift 连选时固定）。
+    pub anchor: usize,
     pub cache: RowCache,
+    /// 原生文件图标的纹理缓存（按扩展名）。
+    pub icons: IconCache,
     /// 列宽（从设置复制，拖动时实时更新，松手后持久化）。
     pub columns: crate::settings::ColumnWidths,
     /// 键盘移动后要滚到的偏移。
@@ -89,6 +96,8 @@ pub(crate) struct ViewState {
     pub toast: Option<(String, Instant)>,
     pub focus_pending: bool,
     pub history_open: bool,
+    /// 保存的搜索下拉。
+    pub saved_open: bool,
     pub new_exclude: String,
     pub read_only: bool,
     pub lifecycle: Lifecycle,
@@ -98,6 +107,70 @@ pub(crate) struct ViewState {
     pub header_height: f32,
     pub results_stale: bool,
     pub stop_requested: bool,
+}
+
+#[cfg(test)]
+impl ViewState {
+    /// 测试用的空状态（不引入模块与宿主）。
+    fn default_for_test() -> Self {
+        Self {
+            query: String::new(),
+            literal: false,
+            case_sensitive: false,
+            scope: None,
+            composing: false,
+            last_edit: None,
+            submitted: String::new(),
+            cursor: 0,
+            anchor: 0,
+            cache: RowCache::default(),
+            icons: IconCache::default(),
+            columns: Default::default(),
+            pending_scroll: None,
+            roots: Vec::new(),
+            total: 0,
+            took_ms: 0,
+            searching: false,
+            error: None,
+            notice: None,
+            page: Page::Main,
+            draft: None,
+            settings_error: None,
+            toast: None,
+            focus_pending: false,
+            history_open: false,
+            saved_open: false,
+            new_exclude: String::new(),
+            read_only: false,
+            lifecycle: Lifecycle::Dormant,
+            visible: (0, 0),
+            header_height: theme::HEADER_HEIGHT,
+            results_stale: false,
+            stop_requested: false,
+        }
+    }
+}
+
+impl ViewState {
+    /// 当前选中的行范围（含两端）；结果为空时退化为 0..=0。
+    pub fn selection_range(&self, rows: usize) -> std::ops::RangeInclusive<usize> {
+        if rows == 0 {
+            return 0..=0;
+        }
+        let last = rows - 1;
+        let a = self.anchor.min(last);
+        let b = self.cursor.min(last);
+        a.min(b)..=a.max(b)
+    }
+
+    /// 选中的行数。
+    pub fn selected_count(&self, rows: usize) -> usize {
+        if rows == 0 {
+            0
+        } else {
+            self.selection_range(rows).count()
+        }
+    }
 }
 
 /// 搜索模块（宿主持有 `Option<SearchModule>`，见 §4.4）。
@@ -125,7 +198,9 @@ impl SearchModule {
             last_edit: None,
             submitted: String::new(),
             cursor: 0,
+            anchor: 0,
             cache: RowCache::default(),
+            icons: IconCache::default(),
             columns: settings.ui.columns.clone(),
             pending_scroll: None,
             roots: Vec::new(),
@@ -144,6 +219,7 @@ impl SearchModule {
             toast: None,
             focus_pending: true,
             history_open: false,
+            saved_open: false,
             new_exclude: String::new(),
             read_only: service.read_only(),
             lifecycle,
@@ -264,6 +340,7 @@ impl SearchModule {
                     if self.view.cursor >= result.ids.len() {
                         self.view.cursor = 0;
                     }
+                    self.view.anchor = self.view.cursor;
                 }
                 Event::Rows { rows, .. } => {
                     for row in rows {
@@ -355,12 +432,30 @@ impl SearchModule {
                 }
                 if header.toggle_history {
                     self.view.history_open = !self.view.history_open;
+                    self.view.saved_open = false;
+                }
+                if header.toggle_saved {
+                    self.view.saved_open = !self.view.saved_open;
+                    self.view.history_open = false;
                 }
                 if header.open_settings {
                     self.open_settings();
                 }
                 if header.submit {
                     self.submit();
+                }
+                // 下拉打开时 Esc 先关下拉，不要直接收起窗口。
+                if (self.view.history_open || self.view.saved_open)
+                    && ui.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    })
+                {
+                    self.view.history_open = false;
+                    self.view.saved_open = false;
+                }
+                if self.view.saved_open {
+                    let saved = saved::show(ui, &mut self.view, &self.service);
+                    self.handle_saved(saved);
                 }
                 if self.view.history_open {
                     let history = history::show(ui, &mut self.view, &self.service);
@@ -376,7 +471,7 @@ impl SearchModule {
                     }
                 }
                 self.debounce(ui);
-                let action = results::show(ui, &mut self.view, &self.service);
+                let action = results::show(ui, &mut self.view, &self.service, self.host.as_ref());
                 if let Some((column, dir)) = action.sort {
                     self.service.handle(Command::SetSort { column, dir });
                 }
@@ -478,6 +573,68 @@ impl SearchModule {
         self.view.last_edit = None;
         self.submit();
         let _ = ui;
+    }
+
+    /// 保存的搜索：保存当前 / 应用 / 删除，全部经设置提交。
+    fn handle_saved(&mut self, action: saved::SavedAction) {
+        if action.save {
+            let query = self.view.query.trim().to_string();
+            let scope = self.view.scope.clone();
+            let name = if !query.is_empty() {
+                query.clone()
+            } else if let Some(scope) = &scope {
+                scope
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| scope.to_string_lossy().into_owned())
+            } else {
+                return;
+            };
+            let mut settings = self.service.settings().clone();
+            settings
+                .saved_searches
+                .retain(|entry| !(entry.query == query && entry.scope == scope));
+            settings.saved_searches.insert(
+                0,
+                crate::settings::SavedSearch {
+                    name,
+                    query,
+                    scope,
+                    case_sensitive: self.view.case_sensitive,
+                },
+            );
+            settings.saved_searches.truncate(20);
+            self.service.handle(Command::ApplySettings {
+                draft: Box::new(settings),
+            });
+            self.view.saved_open = false;
+            self.toast("已保存这条搜索");
+        }
+        if let Some(index) = action.delete {
+            let mut settings = self.service.settings().clone();
+            if index < settings.saved_searches.len() {
+                settings.saved_searches.remove(index);
+                self.service.handle(Command::ApplySettings {
+                    draft: Box::new(settings),
+                });
+            }
+        }
+        if let Some(index) = action.apply {
+            if let Some(entry) = self
+                .service
+                .settings()
+                .saved_searches
+                .get(index)
+                .cloned()
+            {
+                self.view.query = entry.query;
+                self.view.scope = entry.scope;
+                self.view.case_sensitive = entry.case_sensitive;
+                self.view.literal = false;
+                self.view.saved_open = false;
+                self.submit();
+            }
+        }
     }
 
     fn open_settings(&mut self) {
@@ -611,6 +768,22 @@ pub(crate) fn next_sort(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_range_is_inclusive_and_clamped() {
+        let mut view = ViewState::default_for_test();
+        view.anchor = 2;
+        view.cursor = 5;
+        assert_eq!(view.selection_range(10), 2..=5);
+        assert_eq!(view.selected_count(10), 4);
+        // 反向选择（向上拖）范围也一样。
+        view.anchor = 7;
+        view.cursor = 3;
+        assert_eq!(view.selection_range(10), 3..=7);
+        // 结果变少时收敛到有效范围。
+        assert_eq!(view.selection_range(4), 3..=3);
+        assert_eq!(view.selected_count(0), 0);
+    }
 
     #[test]
     fn sort_cycles_through_asc_desc_default() {

@@ -70,7 +70,12 @@ impl Column {
     }
 }
 
-pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> ResultsAction {
+pub fn show(
+    ui: &mut Ui,
+    view: &mut ViewState,
+    service: &Service,
+    host: &dyn crate::HostServices,
+) -> ResultsAction {
     let palette = theme::palette(ui);
     let mut action = ResultsAction::default();
     ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -214,7 +219,8 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> ResultsActi
                 Sense::click(),
             );
             let data = view.cache.get(index as u32).cloned();
-            let selected = view.cursor == index;
+            // 选中范围（Shift 连选 / ⌘A 全选）。
+            let selected = view.selection_range(rows).contains(&index);
             // 每一行都是一张卡片（与剪贴板列表同一语言）：白底 + 细描边，
             // 选中时换成强调色描边，悬停时底色提亮。
             let card = Rect::from_min_max(
@@ -235,9 +241,21 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> ResultsActi
                 .add(theme::continuous_rect(card, 10.0, fill, stroke));
             match data {
                 Some(row) if !row.missing => {
-                    paint_row(ui, rect, &row, &widths, &palette, view, service);
+                    // 原生图标：按类型缓存，取不到就画矢量图标。
+                    let icon = view.icons.icon(
+                        ui.ctx(),
+                        host,
+                        row.kind,
+                        &row.name,
+                        std::path::Path::new(&row.path),
+                    );
+                    paint_row(ui, rect, &row, &widths, &palette, view, service, icon);
                     if response.clicked() {
+                        let shift = ui.input(|input| input.modifiers.shift);
                         view.cursor = index;
+                        if !shift {
+                            view.anchor = index;
+                        }
                     }
                     if response.double_clicked() {
                         view.cursor = index;
@@ -259,7 +277,16 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> ResultsActi
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("复制路径").clicked() {
+                        let selected = view.selected_count(rows);
+                        if selected > 1 {
+                            if ui
+                                .button(format!("复制这 {selected} 项的路径"))
+                                .clicked()
+                            {
+                                action.copy = Some(join_paths(view, rows));
+                                ui.close();
+                            }
+                        } else if ui.button("复制路径").clicked() {
                             action.copy = Some(row.path.clone());
                             ui.close();
                         }
@@ -339,24 +366,35 @@ fn paint_row(
     palette: &Palette,
     view: &ViewState,
     service: &Service,
+    icon: Option<egui::TextureHandle>,
 ) {
     let painter = ui.painter();
     let mut x = rect.left() + 8.0;
-    // 文件名：图标 + 文本。
-    let icon_center = egui::pos2(x + 14.0, rect.center().y);
-    icons::paint_centered(
-        painter,
-        Rect::from_center_size(icon_center, Vec2::splat(15.0)),
-        15.0,
-        match row.kind {
-            NodeKind::Dir => Icon::Folder,
-            NodeKind::File => Icon::Document,
-        },
-        match row.kind {
-            NodeKind::Dir => palette.accent,
-            NodeKind::File => palette.weak,
-        },
-    );
+    // 文件名：系统图标（取不到时回退矢量图标）+ 文本。
+    let icon_rect = Rect::from_center_size(egui::pos2(x + 16.0, rect.center().y), Vec2::splat(18.0));
+    match icon {
+        Some(texture) => {
+            painter.image(
+                texture.id(),
+                icon_rect,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        None => icons::paint_centered(
+            painter,
+            icon_rect,
+            15.0,
+            match row.kind {
+                NodeKind::Dir => Icon::Folder,
+                NodeKind::File => Icon::Document,
+            },
+            match row.kind {
+                NodeKind::Dir => palette.accent,
+                NodeKind::File => palette.weak,
+            },
+        ),
+    }
     let name_rect = Rect::from_min_size(
         egui::pos2(x + 30.0, rect.top()),
         Vec2::new((widths[0] - 30.0).max(40.0), rect.height()),
@@ -525,24 +563,45 @@ fn keyboard(
     let page = (view.visible.1.saturating_sub(view.visible.0)).max(1);
     let mut moved = false;
     ui.input_mut(|input| {
-        if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
-            view.cursor = (view.cursor + 1).min(rows_count - 1);
+        // 带 Shift 时扩展选区（锚点不动），否则移动并把锚点收回当前行。
+        let extend = |input: &mut egui::InputState, view: &mut ViewState, target: usize| {
+            if input.modifiers.shift {
+                view.cursor = target;
+            } else {
+                view.cursor = target;
+                view.anchor = target;
+            }
+        };
+        if input.consume_key(Modifiers::NONE, Key::ArrowDown) || input.consume_key(Modifiers::SHIFT, Key::ArrowDown) {
+            let target = (view.cursor + 1).min(rows_count - 1);
+            extend(input, view, target);
             moved = true;
         }
-        if input.consume_key(Modifiers::NONE, Key::ArrowUp) {
-            view.cursor = view.cursor.saturating_sub(1);
+        if input.consume_key(Modifiers::NONE, Key::ArrowUp) || input.consume_key(Modifiers::SHIFT, Key::ArrowUp) {
+            let target = view.cursor.saturating_sub(1);
+            extend(input, view, target);
             moved = true;
         }
-        if input.consume_key(Modifiers::NONE, Key::PageDown) {
-            view.cursor = (view.cursor + page).min(rows_count - 1);
+        if input.consume_key(Modifiers::NONE, Key::PageDown) || input.consume_key(Modifiers::SHIFT, Key::PageDown) {
+            let target = (view.cursor + page).min(rows_count - 1);
+            extend(input, view, target);
             moved = true;
         }
-        if input.consume_key(Modifiers::NONE, Key::PageUp) {
-            view.cursor = view.cursor.saturating_sub(page);
+        if input.consume_key(Modifiers::NONE, Key::PageUp) || input.consume_key(Modifiers::SHIFT, Key::PageUp) {
+            let target = view.cursor.saturating_sub(page);
+            extend(input, view, target);
             moved = true;
+        }
+        // ⌘A 全选。
+        if input.consume_key(Modifiers::COMMAND, Key::A) {
+            view.anchor = 0;
+            view.cursor = rows_count - 1;
         }
         if input.consume_key(Modifiers::NONE, Key::Escape) {
-            if view.query.is_empty() {
+            if view.selected_count(rows_count) > 1 {
+                // 先取消多选，再按 Esc 才清空搜索 / 收起窗口。
+                view.anchor = view.cursor;
+            } else if view.query.is_empty() {
                 action.close = true;
             } else {
                 view.query.clear();
@@ -568,6 +627,16 @@ fn keyboard(
     let copy = ui.input_mut(|input| {
         input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::C)
     });
+    if copy {
+        action.copy = Some(if view.selected_count(rows_count) > 1 {
+            join_paths(view, rows_count)
+        } else {
+            view.cache
+                .get(view.cursor as u32)
+                .map(|row| row.path.clone())
+                .unwrap_or_default()
+        });
+    }
     if let Some(row) = view.cache.get(view.cursor as u32) {
         if !row.missing {
             if open {
@@ -576,12 +645,19 @@ fn keyboard(
             if reveal {
                 action.reveal = Some(PathBuf::from(&row.path));
             }
-            if copy {
-                action.copy = Some(row.path.clone());
-            }
         }
     }
     let _ = service;
+}
+
+/// 把选中范围内已缓存的行路径拼成多行（未加载的行跳过，避免为复制再拉一次数据）。
+fn join_paths(view: &ViewState, rows: usize) -> String {
+    view.selection_range(rows)
+        .filter_map(|index| view.cache.get(index as u32))
+        .filter(|row| !row.missing)
+        .map(|row| row.path.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 空态：大图标 + 标题 + 说明；索引未建立时给出主按钮。返回是否点了"建立索引"。

@@ -15,6 +15,7 @@ pub struct HeaderAction {
     pub open_settings: bool,
     pub toggle_case: bool,
     pub toggle_history: bool,
+    pub toggle_saved: bool,
     /// 按住顶栏空白处拖动窗口。
     pub drag: bool,
 }
@@ -99,11 +100,12 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> HeaderActio
 
     // 卡片右侧控件（清除、历史、Aa）。
     let history = service.settings().history_enabled;
+    // 星标按钮常驻：保存 / 复用搜索。
     let trailing_width = match (view.query.is_empty(), history) {
-        (true, true) => 64.0,
-        (true, false) => 34.0,
-        (false, true) => 92.0,
-        (false, false) => 62.0,
+        (true, true) => 92.0,
+        (true, false) => 62.0,
+        (false, true) => 120.0,
+        (false, false) => 90.0,
     };
     // 输入框按"一行文字的实际高度"垂直居中放在卡片里，占位文字自己画在同一基线上，
     // 避免 TextEdit 的 hint 与正文上下错位（中文行高与西文不同）。
@@ -166,6 +168,21 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> HeaderActio
         .clicked()
     {
         action.toggle_case = true;
+    }
+    if theme::icon_button(
+        &mut trailing,
+        if view.saved_open {
+            Icon::StarFilled
+        } else {
+            Icon::Star
+        },
+        view.saved_open,
+        &palette,
+    )
+    .on_hover_text("保存的搜索")
+    .clicked()
+    {
+        action.toggle_saved = true;
     }
     if history
         && theme::icon_button(&mut trailing, Icon::Clock, view.history_open, &palette)

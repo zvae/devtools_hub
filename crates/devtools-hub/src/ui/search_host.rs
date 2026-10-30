@@ -51,9 +51,9 @@ impl HostServices for HostBridge {
         Ok(())
     }
 
-    fn icon(&self, _path: &Path) -> Option<(u32, u32, Vec<u8>)> {
-        // v1 先不取原生图标（设计文档 §11 允许后置），界面画矢量占位图标。
-        None
+    fn icon(&self, path: &Path) -> Option<(u32, u32, Vec<u8>)> {
+        // 32×32 的系统图标（按 18px 绘制，Retina 下更清晰）。
+        crate::platform::icons::file_icon_rgba(path, 32)
     }
 
     fn set_search_space_behavior(&self, searching: bool) {
