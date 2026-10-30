@@ -23,6 +23,8 @@ pub enum Icon {
     Check,
     Warning,
     Document,
+    Clock,
+    Trash,
     Link,
     Image,
     Folder,
@@ -220,6 +222,19 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(5.8, 7.6), (10.4, 7.6)]);
             line(&[(5.8, 9.9), (10.4, 9.9)]);
             line(&[(5.8, 12.0), (8.6, 12.0)]);
+        }
+        Icon::Clock => {
+            painter.circle_stroke(g.p(8.0, 8.0), g.r(6.2), stroke);
+            line(&[(8.0, 8.0), (8.0, 4.4)]);
+            line(&[(8.0, 8.0), (10.8, 9.6)]);
+        }
+        Icon::Trash => {
+            line(&[(2.8, 4.6), (13.2, 4.6)]);
+            line(&[(6.4, 4.4), (6.4, 2.6), (9.6, 2.6), (9.6, 4.4)]);
+            closed(
+                &[(4.4, 4.8), (11.6, 4.8), (10.8, 14.0), (5.2, 14.0)],
+                false,
+            );
         }
         Icon::Link => {
             // 两个相扣的圆角环。

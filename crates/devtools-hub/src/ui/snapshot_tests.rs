@@ -972,6 +972,12 @@ fn snapshot_search_page() {
     std::fs::write(root.path().join("季度报告.pdf"), "pdf").unwrap();
     std::fs::write(root.path().join("notes.md"), "md").unwrap();
     std::fs::write(root.path().join("README.txt"), "readme").unwrap();
+    // 长文件名：确认按列宽截断，不会画到路径列上面。
+    std::fs::write(
+        root.path().join("综合底座平台软件需求规格说明书（整合版）v3.final.docx"),
+        "docx",
+    )
+    .unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();
     std::fs::write(root.path().join("src/main.rs"), "fn main() {}").unwrap();
 

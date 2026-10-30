@@ -71,7 +71,7 @@ enum Page {
     JsonEditor,
     /// 提取文字（截屏、贴图的识别结果）。
     Ocr,
-    /// 文件搜索页（不透明底、共享窗口，§5.2）。
+    /// 文件搜索页（共享窗口，背景材质与面板一致，§5.2）。
     Search,
 }
 
@@ -444,7 +444,9 @@ impl HubApp {
             .as_ref()
             .map(SearchModule::window_size)
             .unwrap_or([1100.0, 680.0]);
-        native_panel::show(Anchor::Placement(self.settings.placement), size);
+        // 搜索页像普通文档窗口一样出现在屏幕正中央（横向、纵向都居中），
+        // 不跟随剪贴板面板的“鼠标附近 / 上次位置”设置。
+        native_panel::show(Anchor::Center, size);
     }
 
     /// 按开关创建 / 释放搜索模块（关闭时不再占线程，§4.4）。
@@ -855,13 +857,9 @@ impl eframe::App for HubApp {
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        // 搜索页不透明（§5.2）：清屏色与内容底色一致，透明窗口边缘不会透出来。
-        if self.page == Page::Search {
-            return devtools_search::ui::page_background(visuals.dark_mode)
-                .to_normalized_gamma_f32();
-        }
+        // 窗口透明（macOS 毛玻璃 / 液态玻璃），圆角背景在 `draw` 里绘制；搜索页也一样，
+        // 让系统材质透出来。
         if self.backdrop != Backdrop::Opaque {
-            // 窗口透明（macOS 毛玻璃 / 液态玻璃），圆角背景在 `draw` 里绘制。
             [0.0; 4]
         } else {
             Palette::new(visuals.dark_mode)
@@ -886,12 +884,8 @@ impl HubApp {
         } else {
             egui::Stroke::new(1.0, palette.border)
         };
-        // 搜索页是不透明底（§5.2）：与模块使用同一份底色，圆角窗口与内容不会出现色差。
-        let background = if self.page == Page::Search {
-            devtools_search::ui::page_background(ui.visuals().dark_mode)
-        } else {
-            palette.background
-        };
+        // 搜索页与面板一样使用窗口材质：底色按“背景透明度”设置带 alpha，系统玻璃透出来。
+        let background = palette.background;
         // 背景与系统窗口一样用连续曲率的圆角，与下面的液态玻璃 / 毛玻璃形状一致。
         ui.painter().add(style::continuous_rect(
             ui.max_rect(),

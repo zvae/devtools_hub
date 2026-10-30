@@ -44,7 +44,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
         .show(ui, |ui| {
     // 标题栏：返回 + 标题 + 只读提示。
     ui.horizontal(|ui| {
-        if theme::icon_button(ui, &palette, Icon::Back, false)
+        if theme::icon_button(ui, Icon::Back, false, &palette)
             .on_hover_text("返回结果列表（Esc）")
             .clicked()
         {
@@ -92,7 +92,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                             .color(palette.text),
                     );
                     row.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if theme::icon_button(ui, &palette, Icon::Close, false)
+                        if theme::icon_button(ui, Icon::Close, false, &palette)
                             .on_hover_text("移除此索引根")
                             .clicked()
                         {
@@ -106,10 +106,10 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                 ui.horizontal(|ui| {
                     if theme::labeled_button(
                         ui,
-                        &palette,
                         Some(Icon::Plus),
                         "添加目录…",
-                        false,
+                        true,
+                        &palette,
                     )
                     .clicked()
                     {
@@ -152,7 +152,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                         egui::pos2(rect.right() - 26.0, rect.top()),
                         Vec2::new(26.0, 26.0),
                     )));
-                    if theme::icon_button(&mut close_ui, &palette, Icon::Close, false)
+                    if theme::icon_button(&mut close_ui, Icon::Close, false, &palette)
                         .on_hover_text("移除规则")
                         .clicked()
                     {
@@ -177,7 +177,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                     );
                     let submit =
                         response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if (theme::labeled_button(ui, &palette, Some(Icon::Plus), "添加", false)
+                    if (theme::labeled_button(ui, Some(Icon::Plus), "添加", true, &palette)
                         .clicked()
                         || submit)
                         && !new_exclude.trim().is_empty()
@@ -228,13 +228,13 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                 ui.horizontal(|ui| {
                     let label = if draft.index_paused { "恢复索引" } else { "暂停索引" };
                     let icon = if draft.index_paused { Icon::Play } else { Icon::Pause };
-                    if theme::labeled_button(ui, &palette, Some(icon), label, false).clicked() {
+                    if theme::labeled_button(ui, Some(icon), label, true, &palette).clicked() {
                         outcome.toggle_pause = true;
                     }
-                    if theme::labeled_button(ui, &palette, None, "重建全部", false).clicked() {
+                    if theme::labeled_button(ui, None, "重建全部", true, &palette).clicked() {
                         outcome.rebuild_all = true;
                     }
-                    if theme::labeled_button(ui, &palette, Some(Icon::Trash), "清理缓存", false)
+                    if theme::labeled_button(ui, Some(Icon::Trash), "清理缓存", true, &palette)
                         .clicked()
                     {
                         outcome.clear_cache = true;
@@ -318,7 +318,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                             .range(1..=10_000)
                             .speed(1),
                     );
-                    if theme::labeled_button(ui, &palette, Some(Icon::Trash), "清空", false)
+                    if theme::labeled_button(ui, Some(Icon::Trash), "清空", true, &palette)
                         .clicked()
                     {
                         outcome.clear_history = true;
@@ -352,7 +352,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                 });
                 theme::divider(ui, &palette);
                 theme::row(ui, &palette, "列宽与排序", |ui| {
-                    if theme::labeled_button(ui, &palette, None, "还原默认", false).clicked() {
+                    if theme::labeled_button(ui, None, "还原默认", true, &palette).clicked() {
                         draft.ui.columns = Default::default();
                         draft.ui.sort = Default::default();
                     }
@@ -383,13 +383,13 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
                 ui.add_enabled_ui(!read_only, |ui| {
-                    if theme::labeled_button(ui, &palette, Some(Icon::Check), "保存并应用", true)
+                    if theme::primary_button(ui, Some(Icon::Check), "保存并应用", &palette)
                         .clicked()
                     {
                         outcome.apply = true;
                     }
                 });
-                if theme::labeled_button(ui, &palette, None, "还原", false).clicked() {
+                if theme::labeled_button(ui, None, "还原", true, &palette).clicked() {
                     draft = service.settings().clone();
                 }
                 ui.label(

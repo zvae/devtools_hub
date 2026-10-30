@@ -168,14 +168,14 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> HeaderActio
         action.toggle_case = true;
     }
     if history
-        && theme::icon_button(&mut trailing, &palette, Icon::Clock, view.history_open)
+        && theme::icon_button(&mut trailing, Icon::Clock, view.history_open, &palette)
             .on_hover_text("搜索历史")
             .clicked()
     {
         action.toggle_history = true;
     }
     if !view.query.is_empty()
-        && theme::icon_button(&mut trailing, &palette, Icon::Close, false)
+        && theme::icon_button(&mut trailing, Icon::Close, false, &palette)
             .on_hover_text("清空")
             .clicked()
     {
@@ -233,7 +233,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> HeaderActio
     }
 
     // 设置齿轮。
-    if theme::icon_button(&mut bar, &palette, Icon::Gear, false)
+    if theme::icon_button(&mut bar, Icon::Gear, false, &palette)
         .on_hover_text("搜索设置")
         .clicked()
     {

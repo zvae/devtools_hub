@@ -1,7 +1,7 @@
 //! 搜索页 UI 与模块组合根（§4.1、§5）。
 //!
-//! 页面与宿主共用同一个窗口（101 层级、搜索页不透明）：模块只负责内容，
-//! 不假设宿主页面形状，不直接展示剪贴板数据。颜色一律取自 `ui.visuals()`（§5.6）。
+//! 页面与宿主共用同一个窗口（101 层级、背景材质与面板一致）：模块只负责内容，
+//! 不假设宿主页面形状，不直接展示剪贴板数据。配色与控件来自共用模块 `devtools-ui`（§5.6）。
 
 mod cache;
 mod header;
@@ -26,8 +26,6 @@ use crate::settings::SearchSettings;
 use crate::HostServices;
 
 use cache::RowCache;
-
-pub use theme::page_background;
 
 /// 打开搜索页时传入的入口信息（§4.5）。
 #[derive(Clone, Debug, Default)]

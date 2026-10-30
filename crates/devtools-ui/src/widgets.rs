@@ -2,7 +2,7 @@
 //!
 //! 与窗口拖动等依赖宿主平台层的控件分开：这里只放平台无关、只依赖配色与图标的部分。
 
-use egui::{Align, FontId, Layout, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Align, Color32, FontId, Layout, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 use crate::icons::{self, Icon};
 use crate::style::{self, Palette};
@@ -47,11 +47,39 @@ pub fn traffic_light_close(ui: &mut Ui) -> Response {
     response
 }
 
-/// 图标加文字的按钮（底栏的“复制全部”“保存”），悬停时显示浅色底；`enabled` 为 false 时变淡、不响应点击。
+/// 图标加文字的胶囊按钮（底栏的“复制全部”“保存”），悬停时显示浅色底；
+/// `enabled` 为 false 时变淡、不响应点击；`icon` 为 `None` 时只显示文字。
 pub fn labeled_button(
     ui: &mut Ui,
-    icon: Icon,
+    icon: Option<Icon>,
     label: &str,
+    enabled: bool,
+    palette: &Palette,
+) -> Response {
+    button(ui, icon, label, ButtonKind::Secondary, enabled, palette)
+}
+
+/// 主按钮：强调色底、白字（首次引导、空态里的“开始建立索引”等）。
+pub fn primary_button(
+    ui: &mut Ui,
+    icon: Option<Icon>,
+    label: &str,
+    palette: &Palette,
+) -> Response {
+    button(ui, icon, label, ButtonKind::Primary, ui.is_enabled(), palette)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ButtonKind {
+    Secondary,
+    Primary,
+}
+
+fn button(
+    ui: &mut Ui,
+    icon: Option<Icon>,
+    label: &str,
+    kind: ButtonKind,
     enabled: bool,
     palette: &Palette,
 ) -> Response {
@@ -62,39 +90,55 @@ pub fn labeled_button(
     let galley =
         ui.painter()
             .layout_no_wrap(label.to_owned(), FontId::proportional(12.5), palette.text);
-    let width = PAD * 2.0 + ICON + GAP + galley.size().x;
+    let icon_width = if icon.is_some() { ICON + GAP } else { 0.0 };
+    let width = PAD * 2.0 + icon_width + galley.size().x;
     let sense = if enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), sense);
-    if enabled && response.hovered() {
-        ui.painter()
-            .rect_filled(rect, style::CAPSULE, palette.field);
-    }
-    let icon_rect = Rect::from_center_size(
-        egui::pos2(rect.left() + PAD + ICON / 2.0, rect.center().y),
-        Vec2::splat(ICON),
-    );
-    icons::paint(
-        ui.painter(),
-        icon_rect,
-        icon,
-        if enabled {
-            palette.weak
+    let (fill, text_color, icon_color) = if kind == ButtonKind::Primary {
+        let fill = if !enabled {
+            palette.accent.gamma_multiply(0.45)
+        } else if response.hovered() {
+            palette.accent.gamma_multiply(0.92)
         } else {
-            palette.weak.gamma_multiply(0.5)
-        },
-    );
-    let text_pos = egui::pos2(
-        icon_rect.right() + GAP,
-        rect.center().y - galley.size().y / 2.0,
-    );
+            palette.accent
+        };
+        (fill, Color32::WHITE, Color32::WHITE)
+    } else {
+        let fill = if enabled && response.hovered() {
+            palette.field
+        } else {
+            Color32::TRANSPARENT
+        };
+        (
+            fill,
+            if enabled { palette.text } else { palette.weak },
+            if enabled {
+                palette.weak
+            } else {
+                palette.weak.gamma_multiply(0.5)
+            },
+        )
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, style::CAPSULE, fill);
+    }
+    let mut x = rect.left() + PAD;
+    if let Some(icon) = icon {
+        let icon_rect = Rect::from_center_size(
+            egui::pos2(x + ICON / 2.0, rect.center().y),
+            Vec2::splat(ICON),
+        );
+        icons::paint(ui.painter(), icon_rect, icon, icon_color);
+        x += icon_width;
+    }
     ui.painter().galley(
-        text_pos,
+        egui::pos2(x, rect.center().y - galley.size().y / 2.0),
         galley,
-        if enabled { palette.text } else { palette.weak },
+        text_color,
     );
     response
 }

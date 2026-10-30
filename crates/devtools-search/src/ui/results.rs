@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use egui::text::{LayoutJob, TextFormat};
+use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align2, Color32, CursorIcon, FontId, Key, Modifiers, Rect, Sense, Stroke, Ui, Vec2,
 };
@@ -350,7 +350,7 @@ fn paint_row(
         15.0,
         match row.kind {
             NodeKind::Dir => Icon::Folder,
-            NodeKind::File => Icon::File,
+            NodeKind::File => Icon::Document,
         },
         match row.kind {
             NodeKind::Dir => palette.accent,
@@ -442,6 +442,8 @@ fn paint_row(
 }
 
 /// 画文件名，匹配部分用强调色底高亮（ASCII 才做下标映射，避免多字节错位）。
+///
+/// 文件名按列宽单行截断、结尾换成 `…`：不做换行也不截断时，长文件名会画到路径列上面。
 fn paint_name(
     painter: &egui::Painter,
     rect: Rect,
@@ -453,34 +455,6 @@ fn paint_name(
     highlight: Color32,
 ) {
     let font = FontId::proportional(size);
-    let plain = |painter: &egui::Painter| {
-        painter.text(
-            egui::pos2(rect.left(), rect.center().y),
-            Align2::LEFT_CENTER,
-            text,
-            font.clone(),
-            color,
-        );
-    };
-    let Some(needle) = needle else {
-        plain(painter);
-        return;
-    };
-    if !text.is_ascii() || !needle.is_ascii() {
-        plain(painter);
-        return;
-    }
-    let (haystack, find) = if case_sensitive {
-        (text.to_string(), needle.to_string())
-    } else {
-        (text.to_ascii_lowercase(), needle.to_ascii_lowercase())
-    };
-    let Some(pos) = haystack.find(&find) else {
-        plain(painter);
-        return;
-    };
-    let end = pos + find.len();
-    let mut job = LayoutJob::default();
     let normal = TextFormat {
         font_id: font.clone(),
         color,
@@ -492,12 +466,40 @@ fn paint_name(
         background: highlight,
         ..Default::default()
     };
-    job.append(&text[..pos], 0.0, normal.clone());
-    job.append(&text[pos..end], 0.0, marked);
-    job.append(&text[end..], 0.0, normal);
+    let range = needle.and_then(|needle| {
+        if !text.is_ascii() || !needle.is_ascii() {
+            return None;
+        }
+        let (haystack, find) = if case_sensitive {
+            (text.to_string(), needle.to_string())
+        } else {
+            (text.to_ascii_lowercase(), needle.to_ascii_lowercase())
+        };
+        let pos = haystack.find(&find)?;
+        Some((pos, pos + find.len()))
+    });
+    let mut job = LayoutJob::default();
+    job.wrap = TextWrapping {
+        max_width: rect.width(),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+        ..Default::default()
+    };
+    match range {
+        Some((start, end)) => {
+            job.append(&text[..start], 0.0, normal.clone());
+            job.append(&text[start..end], 0.0, marked);
+            job.append(&text[end..], 0.0, normal);
+        }
+        None => job.append(text, 0.0, normal),
+    }
     let galley = painter.layout_job(job);
     let y = rect.center().y - galley.size().y / 2.0;
-    painter.galley(egui::pos2(rect.left(), y), galley, color);
+    // 截断已经保证宽度不超，再按格子裁剪一层，避免字距等细节在边界上越界。
+    painter
+        .with_clip_rect(rect)
+        .galley(egui::pos2(rect.left(), y), galley, color);
 }
 
 /// 键盘：↑↓ 移动、PgUp/PgDn、回车打开、⌘O 打开、⌘R 显示、⇧⌘C 复制路径、Esc 清空/收起。
@@ -653,12 +655,11 @@ fn empty_state(ui: &mut Ui, view: &ViewState, service: &Service, palette: &Palet
             Vec2::new(140.0, 26.0),
         );
         let mut button_ui = ui.new_child(egui::UiBuilder::new().max_rect(button_rect));
-        if theme::labeled_button(
+        if theme::primary_button(
             &mut button_ui,
-            palette,
             Some(Icon::Search),
             "立即建立索引",
-            true,
+            palette,
         )
         .clicked()
         {

@@ -98,8 +98,7 @@ pub fn show(ui: &mut Ui, read_only: bool) -> Option<PermAction> {
         .layout_no_wrap(primary.to_string(), egui::FontId::proportional(12.5), palette.text)
         .size()
         .x
-        + 20.0
-        + 26.0;
+        + 40.0;
     let secondary_w = ui
         .painter()
         .layout_no_wrap(
@@ -109,15 +108,15 @@ pub fn show(ui: &mut Ui, read_only: bool) -> Option<PermAction> {
         )
         .size()
         .x
-        + 26.0;
+        + 20.0;
     let total = primary_w + secondary_w + 10.0;
     let row_width = area.available_width();
     area.horizontal(|ui| {
         ui.add_space(((row_width - total) / 2.0).max(0.0));
-        if theme::labeled_button(ui, &palette, Some(Icon::Search), primary, true).clicked() {
+        if theme::primary_button(ui, Some(Icon::Search), primary, &palette).clicked() {
             choice = Some(PermAction::Begin);
         }
-        if theme::labeled_button(ui, &palette, None, secondary, false).clicked() {
+        if theme::labeled_button(ui, None, secondary, true, &palette).clicked() {
             choice = Some(PermAction::Later);
         }
     });

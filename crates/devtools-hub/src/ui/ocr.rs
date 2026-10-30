@@ -396,7 +396,13 @@ impl HubApp {
                     .job
                     .as_ref()
                     .is_some_and(|job| !job.text.trim().is_empty());
-                if labeled_button(ui, Icon::Save, "保存图片", self.ocr.job.is_some(), palette)
+                if labeled_button(
+                    ui,
+                    Some(Icon::Save),
+                    "保存图片",
+                    self.ocr.job.is_some(),
+                    palette,
+                )
                     .on_hover_text(format!(
                         "把左边的图片存成 PNG  {}",
                         keys::shortcut(&[keys::COMMAND, "S"])
@@ -405,7 +411,7 @@ impl HubApp {
                 {
                     actions.push(OcrAction::Save);
                 }
-                if labeled_button(ui, Icon::Copy, "复制全部", has_text, palette)
+                if labeled_button(ui, Some(Icon::Copy), "复制全部", has_text, palette)
                     .on_hover_text(format!(
                         "复制右边的文字  {}",
                         keys::shortcut(&[keys::SHIFT, keys::COMMAND, "C"])

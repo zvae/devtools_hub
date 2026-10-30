@@ -93,14 +93,14 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> StatusActio
                     .size(theme::TEXT_HINT)
                     .color(palette.faint),
             );
-            theme::keycaps(ui, &palette, &["↵"]);
+            theme::keycaps(ui, &["↵"], &palette);
             ui.add_space(2.0);
             ui.label(
                 RichText::new("显示")
                     .size(theme::TEXT_HINT)
                     .color(palette.faint),
             );
-            theme::keycaps(ui, &palette, &["⌘R"]);
+            theme::keycaps(ui, &["⌘R"], &palette);
         }
     });
 

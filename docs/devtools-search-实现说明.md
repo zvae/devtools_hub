@@ -48,7 +48,7 @@ crates/
   状态栏（状态点/计数/耗时/浮动-固定）、设置面板（草稿 + 保存/还原）、首次引导页、toast。
 - **宿主接入**：`search_enabled`/`search_hotkey`（默认关闭）、热键（关闭时注销）、
   托盘「文件搜索（未启用）」、快捷面板「文件搜索」、统一 `set_page`、
-  搜索页不透明底/最小尺寸、`HostServices`（NSOpenPanel / SHBrowseForFolder、
+  搜索页跟随窗口材质（液态玻璃 / 毛玻璃）与透明度设置、最小尺寸、打开时屏幕正中央（横纵居中）、`HostServices`（NSOpenPanel / SHBrowseForFolder、
   系统模态保护、打开/显示、拖动、重绘唤醒）、正常退出（托盘退出与更新重启不再 `process::exit`，
   `on_exit` 有界停止搜索线程）。
 

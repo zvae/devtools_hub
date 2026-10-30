@@ -956,6 +956,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "devtools-search-core",
+ "devtools-ui",
  "directories",
  "egui",
  "rayon",

@@ -33,8 +33,12 @@ pub const SMALL_RADIUS: u8 = 6;
 // - 页面标题 15（`FontFamily::Name(SEMIBOLD)`），分组标题 12；
 // - 行标题与正文 13（`TextStyle::Body`）；
 // - 说明文字与链接 11.5。
+/// 页面标题。
+pub const TEXT_TITLE: f32 = 15.0;
 /// 分组标题（设置页各分组的“通用”“粘贴”等）。
 pub const TEXT_SECTION: f32 = 12.0;
+/// 行标题与正文。
+pub const TEXT_BODY: f32 = 13.0;
 /// 说明文字与链接。
 pub const TEXT_HINT: f32 = 11.5;
 /// 说明文字的行距。egui 按字体族的主字体（SF Pro，约 1.18em）逐个行框排行，
@@ -193,11 +197,17 @@ pub fn continuous_frame<R>(
 /// 面板配色。窗口背景是毛玻璃或液态玻璃时底色半透明，让背后的材质透出来（见 [`Palette::with_alpha`]）。
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
+    /// 当前是否是深色主题。
+    pub dark: bool,
     pub accent: Color32,
     pub background: Color32,
     pub border: Color32,
     pub text: Color32,
     pub weak: Color32,
+    /// 结构性标签（分组标题、表头）：比 weak 实一档，避免在浅底上“发虚”。
+    pub secondary: Color32,
+    /// 更淡的辅助信息（键帽旁的说明、占位提示）。
+    pub faint: Color32,
     pub card: Color32,
     pub card_hover: Color32,
     pub card_stroke: Color32,
@@ -206,6 +216,7 @@ pub struct Palette {
     pub track: Color32,
     pub warn: Color32,
     pub ok: Color32,
+    pub danger: Color32,
 }
 
 impl Palette {
@@ -220,11 +231,14 @@ impl Palette {
         let accent = Color32::from_rgb(0x30, 0x7b, 0xf6);
         if dark {
             Self {
+                dark,
                 accent,
                 background: Color32::from_rgba_unmultiplied(30, 30, 32, alpha),
                 border: Color32::from_white_alpha(30),
                 text: Color32::from_rgb(0xf2, 0xf2, 0xf7),
                 weak: Color32::from_rgb(0x98, 0x98, 0x9f),
+                secondary: Color32::from_rgb(0xb4, 0xb4, 0xbc),
+                faint: Color32::from_rgb(0x6e, 0x6e, 0x76),
                 card: Color32::from_white_alpha(16),
                 card_hover: Color32::from_white_alpha(26),
                 card_stroke: Color32::from_white_alpha(14),
@@ -232,14 +246,18 @@ impl Palette {
                 track: Color32::from_gray(78),
                 warn: Color32::from_rgb(0xff, 0xb3, 0x40),
                 ok: Color32::from_rgb(0x34, 0xc7, 0x59),
+                danger: Color32::from_rgb(0xff, 0x6b, 0x63),
             }
         } else {
             Self {
+                dark,
                 accent,
                 background: Color32::from_rgba_unmultiplied(246, 246, 248, alpha),
                 border: Color32::from_black_alpha(24),
                 text: Color32::from_rgb(0x1d, 0x1d, 0x1f),
                 weak: Color32::from_rgb(0x86, 0x86, 0x8b),
+                secondary: Color32::from_rgb(0x5c, 0x5c, 0x63),
+                faint: Color32::from_rgb(0x9a, 0x9a, 0xa0),
                 card: Color32::from_rgba_unmultiplied(255, 255, 255, 215),
                 card_hover: Color32::from_rgba_unmultiplied(255, 255, 255, 245),
                 card_stroke: Color32::from_black_alpha(14),
@@ -247,7 +265,13 @@ impl Palette {
                 track: Color32::from_gray(214),
                 warn: Color32::from_rgb(0xc2, 0x6a, 0x00),
                 ok: Color32::from_rgb(0x28, 0xa7, 0x45),
+                danger: Color32::from_rgb(0xd7, 0x00, 0x15),
             }
         }
     }
+}
+
+/// 按当前主题取配色。
+pub fn palette(ui: &Ui) -> Palette {
+    Palette::new(ui.visuals().dark_mode)
 }

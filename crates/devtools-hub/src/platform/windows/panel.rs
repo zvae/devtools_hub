@@ -325,6 +325,15 @@ unsafe fn position(hwnd: HWND, anchor: Anchor) {
                 work,
             )
         }
+        Anchor::Center => {
+            let work = work_area_at(cursor);
+            let (work_width, work_height) = (work.right - work.left, work.bottom - work.top);
+            (
+                work.left + (work_width - width) / 2,
+                work.top + (work_height - height) / 2,
+                work,
+            )
+        }
         Anchor::Placement(Placement::LastPosition) => {
             // 上次的位置仍在某个显示器上就不动，否则居中（例如外接显示器已断开）。
             if !MonitorFromRect(&frame, MONITOR_DEFAULTTONULL).is_null() {

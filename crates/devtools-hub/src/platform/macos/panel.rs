@@ -457,6 +457,7 @@ pub fn show(anchor: Anchor, size: [f32; 2]) -> bool {
             match anchor {
                 Anchor::Placement(placement) => position(mtm, window, placement),
                 Anchor::StatusItem(_) => position_below_status_item(mtm, window),
+                Anchor::Center => position_centered(mtm, window),
             }
         }
         window.setAlphaValue(1.0);
@@ -553,14 +554,11 @@ pub fn previous_app_name() -> Option<String> {
 fn position(mtm: MainThreadMarker, window: &NSWindow, placement: Placement) {
     let frame = window.frame();
     let mouse = NSEvent::mouseLocation();
-    let screens = NSScreen::screens(mtm);
-    let screen_frames: Vec<NSRect> = screens.iter().map(|s| s.visibleFrame()).collect();
-    let mouse_screen = screen_frames
+    let screen_frames: Vec<NSRect> = NSScreen::screens(mtm)
         .iter()
-        .copied()
-        .find(|vf| contains(*vf, mouse))
-        .or_else(|| screen_frames.first().copied());
-    let Some(vf) = mouse_screen else {
+        .map(|screen| screen.visibleFrame())
+        .collect();
+    let Some(vf) = mouse_frame(&screen_frames, mouse) else {
         return;
     };
 
@@ -578,6 +576,35 @@ fn position(mtm: MainThreadMarker, window: &NSWindow, placement: Placement) {
             return position(mtm, window, Placement::ScreenCenter);
         }
     };
+    place_inside(window, frame, vf, x, top);
+}
+
+/// 屏幕正中央：水平、垂直都居中（搜索页用），限制在鼠标所在屏幕的可见区域内。
+fn position_centered(mtm: MainThreadMarker, window: &NSWindow) {
+    let frame = window.frame();
+    let screen_frames: Vec<NSRect> = NSScreen::screens(mtm)
+        .iter()
+        .map(|screen| screen.visibleFrame())
+        .collect();
+    let Some(vf) = mouse_frame(&screen_frames, NSEvent::mouseLocation()) else {
+        return;
+    };
+    let x = vf.origin.x + (vf.size.width - frame.size.width) / 2.0;
+    let top = vf.origin.y + (vf.size.height + frame.size.height) / 2.0;
+    place_inside(window, frame, vf, x, top);
+}
+
+/// 鼠标所在的屏幕，找不到时用第一块屏幕。
+fn mouse_frame(frames: &[NSRect], mouse: NSPoint) -> Option<NSRect> {
+    frames
+        .iter()
+        .copied()
+        .find(|vf| contains(*vf, mouse))
+        .or_else(|| frames.first().copied())
+}
+
+/// 把窗口左上角放到 `(x, top)`，并限制在 `vf` 内。
+fn place_inside(window: &NSWindow, frame: NSRect, vf: NSRect, x: f64, top: f64) {
     let x = x.clamp(
         vf.origin.x,
         (vf.origin.x + vf.size.width - frame.size.width).max(vf.origin.x),

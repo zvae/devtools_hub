@@ -9,6 +9,7 @@ version.workspace = true
 
 [dependencies]
 devtools-search-core = { path = "core" }
+devtools-ui.workspace = true
 
 anyhow.workspace = true
 chrono.workspace = true
