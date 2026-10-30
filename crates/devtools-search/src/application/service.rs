@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
+use devtools_search_core::scan::ExcludeSet;
 use devtools_search_core::volumes::{validate_new_root, RootState};
 use devtools_search_core::{root_key, RootId, RootLocation, SortColumn, VolumeId};
 
@@ -286,6 +287,9 @@ impl Service {
         if self.lifecycle == Lifecycle::Dormant && self.indexing_allowed() {
             self.start_indexing();
         }
+        // 范围路径规范化（与根一致）：macOS 的 /var、/tmp 是符号链接，
+        // 不规范化会和索引根的绝对路径对不上，导致"不在索引范围内"。
+        let scope = scope.map(|path| std::fs::canonicalize(&path).unwrap_or(path));
         // 取消上一次查询（§7.10：新查询使旧任务尽快退出）。
         self.cancel.store(true, Ordering::SeqCst);
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -545,9 +549,58 @@ impl Service {
     fn pause_all_scans(&mut self) {
         for slot in self.runtime.slots() {
             self.runtime.cancel_scan(&slot);
+            self.runtime.stop_watch(&slot);
             *slot.state.lock().unwrap() = RootState::Paused;
         }
         self.emit_roots();
+    }
+
+    /// 维护每个根的监听：就绪的根在允许建索引且开启监听时挂上，其它情况停掉。
+    fn sync_watchers(&mut self) {
+        let wants = self.settings.watch
+            && self.indexing_allowed()
+            && self.lifecycle == Lifecycle::Indexing;
+        if !wants {
+            for slot in self.runtime.slots() {
+                self.runtime.stop_watch(&slot);
+            }
+            return;
+        }
+        let config = config::index_config(&self.settings);
+        let Ok(excludes) = ExcludeSet::compile(
+            &config.exclude_rules,
+            config.exclude_case_sensitive,
+        ) else {
+            return;
+        };
+        for slot in self.runtime.slots() {
+            if matches!(slot.state(), RootState::Ready | RootState::Dirty) {
+                self.runtime.spawn_watch(slot, excludes.clone());
+            }
+        }
+    }
+
+    /// 监听溢出的根转为全量重扫（`Dirty`）。
+    fn rescan_dirty(&mut self) {
+        if !self.indexing_allowed() || self.lifecycle != Lifecycle::Indexing {
+            return;
+        }
+        let dirty: Vec<_> = self
+            .runtime
+            .slots()
+            .into_iter()
+            .filter(|slot| slot.state() == RootState::Dirty)
+            .collect();
+        if dirty.is_empty() {
+            return;
+        }
+        let config = config::index_config(&self.settings);
+        for slot in dirty {
+            tracing::info!("索引需要重新校验：{}", slot.mount.display());
+            self.runtime.stop_watch(&slot);
+            self.runtime
+                .spawn_scan(slot, config.clone(), self.settings.persist_index);
+        }
     }
 
     fn rescan_all(&mut self) {
@@ -604,7 +657,10 @@ impl Service {
             {
                 continue;
             }
-            let resolved = resolve_root_path(&location, &mounts);
+            let resolved = resolve_root_path(&location, &mounts)
+                // 规范化：macOS 的 /var、/tmp 是指向 /private/... 的符号链接，
+                // 监听事件给出的是真实路径，不规范化会和 strip_prefix 对不上。
+                .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
             match resolved {
                 Some(path) => {
                     let slot = self.runtime.add_slot(location, path);
@@ -686,6 +742,10 @@ impl Service {
                 other => events.push(other),
             }
         }
+        // 监听溢出 / 监听不可用之后需要全量校验的根。
+        self.rescan_dirty();
+        // 按开关与状态维护监听（只在索引就绪、允许建索引时监听）。
+        self.sync_watchers();
         // 索引变化后重跑当前查询（避免结果集与排序长期空白/过期）。
         if self.rerun_if_stale() {
             events.push(Event::ResultsStale);
@@ -748,6 +808,8 @@ impl Service {
         }
         let mut paused = false;
         for slot in self.runtime.slots() {
+            // 不继续建索引时，监听也一起停（重新显示后由 sync_watchers 恢复）。
+            self.runtime.stop_watch(&slot);
             if matches!(
                 slot.state(),
                 RootState::Scanning | RootState::PendingValidation

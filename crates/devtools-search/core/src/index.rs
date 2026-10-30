@@ -441,6 +441,120 @@ impl RootIndex {
         self.columns.status[i] = next as u8;
     }
 
+    /// 按名字查找直接子节点：先按原始字节精确比较，再按不区分大小写比较
+    /// （macOS 默认大小写不敏感的卷上，监听事件给出的名字大小写可能与索引里不同）。
+    pub fn child_by_name(&self, parent: NodeId, name: &OsStr) -> Option<NodeId> {
+        let target = os_bytes(name);
+        let folded = std::str::from_utf8(target).ok().map(crate::text::fold);
+        let mut fallback = None;
+        for &child in self.children(parent) {
+            if self.raw_name(child) == target {
+                return Some(child);
+            }
+            if fallback.is_none() {
+                if let (Some(folded), Some(text)) = (&folded, self.match_text(child, false)) {
+                    if text == folded.as_str() {
+                        fallback = Some(child);
+                    }
+                }
+            }
+        }
+        fallback
+    }
+
+    /// 按根相对路径查找节点（空路径返回根节点）。
+    pub fn node_at_path(&self, segments: &[&OsStr]) -> Option<NodeId> {
+        let mut node = self.root_node()?;
+        for segment in segments {
+            node = self.child_by_name(node, segment)?;
+        }
+        Some(node)
+    }
+
+    /// 更新元数据（大小 / 修改时间 / 创建时间），状态不变。
+    pub fn update_meta(&mut self, node: NodeId, meta: NodeMeta) {
+        let i = node.as_usize();
+        self.columns.size[i] = meta.size.unwrap_or(SIZE_UNKNOWN);
+        self.columns.mtime[i] = meta.mtime.unwrap_or(TIME_UNKNOWN);
+        self.columns.btime[i] = meta.btime.unwrap_or(TIME_UNKNOWN);
+    }
+
+    /// 子树先序节点（含自身），用于批量标记 / 统计。
+    pub fn subtree_nodes(&self, node: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            out.push(current);
+            for &child in self.children(current).iter().rev() {
+                stack.push(child);
+            }
+        }
+        out
+    }
+
+    /// 删除子树（逐个标记 `Deleted`，同一 epoch 内 ID 不复用）；返回标记的数量。
+    pub fn mark_deleted_subtree(&mut self, node: NodeId) -> u32 {
+        let nodes = self.subtree_nodes(node);
+        let mut count = 0;
+        for node in nodes {
+            let before = self.status(node);
+            self.mark_deleted(node);
+            if before != NodeStatus::Deleted {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// 压缩：物理移除 `Deleted` 节点并重映射父子 ID（`Excluded` 保留）。
+    ///
+    /// 分配新 epoch：旧的结果集 / NodeId 全部失效（§7.7 压缩语义），调用方需重跑查询。
+    pub fn compact(&mut self) -> bool {
+        self.flush_pending_remove();
+        let n = self.columns.parent.len();
+        if n == 0 {
+            return false;
+        }
+        let mut map = vec![u32::MAX; n];
+        let mut next = 0u32;
+        for (i, slot) in map.iter_mut().enumerate() {
+            if self.columns.status[i] != NodeStatus::Deleted as u8 {
+                *slot = next;
+                next += 1;
+            }
+        }
+        if next as usize == n {
+            // 没有墓碑：不需要压缩。
+            return false;
+        }
+        let mut columns = Columns::default();
+        for i in 0..n {
+            if map[i] == u32::MAX {
+                continue;
+            }
+            let parent = self.columns.parent[i];
+            columns.parent.push(if parent == PARENT_NONE {
+                PARENT_NONE
+            } else {
+                // 删除总是整棵子树，父节点必然保留。
+                map[parent as usize]
+            });
+            columns.name.push(self.columns.name[i]);
+            columns.kind.push(self.columns.kind[i]);
+            columns.status.push(self.columns.status[i]);
+            columns.size.push(self.columns.size[i]);
+            columns.mtime.push(self.columns.mtime[i]);
+            columns.btime.push(self.columns.btime[i]);
+        }
+        self.columns = columns;
+        self.next_node = next;
+        self.deleted = 0;
+        self.epoch += 1;
+        self.revision += 1;
+        self.rebuild_derived();
+        true
+    }
+
     /// 提交一批变更：递增 revision、重建派生数据。
     pub fn commit(&mut self) {
         self.revision += 1;
@@ -708,6 +822,46 @@ mod tests {
         // 大小写不敏感文本 = lower。
         assert_eq!(index.match_text(mixed, false), Some("mixed.csv"));
         assert_eq!(index.match_text(mixed, true), Some("MiXeD.CsV"));
+    }
+
+    #[test]
+    fn incremental_lookup_update_and_delete() {
+        let mut index = sample();
+        let root = index.root_node().unwrap();
+        // 按名字查找（大小写不敏感也命中）。
+        let docs = index.child_by_name(root, os("docs")).unwrap();
+        let a_md = index.child_by_name(docs, os("A.MD")).unwrap();
+        assert_eq!(index.raw_name_str(a_md), Some("a.md"));
+        // 按路径查找。
+        assert_eq!(
+            index.node_at_path(&[os("docs"), os("a.md")]),
+            Some(a_md)
+        );
+        assert_eq!(index.node_at_path(&[os("nope")]), None);
+        // 更新元数据。
+        index.update_meta(a_md, NodeMeta { size: Some(99), mtime: Some(7), btime: None });
+        assert_eq!(index.meta(a_md).size, Some(99));
+        // 删除子树：标记后不可见，节点数不变。
+        let before = index.len();
+        let deleted = index.mark_deleted_subtree(docs);
+        assert_eq!(deleted, 3, "docs + a.md + B.md");
+        assert_eq!(index.len(), before);
+        assert!(!index.status(docs).visible());
+        assert!(!index.status(a_md).visible());
+        assert!(index.stale_ratio() > 0.0);
+        // 压缩：物理移除、重映射父 ID、epoch 递增。
+        let epoch = index.epoch();
+        assert!(index.compact());
+        assert_eq!(index.epoch(), epoch + 1);
+        assert_eq!(index.len() as usize, before as usize - 3);
+        assert!(index.derived_valid());
+        assert!(index.child_by_name(root, os("docs")).is_none());
+        // 压缩后还能继续插入。
+        let fresh = index.insert(Some(root), os("new.txt"), NodeKind::File, NodeMeta::default());
+        index.commit();
+        assert_eq!(index.raw_name_str(fresh), Some("new.txt"));
+        // 没有墓碑时压缩返回 false。
+        assert!(!index.compact());
     }
 
     #[test]

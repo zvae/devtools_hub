@@ -171,8 +171,11 @@ fn scans_indexes_searches_and_loads_rows() {
     // 子串查询。
     let rows = search(&mut service, "alpha");
     assert_eq!(names(&rows), ["alpha.txt"]);
-    // 路径按父链拼出来（完整路径可用于打开/显示）。
-    assert_eq!(rows[0].path, fixture.path().join("alpha.txt").to_string_lossy());
+    // 路径按父链拼出来（完整路径可用于打开/显示；根路径已规范化为 /private/var/…）。
+    let expected = std::fs::canonicalize(fixture.path())
+        .unwrap()
+        .join("alpha.txt");
+    assert_eq!(rows[0].path, expected.to_string_lossy());
 
     // 大小写不敏感（beta.PDF 用小写 pdf 能搜到）。
     let rows = search(&mut service, "pdf");
@@ -267,5 +270,64 @@ fn not_indexed_folder_reports_notice() {
         "应给出范围提示：{:?}",
         service.last_notice()
     );
+    service.shutdown();
+}
+
+/// 实时监听：新建 / 删除文件后，不重建索引也能出现在结果里（§8）。
+#[test]
+fn watch_updates_index_without_rebuild() {
+    let fixture = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    let mut service = Service::new(data.path(), host);
+    let mut settings = settings_for(fixture.path());
+    settings.watch = true;
+    settings.persist_index = false;
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+
+    // 让服务挂上监听（poll 里维护）。
+    for _ in 0..20 {
+        let _ = service.poll();
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(search(&mut service, "watched").is_empty());
+
+    // 新建文件：应自动出现在结果里。
+    let created = fixture.path().join("watched.txt");
+    std::fs::write(&created, "hello").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let rows = search(&mut service, "watched");
+        if names(&rows) == ["watched.txt"] {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "实时监听没有把新文件加进索引：{:?}",
+            names(&rows)
+        );
+        let _ = service.poll();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // 删除文件：应自动从结果里消失。
+    std::fs::remove_file(&created).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let rows = search(&mut service, "watched");
+        if rows.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "实时监听没有把删除的文件移出索引：{:?}",
+            names(&rows)
+        );
+        let _ = service.poll();
+        std::thread::sleep(Duration::from_millis(100));
+    }
     service.shutdown();
 }

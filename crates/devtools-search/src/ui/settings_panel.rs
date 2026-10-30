@@ -208,18 +208,13 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                 });
                 theme::divider(ui, &palette);
                 theme::row(ui, &palette, "实时监听文件变化", |ui| {
-                    ui.label(
-                        RichText::new("尚未支持")
-                            .size(theme::TEXT_HINT)
-                            .color(palette.faint),
-                    );
-                    let mut off = false;
-                    ui.add_enabled_ui(false, |ui| {
-                        theme::toggle(ui, &palette, &mut off);
-                    })
-                    .response
-                    .on_disabled_hover_text("v1 尚未接入文件系统监听；变更后请点“重建全部索引”");
+                    theme::toggle(ui, &palette, &mut draft.watch);
                 });
+                theme::hint(
+                    ui,
+                    &palette,
+                    "开启后新增、删除、改名会即时反映到结果里；监听不可用时仍可手动“重建全部”。",
+                );
                 ui.add_space(2.0);
             });
 

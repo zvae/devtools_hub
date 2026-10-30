@@ -130,6 +130,7 @@ wgpu = "30"
 
 globset = "0.4"
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+notify = "8"
 rayon = "1.10"
 regex = "1"
 unicode-normalization = "0.1"

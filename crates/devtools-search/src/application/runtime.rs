@@ -4,18 +4,20 @@
 //! 事件通道回传。live 索引用 `RwLock` 保护，扫描完成时整体替换（epoch+1），查询只在读锁下工作。
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use devtools_search_core::query::{self, Ast, EvalOptions, Term};
 use devtools_search_core::scan::{self, ExcludeSet, ScanOptions, ScanStats};
 use devtools_search_core::snapshot::{config_fingerprint, EventCheckpoint, SnapshotStore};
 use devtools_search_core::volumes::RootState;
 use devtools_search_core::{
-    IndexConfig, NodeId, NodeKind, ResultId, RootId, RootIndex, RootLocation, SortColumn, SortDir,
+    IndexConfig, NodeId, NodeKind, NodeMeta, ResultId, RootId, RootIndex, RootLocation, SortColumn,
+    SortDir,
 };
 
 use super::protocol::{Event, RootStatus, RowData, SearchResult};
@@ -32,6 +34,10 @@ pub struct RootSlot {
     pub stats: Mutex<ScanStats>,
     pub checkpoint: Mutex<EventCheckpoint>,
     pub from_snapshot: AtomicBool,
+    /// 监听任务的取消标志（`Some` 表示正在监听）。
+    pub watch_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// 监听启动失败（权限 / 卷不支持）：同一次索引里不再重试。
+    pub watch_disabled: AtomicBool,
 }
 
 impl RootSlot {
@@ -46,6 +52,8 @@ impl RootSlot {
             stats: Mutex::new(ScanStats::default()),
             checkpoint: Mutex::new(EventCheckpoint::default()),
             from_snapshot: AtomicBool::new(false),
+            watch_cancel: Mutex::new(None),
+            watch_disabled: AtomicBool::new(false),
         }
     }
 
@@ -178,6 +186,7 @@ impl Runtime {
         config: IndexConfig,
         persist: bool,
     ) -> Arc<AtomicBool> {
+        slot.watch_disabled.store(false, Ordering::Relaxed);
         let cancel = Arc::new(AtomicBool::new(false));
         // 同一根同一时间只允许一个扫描任务。
         if let Some(previous) = slot.scan_cancel.lock().unwrap().replace(cancel.clone()) {
@@ -342,12 +351,81 @@ impl Runtime {
         rows
     }
 
+    /// 开始监听一个根：事件批量合并后增量更新索引（§8、§7.7）。
+    ///
+    /// 监听失败（权限、卷不支持）时把 `watch_disabled` 置位并提示，不会反复重试；
+    /// 事件溢出时把根标记为 `Dirty`，由 Service 转全量重扫。
+    pub fn spawn_watch(&self, slot: Arc<RootSlot>, excludes: ExcludeSet) {
+        if slot.watch_cancel.lock().unwrap().is_some()
+            || slot.watch_disabled.load(Ordering::Relaxed)
+        {
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        *slot.watch_cancel.lock().unwrap() = Some(cancel.clone());
+        let tx = self.sender();
+        let repaint = self.repaint.clone();
+        let root = slot.mount.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("search-watch-{}", slot.id.0))
+            .spawn({
+                let slot = slot.clone();
+                move || {
+                    let mut watcher = match crate::platform::watcher::FsWatcher::start(&root) {
+                        Ok(watcher) => watcher,
+                        Err(err) => {
+                            tracing::warn!("无法监听 {}：{err}", root.display());
+                            slot.watch_disabled.store(true, Ordering::Relaxed);
+                            *slot.watch_cancel.lock().unwrap() = None;
+                            if let Some(tx) = &tx {
+                                let _ = tx.send(Event::Notice(format!(
+                                    "无法实时监听 {}：{err}；变更后请手动重建索引",
+                                    root.display()
+                                )));
+                            }
+                            repaint();
+                            return;
+                        }
+                    };
+                    while !cancel.load(Ordering::Relaxed) {
+                        match watcher.next_batch(Duration::from_millis(350), &cancel) {
+                            None => {}
+                            Some(crate::platform::watcher::WatchBatch::Overflow) => {
+                                tracing::info!("监听事件过多，转为全量校验：{}", root.display());
+                                slot.set_state(RootState::Dirty);
+                                emit_roots(&tx, &repaint, &slot);
+                                break;
+                            }
+                            Some(crate::platform::watcher::WatchBatch::Paths(paths)) => {
+                                if apply_watch_batch(&slot, &root, &excludes, &paths) {
+                                    emit_roots(&tx, &repaint, &slot);
+                                }
+                            }
+                        }
+                    }
+                    watcher.stop(&root);
+                    *slot.watch_cancel.lock().unwrap() = None;
+                }
+            });
+        if spawned.is_err() {
+            *slot.watch_cancel.lock().unwrap() = None;
+        }
+    }
+
+    /// 停止监听一个根（暂停索引、隐藏页面、重建索引前调用）。
+    pub fn stop_watch(&self, slot: &RootSlot) {
+        if let Some(cancel) = slot.watch_cancel.lock().unwrap().take() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// 关闭：取消全部扫描任务。线程池在 Service 释放时 drop（有界阻塞）。
     pub fn shutdown(&self) {
         for slot in self.slots() {
             if let Some(cancel) = slot.scan_cancel.lock().unwrap().take() {
                 cancel.store(true, Ordering::SeqCst);
             }
+            self.stop_watch(&slot);
         }
     }
 }
@@ -609,4 +687,190 @@ fn status_of(slot: &RootSlot) -> RootStatus {
 fn device_of(path: &std::path::Path) -> Option<u64> {
     use devtools_search_core::ports::FsSource;
     crate::platform::fs::StdFs.device_of(path)
+}
+
+
+fn emit_roots(
+    tx: &Option<std::sync::mpsc::Sender<Event>>,
+    repaint: &Arc<dyn Fn() + Send + Sync>,
+    slot: &RootSlot,
+) {
+    if let Some(tx) = tx {
+        let _ = tx.send(Event::Roots {
+            roots: vec![status_of(slot)],
+        });
+    }
+    repaint();
+}
+
+/// 把一批监听事件应用到索引：新增 / 更新 / 删除（整棵子树）。
+///
+/// 返回是否真的有变化（没有变化的批次不需要通知 UI 重跑查询）。
+fn apply_watch_batch(
+    slot: &RootSlot,
+    root: &Path,
+    excludes: &ExcludeSet,
+    paths: &[PathBuf],
+) -> bool {
+    let mut changed = false;
+    {
+        let mut index = slot.index.write().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for path in paths {
+            // 事件路径偶尔是符号链接展开后的真实路径，两种都试一次。
+            let relative = match path.strip_prefix(root) {
+                Ok(relative) => relative.to_path_buf(),
+                Err(_) => match std::fs::canonicalize(path) {
+                    Ok(canonical) => match canonical.strip_prefix(root) {
+                        Ok(relative) => relative.to_path_buf(),
+                        Err(_) => {
+                            tracing::debug!("忽略根外的事件：{}", path.display());
+                            continue;
+                        }
+                    },
+                    Err(_) => continue,
+                },
+            };
+            let segments: Vec<OsString> = relative
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(name) => Some(name.to_os_string()),
+                    _ => None,
+                })
+                .collect();
+            if segments.is_empty() {
+                continue;
+            }
+            let rel: String = segments
+                .iter()
+                .map(|segment| segment.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if !seen.insert(rel.clone()) || is_excluded(excludes, &rel) {
+                continue;
+            }
+            let lookup: Vec<&std::ffi::OsStr> =
+                segments.iter().map(|segment| segment.as_os_str()).collect();
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) => {
+                    let kind = if metadata.is_dir() {
+                        NodeKind::Dir
+                    } else {
+                        NodeKind::File
+                    };
+                    let meta = meta_of(&metadata, kind);
+                    match index.node_at_path(&lookup) {
+                        Some(node) if index.kind(node) != kind => {
+                            // 文件 / 目录互换：整棵替换。
+                            index.mark_deleted_subtree(node);
+                            ensure_node(&mut index, root, &segments, Some((kind, meta)));
+                            changed = true;
+                        }
+                        Some(node) => {
+                            index.update_meta(node, meta);
+                            changed = true;
+                        }
+                        None => {
+                            ensure_node(&mut index, root, &segments, Some((kind, meta)));
+                            changed = true;
+                        }
+                    }
+                }
+                Err(_) => {
+                    if let Some(node) = index.node_at_path(&lookup) {
+                        index.mark_deleted_subtree(node);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            index.commit();
+            // 墓碑太多就压缩（压缩会换 epoch，旧结果集全部失效）。
+            if index.stale_ratio() > 0.3 {
+                index.compact();
+            }
+            let (files, dirs) = count_visible(&index);
+            drop(index);
+            let mut stats = slot.stats.lock().unwrap();
+            stats.files = files;
+            stats.dirs = dirs;
+        }
+    }
+    changed
+}
+
+/// 路径本身或任一祖先目录被排除。
+fn is_excluded(excludes: &ExcludeSet, rel: &str) -> bool {
+    if excludes.is_excluded_path(rel) {
+        return true;
+    }
+    let mut prefix = rel;
+    while let Some(index) = prefix.rfind('/') {
+        prefix = &prefix[..index];
+        if excludes.is_excluded_dir(prefix) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 找到（必要时创建）路径对应的节点；中间的目录缺失时按磁盘元数据补齐。
+fn ensure_node(
+    index: &mut RootIndex,
+    root: &Path,
+    segments: &[OsString],
+    leaf: Option<(NodeKind, NodeMeta)>,
+) -> Option<NodeId> {
+    let mut node = index.root_node()?;
+    let mut absolute = root.to_path_buf();
+    for (position, segment) in segments.iter().enumerate() {
+        absolute.push(segment);
+        if let Some(child) = index.child_by_name(node, segment) {
+            node = child;
+            continue;
+        }
+        let last = position + 1 == segments.len();
+        let (kind, meta) = if last {
+            leaf.unwrap_or((NodeKind::File, NodeMeta::default()))
+        } else {
+            let meta = std::fs::symlink_metadata(&absolute)
+                .map(|metadata| meta_of(&metadata, NodeKind::Dir))
+                .unwrap_or_default();
+            (NodeKind::Dir, meta)
+        };
+        node = index.insert(Some(node), segment, kind, meta);
+    }
+    Some(node)
+}
+
+/// 磁盘元数据 → 索引元数据（目录不记录大小）。
+fn meta_of(metadata: &std::fs::Metadata, kind: NodeKind) -> NodeMeta {
+    let to_unix = |time: std::io::Result<std::time::SystemTime>| {
+        time.ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs() as i64)
+    };
+    NodeMeta {
+        size: (kind == NodeKind::File).then(|| metadata.len()),
+        mtime: to_unix(metadata.modified()),
+        btime: to_unix(metadata.created()),
+    }
+}
+
+/// 统计可见的文件 / 目录数量（状态栏显示用）。
+fn count_visible(index: &RootIndex) -> (u32, u32) {
+    let mut files = 0;
+    let mut dirs = 0;
+    for node in 1..index.len() {
+        let node = NodeId(node);
+        if !index.status(node).visible() {
+            continue;
+        }
+        match index.kind(node) {
+            NodeKind::File => files += 1,
+            NodeKind::Dir => dirs += 1,
+        }
+    }
+    (files, dirs)
 }

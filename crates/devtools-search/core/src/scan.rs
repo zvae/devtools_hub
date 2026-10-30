@@ -19,6 +19,7 @@ use crate::model::{NodeKind, NodeMeta};
 use crate::ports::{Entry, EntryKind, FsSource};
 
 /// 编译后的排除规则集（对"根相对路径字符串"匹配）。
+#[derive(Clone)]
 pub struct ExcludeSet {
     /// 命中目录 → 剪枝（该目录及后代都排除）。
     dir_prune: globset::GlobSet,
