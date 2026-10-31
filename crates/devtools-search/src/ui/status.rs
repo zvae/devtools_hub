@@ -1,6 +1,7 @@
 //! 状态栏：索引状态点、计数、耗时、快捷键提示与窗口模式（§5.1、§5.3）。
 
 use devtools_search_core::volumes::RootState;
+use devtools_ui::keys;
 use egui::{Align, FontId, Layout, RichText, Sense, Stroke, Ui, Vec2};
 
 use super::icons::Icon;
@@ -102,19 +103,20 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> StatusActio
         }
         if service.results_len() > 0 {
             // 右到左布局：先放文字、再放键帽，视觉上才是「键帽 文字」。
+            // 按键的写法跟平台走：macOS 显示 ↵ / ⌘R，Windows 显示 Enter / Ctrl+R。
             ui.label(
                 RichText::new("打开")
                     .size(theme::TEXT_HINT)
                     .color(palette.faint),
             );
-            theme::keycaps(ui, &["↵"], &palette);
+            theme::keycaps(ui, &[keys::RETURN], &palette);
             ui.add_space(2.0);
             ui.label(
                 RichText::new("显示")
                     .size(theme::TEXT_HINT)
                     .color(palette.faint),
             );
-            theme::keycaps(ui, &["⌘R"], &palette);
+            theme::keycaps(ui, &[keys::COMMAND, "R"], &palette);
         }
     });
 
