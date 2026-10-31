@@ -49,6 +49,7 @@ pub trait HostServices: Send + Sync {
     /// 让 UI 线程重绘（事件到达时唤醒）。
     fn request_repaint(&self);
 
-    /// 顶栏拖动窗口。
-    fn start_window_drag(&self);
+    /// 顶栏拖动窗口。返回 `true` 表示平台层已经自己发起了拖动；
+    /// 返回 `false` 时由模块自己发 `ViewportCommand::StartDrag`（Windows 走 winit）。
+    fn start_window_drag(&self) -> bool;
 }

@@ -8,6 +8,7 @@
 //!   `index_epoch` 只在重建时递增（旧结果全部失效）；
 //! - 节点状态三种（deleted / excluded / pending_remove），同一 epoch 内 NodeId 不复用。
 
+use std::borrow::Cow;
 use std::ffi::OsStr;
 
 use serde::{Deserialize, Serialize};
@@ -55,8 +56,8 @@ impl NameArena {
     /// 插入（或复用）一个名字。
     fn intern(&mut self, name: &OsStr) -> NameId {
         let raw_bytes = os_bytes(name);
-        let utf8 = std::str::from_utf8(raw_bytes).ok();
-        if let Some(existing) = self.lookup(raw_bytes) {
+        let utf8 = std::str::from_utf8(&raw_bytes).ok();
+        if let Some(existing) = self.lookup(&raw_bytes) {
             return NameId(existing as u32);
         }
         let mut entry = NameEntry {
@@ -444,7 +445,8 @@ impl RootIndex {
     /// 按名字查找直接子节点：先按原始字节精确比较，再按不区分大小写比较
     /// （macOS 默认大小写不敏感的卷上，监听事件给出的名字大小写可能与索引里不同）。
     pub fn child_by_name(&self, parent: NodeId, name: &OsStr) -> Option<NodeId> {
-        let target = os_bytes(name);
+        let raw_owned = os_bytes(name);
+        let target: &[u8] = &raw_owned;
         let folded = std::str::from_utf8(target).ok().map(crate::text::fold);
         let mut fallback = None;
         for &child in self.children(parent) {
@@ -705,17 +707,20 @@ impl RootIndex {
     }
 }
 
-fn os_bytes(name: &OsStr) -> &[u8] {
+fn os_bytes(name: &OsStr) -> Cow<'_, [u8]> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        name.as_bytes()
+        Cow::Borrowed(name.as_bytes())
     }
     #[cfg(not(unix))]
     {
-        // Windows：OsStr 的 WTF-8 表示没有公开的字节接口；
-        // 用 to_string_lossy 的字节（非法 UTF-8 的罕见情形由 raw_utf8 标记）。
-        name.to_string_lossy().as_bytes()
+        // Windows：OsStr 的 WTF-8 表示没有公开的字节接口。合法 UTF-8 时零拷贝借用，
+        // 非法 UTF-16（孤立代理项）才退化为 lossy 并交出所有权。
+        match name.to_str() {
+            Some(text) => Cow::Borrowed(text.as_bytes()),
+            None => Cow::Owned(name.to_string_lossy().into_owned().into_bytes()),
+        }
     }
 }
 

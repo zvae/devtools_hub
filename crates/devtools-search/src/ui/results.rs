@@ -428,7 +428,8 @@ fn paint_row(
         FontId::proportional(theme::TEXT_HINT),
         widths[1] - 14.0,
     );
-    painter.text(
+    // 列宽被拖到很窄时文本仍可能超出一两个像素，按格子裁剪，绝不画到右边的列上。
+    painter.with_clip_rect(path_cell).text(
         egui::pos2(path_cell.left() + 6.0, path_cell.center().y),
         Align2::LEFT_CENTER,
         path_text,
@@ -441,7 +442,7 @@ fn paint_row(
         egui::pos2(x, rect.top()),
         Vec2::new(widths[2], rect.height()),
     );
-    painter.text(
+    painter.with_clip_rect(size_cell).text(
         egui::pos2(size_cell.right() - 10.0, size_cell.center().y),
         Align2::RIGHT_CENTER,
         match (row.kind, row.size) {
@@ -457,7 +458,7 @@ fn paint_row(
         egui::pos2(x, rect.top()),
         Vec2::new(widths[3], rect.height()),
     );
-    painter.text(
+    painter.with_clip_rect(mtime_cell).text(
         egui::pos2(mtime_cell.left() + 6.0, mtime_cell.center().y),
         Align2::LEFT_CENTER,
         theme::time_label(row.mtime),
@@ -470,7 +471,7 @@ fn paint_row(
         egui::pos2(x, rect.top()),
         Vec2::new(widths[4], rect.height()),
     );
-    painter.text(
+    painter.with_clip_rect(btime_cell).text(
         egui::pos2(btime_cell.left() + 6.0, btime_cell.center().y),
         Align2::LEFT_CENTER,
         theme::time_label(row.btime),

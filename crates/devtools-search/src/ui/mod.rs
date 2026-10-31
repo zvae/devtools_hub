@@ -336,11 +336,18 @@ impl SearchModule {
                     self.view.error = result.error;
                     self.view.notice = result.notice;
                     self.view.results_stale = false;
-                    self.view.cache.clear();
-                    if self.view.cursor >= result.ids.len() {
+                    // 增量应用结果集：索引更新导致的重跑只补/删变化的那几行，
+                    // 不整表清空重填（否则建立索引期间表格会一直闪）。
+                    let reused = self.view.cache.apply_results(&result.ids);
+                    let last = result.ids.len().saturating_sub(1);
+                    if reused == 0 {
+                        // 全新的结果集（换了查询）：选中回到第一行。
                         self.view.cursor = 0;
+                        self.view.anchor = 0;
+                    } else {
+                        self.view.cursor = self.view.cursor.min(last);
+                        self.view.anchor = self.view.anchor.min(last);
                     }
-                    self.view.anchor = self.view.cursor;
                 }
                 Event::Rows { rows, .. } => {
                     for row in rows {
@@ -351,6 +358,13 @@ impl SearchModule {
                     self.view.results_stale = true;
                 }
                 Event::Notice(text) => self.toast(text),
+                Event::ScopePicked(path) => {
+                    // 顶栏的目录按钮：选完目录立即在范围内搜索（范围胶囊可点击清除）。
+                    self.view.scope = Some(path);
+                    self.view.history_open = false;
+                    self.view.saved_open = false;
+                    self.submit();
+                }
                 Event::Stopped => {
                     self.view.stop_requested = true;
                 }
@@ -422,9 +436,16 @@ impl SearchModule {
                 }
             }
             Page::Main => {
+                // 顶栏与结果区上下紧贴（表头的分隔线就是顶栏的底边）。
+                ui.spacing_mut().item_spacing.y = 0.0;
                 let header = header::show(ui, &mut self.view, &self.service);
-                if header.drag {
-                    self.host.start_window_drag();
+                if header.pick_scope {
+                    self.service.handle(Command::PickScope);
+                }
+                if header.drag && !self.host.start_window_drag() {
+                    // 平台层不自己拖动时（Windows）交给 winit。
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
                 if header.toggle_case {
                     self.view.case_sensitive = !self.view.case_sensitive;

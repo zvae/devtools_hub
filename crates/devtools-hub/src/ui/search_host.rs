@@ -64,7 +64,7 @@ impl HostServices for HostBridge {
         self.shared.request_repaint();
     }
 
-    fn start_window_drag(&self) {
-        panel::start_drag();
+    fn start_window_drag(&self) -> bool {
+        panel::start_drag()
     }
 }

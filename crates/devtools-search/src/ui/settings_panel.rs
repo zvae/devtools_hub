@@ -277,12 +277,9 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                 });
                 theme::divider(ui, &palette);
                 theme::row(ui, &palette, "输入防抖", |ui| {
-                    ui.spacing_mut().slider_width = 160.0;
-                    ui.add(
-                        egui::Slider::new(&mut draft.debounce_ms, 1..=500)
-                            .suffix(" ms")
-                            .trailing_fill(true),
-                    );
+                    // 右到左布局：先放滑块（贴右），再把当前值放在它左边。
+                    theme::slider(ui, &palette, &mut draft.debounce_ms, 1..=500, 160.0);
+                    theme::value_chip(ui, &palette, &format!("{} ms", draft.debounce_ms));
                 });
                 theme::divider(ui, &palette);
                 theme::row(ui, &palette, "结果上限", |ui| {

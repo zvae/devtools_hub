@@ -16,6 +16,8 @@ pub struct HeaderAction {
     pub toggle_case: bool,
     pub toggle_history: bool,
     pub toggle_saved: bool,
+    /// 选择"在目录中搜索"的范围。
+    pub pick_scope: bool,
     /// 按住顶栏空白处拖动窗口。
     pub drag: bool,
 }
@@ -29,9 +31,9 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> HeaderActio
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
 
     // 顶栏留白可以拖动窗口（§4.2：宿主平台层负责真正的拖动）。
-    let drag_rect = Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + 11.0));
+    // 先于栏里的控件注册：后面添加的搜索框、按钮会盖住自己那块，只有空白处落在这里。
     let drag = ui.interact(
-        drag_rect,
+        rect,
         ui.id().with("search-drag"),
         Sense::click_and_drag(),
     );
@@ -98,14 +100,14 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> HeaderActio
         palette.weak,
     );
 
-    // 卡片右侧控件（清除、历史、Aa）。
+    // 卡片右侧控件（清除、历史、Aa、目录范围）。
     let history = service.settings().history_enabled;
-    // 星标按钮常驻：保存 / 复用搜索。
+    // 星标按钮常驻：保存 / 复用搜索；目录按钮常驻：在指定目录下搜索。
     let trailing_width = match (view.query.is_empty(), history) {
-        (true, true) => 92.0,
-        (true, false) => 62.0,
-        (false, true) => 120.0,
-        (false, false) => 90.0,
+        (true, true) => 116.0,
+        (true, false) => 86.0,
+        (false, true) => 144.0,
+        (false, false) => 114.0,
     };
     // 输入框按"一行文字的实际高度"垂直居中放在卡片里，占位文字自己画在同一基线上，
     // 避免 TextEdit 的 hint 与正文上下错位（中文行高与西文不同）。
@@ -124,8 +126,14 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> HeaderActio
         egui::pos2(edit_left, card_rect.center().y - text_height / 2.0),
         Vec2::new(edit_width, text_height),
     );
-    let response = ui.put(
-        edit_rect,
+    // 不用 `ui.put()`：它会把父 Ui 的光标挪到控件矩形下方，而输入框在卡片里比顶栏矮，
+    // 光标反而被拉回到卡片中间，结果区就提前开始、表头压在顶栏上（表头中间多出一条横线）。
+    let mut edit_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(edit_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let response = edit_ui.add(
         egui::TextEdit::singleline(&mut view.query)
             .id(ui.id().with("search-field"))
             .frame(egui::Frame::NONE)
@@ -190,6 +198,12 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> HeaderActio
             .clicked()
     {
         action.toggle_history = true;
+    }
+    if theme::icon_button(&mut trailing, Icon::Folder, view.scope.is_some(), &palette)
+        .on_hover_text("在指定目录下搜索")
+        .clicked()
+    {
+        action.pick_scope = true;
     }
     if !view.query.is_empty()
         && theme::icon_button(&mut trailing, Icon::Close, false, &palette)

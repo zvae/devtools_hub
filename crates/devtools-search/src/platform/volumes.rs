@@ -32,6 +32,8 @@ impl VolumeSource for StdVolumes {
         }
         #[cfg(windows)]
         {
+            use std::path::PathBuf;
+
             for letter in b'A'..=b'Z' {
                 let root = PathBuf::from(format!("{}:\\", letter as char));
                 if root.exists() {
@@ -68,6 +70,7 @@ impl VolumeSource for StdVolumes {
     }
 }
 
+#[cfg(not(windows))]
 fn mount_id(mount_point: &Path) -> VolumeMount {
     let volume_id = StdVolumes
         .volume_id_of(mount_point)
@@ -109,6 +112,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn current_mounts_carry_stable_ids() {
+        let mounts = StdVolumes.current_mounts();
+        assert!(!mounts.is_empty(), "至少应枚举出一个卷");
+        // 枚举出的挂载点再问一次身份，必须与枚举时一致。
+        for mount in &mounts {
+            let again = StdVolumes.volume_id_of(&mount.mount_point).expect("已枚举的卷必须可再识别");
+            assert_eq!(again, mount.volume_id);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn identifies_root_volume() {
         let id = StdVolumes.volume_id_of(Path::new("/")).expect("根卷可识别");
         assert!(!id.0.is_empty());
@@ -118,9 +133,21 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_is_in_current_mounts() {
         let mounts = StdVolumes.current_mounts();
         assert!(mounts.iter().any(|m| m.mount_point == Path::new("/")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_roots_are_in_current_mounts() {
+        let mounts = StdVolumes.current_mounts();
+        assert!(mounts.iter().all(|m| m.volume_id.0.starts_with("win-drive:")));
+        // 当前工作目录所在盘必须在枚举结果里。
+        let cwd = std::env::current_dir().expect("有工作目录");
+        let cwd_id = StdVolumes.volume_id_of(&cwd).expect("工作目录所在卷可识别");
+        assert!(mounts.iter().any(|m| m.volume_id == cwd_id));
     }
 }

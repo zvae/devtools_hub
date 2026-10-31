@@ -118,11 +118,14 @@ fn candidates() -> Candidates {
             font("msyh.ttc").named("Microsoft YaHei UI"),
             font("msyh.ttc"),
             font("msyh.ttf"),
+            // 黑体兜底：宋体（衬线）做界面字体会显得"不是一套字"。
+            font("simhei.ttf"),
             font("simsun.ttc"),
         ],
         cjk_semibold: vec![
             font("msyhbd.ttc").named("Microsoft YaHei UI Bold"),
             font("msyhbd.ttc"),
+            font("simhei.ttf"),
         ],
         mono,
         symbols: vec![font("seguisym.ttf")],
@@ -191,20 +194,29 @@ fn read_font_file(path: &Path) -> Option<&'static [u8]> {
     Some(bytes)
 }
 
-/// 按顺序尝试候选字面，返回第一个能读到的。
-fn load_first(specs: &[FaceSpec]) -> Option<Face> {
+/// 按顺序尝试候选字面，返回第一个能读到的（连同文件路径，便于日志说明选了哪个文件）。
+fn load_first(specs: &[FaceSpec]) -> Option<(Face, PathBuf)> {
     specs.iter().find_map(|spec| {
         let bytes = read_font_file(&spec.path)?;
         let index = match spec.full_name {
             Some(name) => ttc_face_index(bytes, name)?,
             None => 0,
         };
-        Some(Face {
-            bytes,
-            index,
-            coords: spec.coords,
-            metrics: line_metrics(bytes, index)?,
-        })
+        let metrics = line_metrics(bytes, index)?;
+        tracing::debug!(
+            "字体候选命中：{}（face {index}，全名 {:?}）",
+            spec.path.display(),
+            spec.full_name
+        );
+        Some((
+            Face {
+                bytes,
+                index,
+                coords: spec.coords,
+                metrics,
+            },
+            spec.path.clone(),
+        ))
     })
 }
 
@@ -216,11 +228,18 @@ pub fn definitions() -> FontDefinitions {
     let cjk = load_first(&candidates.cjk);
     let mono = load_first(&candidates.mono);
     let symbols = load_first(&candidates.symbols);
-    let ui_semibold = load_first(&candidates.ui_semibold).or(ui);
-    let cjk_semibold = load_first(&candidates.cjk_semibold).or(cjk);
-    if cjk.is_none() {
-        tracing::warn!("没有找到中文字体，中文可能无法显示");
+    // 中文正文用的哪个文件一眼就能看出来：用户说"字体不对"时，日志直接给出答案。
+    match &cjk {
+        Some((face, path)) => tracing::info!(
+            "中文字体：{}（face {}，{} KB）",
+            path.display(),
+            face.index,
+            face.bytes.len() / 1024
+        ),
+        None => tracing::warn!("没有找到中文字体，中文可能无法显示"),
     }
+    let ui_semibold = load_first(&candidates.ui_semibold).or(ui.clone());
+    let cjk_semibold = load_first(&candidates.cjk_semibold).or(cjk.clone());
 
     let mut fonts = FontDefinitions::default();
     let defaults = FontDefinitions::default();
@@ -248,22 +267,28 @@ pub fn definitions() -> FontDefinitions {
         names
     };
 
+    // 字面与路径解耦：路径只进日志，字面进字体族。
+    let face = |loaded: &Option<(Face, PathBuf)>| loaded.as_ref().map(|(face, _)| *face);
+    let (ui_face, cjk_face, mono_face, symbols_face) =
+        (face(&ui), face(&cjk), face(&mono), face(&symbols));
+    let ui_semibold_face = face(&ui_semibold);
+    let cjk_semibold_face = face(&cjk_semibold);
     let proportional = family(
         "proportional",
-        [("ui", ui), ("cjk", cjk), ("symbols", symbols)],
+        [("ui", ui_face), ("cjk", cjk_face), ("symbols", symbols_face)],
         default_family(&FontFamily::Proportional),
     );
     let monospace = family(
         "monospace",
-        [("mono", mono), ("cjk", cjk), ("symbols", symbols)],
+        [("mono", mono_face), ("cjk", cjk_face), ("symbols", symbols_face)],
         default_family(&FontFamily::Monospace),
     );
     let semibold = family(
         SEMIBOLD,
         [
-            ("ui", ui_semibold),
-            ("cjk", cjk_semibold),
-            ("symbols", symbols),
+            ("ui", ui_semibold_face),
+            ("cjk", cjk_semibold_face),
+            ("symbols", symbols_face),
         ],
         proportional.clone(),
     );

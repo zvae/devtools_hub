@@ -8,7 +8,7 @@
 //! - 设备号：Unix 用 `MetadataExt::dev()`；Windows 依赖卷 GUID 判卷（见 `volumes`）。
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use devtools_search_core::ports::{Entry, EntryKind, FsSource};
@@ -82,6 +82,47 @@ fn to_unix(time: std::time::SystemTime) -> Option<i64> {
         .map(|d| d.as_secs() as i64)
 }
 
+/// 去掉 Windows 上 `canonicalize` 加上的 `\\?\` 逐字节前缀（`\\?\F:\a` → `F:\a`）。
+///
+/// 这个前缀是给 Win32 的宽字符接口用的"禁用规范化"标记，界面上显示出来就是
+/// `\\?\F:\`，和用户在资源管理器、粘贴路径里看到的 `F:\` 不一致；存储时留在根路径里
+/// 还会让 `starts_with(挂载点)` 对不上，根因此退化成"绝对路径身份"。
+///
+/// - `\\?\C:\...` → `C:\...`；
+/// - `\\?\UNC\server\share\...` → `\\server\share\...`；
+/// - 设备命名空间（`\\?\Volume{...}`、`\\.\`）没有等价写法，原样返回。
+#[cfg(windows)]
+pub fn simplify(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+    let mut out = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", drive as char)),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut out = PathBuf::from("\\\\");
+            out.push(server);
+            out.push(share);
+            out
+        }
+        _ => return path,
+    };
+    for component in components {
+        if component != Component::RootDir {
+            out.push(component.as_os_str());
+        }
+    }
+    out
+}
+
+/// 其他平台没有 `\\?\` 前缀，直接透传。
+#[cfg(not(windows))]
+pub fn simplify(path: PathBuf) -> PathBuf {
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +152,32 @@ mod tests {
     fn reports_io_error_for_missing_directory() {
         let mut entries = Vec::new();
         assert!(StdFs.list_dir(Path::new("/definitely/not/here"), &mut entries).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn simplify_strips_verbatim_prefix() {
+        // 盘符路径：去掉 `\\?\`，其余原样。
+        assert_eq!(
+            simplify(PathBuf::from(r"\\?\F:\work\a.txt")),
+            PathBuf::from(r"F:\work\a.txt")
+        );
+        // UNC：`\\?\UNC\server\share` → `\\server\share`。
+        assert_eq!(
+            simplify(PathBuf::from(r"\\?\UNC\server\share\a")),
+            PathBuf::from(r"\\server\share\a")
+        );
+        // 普通路径、设备命名空间、裸盘符根都不动。
+        assert_eq!(simplify(PathBuf::from(r"F:\a")), PathBuf::from(r"F:\a"));
+        assert_eq!(simplify(PathBuf::from(r"F:\")), PathBuf::from(r"F:\"));
+        assert_eq!(
+            simplify(PathBuf::from(r"\\?\Volume{1234}\a")),
+            PathBuf::from(r"\\?\Volume{1234}\a")
+        );
+        // canonicalize 的结果简化后与手写路径一致（同一目录只差前缀）。
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let stripped = canonical.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+        assert_eq!(simplify(canonical), PathBuf::from(stripped));
     }
 }

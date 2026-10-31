@@ -38,7 +38,9 @@ impl HostServices for FakeHost {
     }
     fn set_search_space_behavior(&self, _searching: bool) {}
     fn request_repaint(&self) {}
-    fn start_window_drag(&self) {}
+    fn start_window_drag(&self) -> bool {
+        false
+    }
 }
 
 /// 临时目录里放几个文件，包含一个应被排除的 node_modules。
@@ -171,11 +173,18 @@ fn scans_indexes_searches_and_loads_rows() {
     // 子串查询。
     let rows = search(&mut service, "alpha");
     assert_eq!(names(&rows), ["alpha.txt"]);
-    // 路径按父链拼出来（完整路径可用于打开/显示；根路径已规范化为 /private/var/…）。
-    let expected = std::fs::canonicalize(fixture.path())
-        .unwrap()
-        .join("alpha.txt");
+    // 路径按父链拼出来（完整路径可用于打开/显示；根路径已规范化为 /private/var/…，
+    // Windows 上还要去掉 canonicalize 加的 `\\?\`）。
+    let expected = devtools_search::platform::fs::simplify(
+        std::fs::canonicalize(fixture.path()).unwrap(),
+    )
+    .join("alpha.txt");
     assert_eq!(rows[0].path, expected.to_string_lossy());
+    assert!(
+        !rows[0].path.starts_with(r"\\?\"),
+        "展示路径不应带 Windows 逐字节前缀：{}",
+        rows[0].path
+    );
 
     // 大小写不敏感（beta.PDF 用小写 pdf 能搜到）。
     let rows = search(&mut service, "pdf");
@@ -330,4 +339,55 @@ fn watch_updates_index_without_rebuild() {
         std::thread::sleep(Duration::from_millis(100));
     }
     service.shutdown();
+}
+
+/// 排序偏好持久化：改一次排序，重启（重建 Service）后仍然生效（§5.1）。
+#[test]
+fn sort_preference_survives_restart() {
+    let fixture = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let host: Arc<dyn HostServices> = Arc::new(FakeHost::default());
+    // 空查询列出全部文件，才能比较完整的排序。
+    let mut settings = settings_for(fixture.path());
+    settings.show_all_on_empty = true;
+    let mut service = Service::new(data.path(), host.clone());
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings.clone()),
+    });
+    wait_ready(&mut service);
+
+    // 默认路径序：目录按名字混在中间（DFS 先序）。
+    let rows = search(&mut service, "");
+    let default_order = rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+
+    // 按文件名升序。
+    service.handle(Command::SetSort {
+        column: devtools_search_core::SortColumn::Name,
+        dir: devtools_search_core::SortDir::Asc,
+    });
+    let rows = search(&mut service, "");
+    let name_order = rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+    assert_ne!(name_order, default_order, "改名排序后顺序应该变化");
+    let mut sorted = name_order.clone();
+    sorted.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    assert_eq!(name_order, sorted, "应按文件名升序：{name_order:?}");
+    service.shutdown();
+
+    // "重启"：用同一个数据目录重新创建 Service，排序偏好应原样保留。
+    let mut restarted = Service::new(data.path(), host);
+    // 真实 UI 在显示搜索页时会 warm_up（lazy_start=false 时立即建索引）。
+    restarted.handle(Command::WarmUp);
+    wait_ready(&mut restarted);
+    assert_eq!(
+        restarted.settings().ui.sort.column,
+        devtools_search_core::SortColumn::Name,
+        "重启后排序规则应保留"
+    );
+    let rows = search(&mut restarted, "");
+    let after_restart = rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        after_restart, name_order,
+        "重启后默认按上一次的排序规则排序：{after_restart:?}"
+    );
+    restarted.shutdown();
 }

@@ -721,7 +721,8 @@ fn apply_watch_batch(
             let relative = match path.strip_prefix(root) {
                 Ok(relative) => relative.to_path_buf(),
                 Err(_) => match std::fs::canonicalize(path) {
-                    Ok(canonical) => match canonical.strip_prefix(root) {
+                    // canonicalize 在 Windows 上会加 `\\?\` 前缀，和简化后的根对不上，先去掉。
+                    Ok(canonical) => match crate::platform::fs::simplify(canonical).strip_prefix(root) {
                         Ok(relative) => relative.to_path_buf(),
                         Err(_) => {
                             tracing::debug!("忽略根外的事件：{}", path.display());

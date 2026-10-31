@@ -86,8 +86,15 @@ impl Service {
         let search_dir = data_dir.join("search");
         let store = SearchSettingsStore::new(&search_dir);
         let loaded = store.load();
-        let settings = loaded.settings;
+        let mut settings = loaded.settings;
         let read_only = loaded.read_only;
+        // 旧版本在 Windows 上把 canonicalize 的 `\\?\F:\…` 存进了根路径与范围，
+        // 加载后统一简化并回写，界面不再出现逐字节前缀。
+        if !read_only && simplify_saved_paths(&mut settings) {
+            if let Err(problems) = store.save(&settings) {
+                tracing::warn!("简化旧路径后保存设置失败：{problems:?}");
+            }
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let repaint_host = host.clone();
         let runtime = Runtime::new(
@@ -208,6 +215,7 @@ impl Service {
             Command::SetSort { column, dir } => self.set_sort(column, dir),
             Command::ApplySettings { draft } => self.apply_settings(*draft),
             Command::PickFolder => self.pick_folder(),
+            Command::PickScope => self.pick_scope(),
             Command::RemoveRoot { root } => self.remove_root(root),
             Command::RebuildRoot { root } => self.rebuild_root(Some(root)),
             Command::RebuildAll => self.rebuild_root(None),
@@ -288,8 +296,11 @@ impl Service {
             self.start_indexing();
         }
         // 范围路径规范化（与根一致）：macOS 的 /var、/tmp 是符号链接，
-        // 不规范化会和索引根的绝对路径对不上，导致"不在索引范围内"。
-        let scope = scope.map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+        // 不规范化会和索引根的绝对路径对不上，导致"不在索引范围内"；
+        // Windows 的 canonicalize 会加 `\\?\` 前缀，展示前去掉。
+        let scope = scope.map(|path| {
+            crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path))
+        });
         // 取消上一次查询（§7.10：新查询使旧任务尽快退出）。
         self.cancel.store(true, Ordering::SeqCst);
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -416,8 +427,29 @@ impl Service {
         }
     }
 
+    /// 选择"在目录中搜索"的范围（原生选择对话框，§5.3）。
+    fn pick_scope(&mut self) {
+        let guard = self.host.begin_system_modal();
+        let result = self.host.pick_folder(None);
+        if let Some(guard) = guard {
+            // 面板仍在使用：对话框关闭后不还原焦点（§0）。
+            guard.end(false);
+        }
+        match result {
+            Ok(Some(path)) => {
+                // 与 search() 的规范化一致：展示与匹配用同一个形式。
+                let path = crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path));
+                let _ = self.tx.send(Event::ScopePicked(path));
+            }
+            Ok(None) => {}
+            Err(err) => self.notice(err),
+        }
+    }
+
     fn add_root(&mut self, path: PathBuf) {
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        // 规范化后再去掉 Windows 的 `\\?\` 前缀：卷相对路径要靠 `starts_with(挂载点)` 算，
+        // 带前缀时永远匹配不上，根会退化成绝对路径身份，界面也显示成 `\\?\F:\`。
+        let path = crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path));
         let location = match self.location_for(&path) {
             Some(location) => location,
             None => {
@@ -659,8 +691,9 @@ impl Service {
             }
             let resolved = resolve_root_path(&location, &mounts)
                 // 规范化：macOS 的 /var、/tmp 是指向 /private/... 的符号链接，
-                // 监听事件给出的是真实路径，不规范化会和 strip_prefix 对不上。
-                .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+                // 监听事件给出的是真实路径，不规范化会和 strip_prefix 对不上；
+                // Windows 再去掉 canonicalize 加的 `\\?\`（旧设置里可能存了带前缀的路径）。
+                .map(|path| crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path)));
             match resolved {
                 Some(path) => {
                     let slot = self.runtime.add_slot(location, path);
@@ -668,9 +701,10 @@ impl Service {
                 }
                 None => {
                     // 卷未挂载：保留槽位并标记 Offline，UI 显示"卷未挂载"。
-                    let slot = self
-                        .runtime
-                        .add_slot(location.clone(), location.fallback_absolute_path.clone());
+                    let slot = self.runtime.add_slot(
+                        location.clone(),
+                        crate::platform::fs::simplify(location.fallback_absolute_path.clone()),
+                    );
                     *slot.state.lock().unwrap() = RootState::Offline;
                 }
             }
@@ -866,4 +900,32 @@ fn resolve_root_path(
         location.absolute(&mount)
     };
     path.is_dir().then_some(path)
+}
+
+/// 把设置里保存的路径统一成展示用的形式（Windows 去掉 `\\?\` 前缀）。返回是否有改动。
+fn simplify_saved_paths(settings: &mut SearchSettings) -> bool {
+    use crate::platform::fs::simplify;
+
+    let mut changed = false;
+    let mut fix = |path: &mut PathBuf| {
+        let plain = simplify(path.clone());
+        if plain != *path {
+            *path = plain;
+            changed = true;
+        }
+    };
+    for root in &mut settings.roots {
+        fix(&mut root.location.fallback_absolute_path);
+    }
+    for entry in &mut settings.history {
+        if let Some(scope) = entry.scope.as_mut() {
+            fix(scope);
+        }
+    }
+    for saved in &mut settings.saved_searches {
+        if let Some(scope) = saved.scope.as_mut() {
+            fix(scope);
+        }
+    }
+    changed
 }

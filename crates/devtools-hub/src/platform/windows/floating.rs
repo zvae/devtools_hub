@@ -35,8 +35,8 @@ use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumThreadWindows, GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowRect,
     GetWindowTextW, IsWindow, SetForegroundWindow, SetWindowDisplayAffinity, SetWindowPos,
-    ShowWindow, ShowWindowAsync, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_HIDE, WDA_EXCLUDEFROMCAPTURE,
+    ShowWindow, ShowWindowAsync, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WDA_EXCLUDEFROMCAPTURE,
 };
 
 use super::{panel, scroll_mask, wide, workspace};
@@ -523,6 +523,8 @@ pub fn pick_folder(_initial: Option<&Path>) -> Result<Option<PathBuf>, String> {
     // SAFETY: 同上；pidl 由 shell32 分配，下面立即释放。
     let pidl = unsafe {
         let mut info: BROWSEINFOW = zeroed();
+        // 指定 owner：对话框是面板的从属窗口，不会被置顶的面板挡在后面，也会跟面板一起居中。
+        info.hwndOwner = panel::window();
         info.pszDisplayName = display.as_mut_ptr();
         info.lpszTitle = title.as_ptr();
         info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
@@ -547,13 +549,36 @@ pub fn pick_folder(_initial: Option<&Path>) -> Result<Option<PathBuf>, String> {
     Ok(Some(PathBuf::from(String::from_utf16_lossy(&path[..len]))))
 }
 
-/// 搜索模块的原生模态开始：标记"对话框已打开"，面板不会因为失焦被收起。
+/// 搜索模块的原生模态开始：标记"对话框已打开"，面板不会因为失焦被收起；
+/// 同时临时取消面板的置顶，否则系统对话框会被一直置顶的面板压住。
 pub fn begin_system_modal() -> bool {
     DIALOG_OPEN.store(true, Ordering::Relaxed);
+    set_topmost(false);
     true
 }
 
-/// 原生模态结束。
+/// 原生模态结束：恢复置顶。
 pub fn end_system_modal(_restore_focus: bool) {
     DIALOG_OPEN.store(false, Ordering::Relaxed);
+    set_topmost(true);
+}
+
+/// 面板窗口的置顶状态（对话框期间临时取消）。
+fn set_topmost(on: bool) {
+    let hwnd = panel::window();
+    if hwnd.is_null() {
+        return;
+    }
+    // SAFETY: hwnd 是已绑定的面板窗口；只改 z 序，不动位置与大小。
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            if on { HWND_TOPMOST } else { HWND_NOTOPMOST },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
 }

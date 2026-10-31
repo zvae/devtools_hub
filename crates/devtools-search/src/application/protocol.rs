@@ -78,6 +78,8 @@ pub enum Command {
     ApplySettings { draft: Box<SearchSettings> },
     /// 添加索引根（走原生选择对话框）。
     PickFolder,
+    /// 选择"在目录中搜索"的范围（走原生选择对话框）。
+    PickScope,
     RemoveRoot { root: RootId },
     RebuildRoot { root: RootId },
     RebuildAll,
@@ -115,6 +117,8 @@ pub enum Event {
     ResultsStale,
     /// 一次性提示（toast）。
     Notice(String),
+    /// 用户在原生对话框里选好了"在目录中搜索"的范围。
+    ScopePicked(PathBuf),
     /// Service 已停止（线程退出/资源释放完成）。
     Stopped,
 }

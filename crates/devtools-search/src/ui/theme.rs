@@ -152,6 +152,78 @@ pub fn toggle(ui: &mut Ui, palette: &Palette, on: &mut bool) -> Response {
     response
 }
 
+/// 数值滑块（设置页的"输入防抖"）：细轨道 + 圆形滑块，取值与开关一致。
+///
+/// 不用 `egui::Slider`：全局样式把控件圆角设成了胶囊，egui 会用 `widgets.*.bg_fill` 画滑块，
+/// 结果是"深色胶囊 + 白描边的空心轮廓"，轨道也会被 `trailing_fill` 涂成整条蓝色。
+/// 这里按 [`toggle`] 的同一套取值自己画：轨道 `palette.track`、已选段 accent、白色圆滑块。
+pub fn slider(
+    ui: &mut Ui,
+    palette: &Palette,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+    width: f32,
+) -> Response {
+    let (low, high) = (*range.start(), (*range.end()).max(*range.start() + 1));
+    let (rect, mut response) =
+        ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::click_and_drag());
+    // 滑块半径 7：轨道两端各缩进一个半径，滑到两端时不会被裁掉。
+    const KNOB: f32 = 7.0;
+    let rail = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + KNOB, rect.center().y - 2.0),
+        egui::pos2(rect.right() - KNOB, rect.center().y + 2.0),
+    );
+    let span = (high - low) as f32;
+    let to_ratio = |value: u32| ((value.clamp(low, high) - low) as f32 / span).clamp(0.0, 1.0);
+    // 拖动 / 点击按指针位置取值。
+    if let Some(pos) = response.interact_pointer_pos() {
+        if response.dragged() || response.clicked() {
+            let ratio = ((pos.x - rail.left()) / rail.width().max(1.0)).clamp(0.0, 1.0);
+            let next = low + (ratio * span).round() as u32;
+            if next != *value {
+                *value = next;
+                response.mark_changed();
+            }
+        }
+    }
+    let ratio = to_ratio(*value);
+    let knob_x = egui::lerp(rail.left()..=rail.right(), ratio);
+    let painter = ui.painter();
+    painter.rect_filled(rail, rail.height() / 2.0, palette.track);
+    let filled = egui::Rect::from_min_max(rail.min, egui::pos2(knob_x, rail.max.y));
+    painter.rect_filled(filled, rail.height() / 2.0, palette.accent);
+    let radius = if response.hovered() || response.dragged() {
+        KNOB + 1.0
+    } else {
+        KNOB
+    };
+    painter.circle(
+        egui::pos2(knob_x, rect.center().y),
+        radius,
+        Color32::WHITE,
+        Stroke::new(0.5, Color32::from_black_alpha(38)),
+    );
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// 只显示文字的小胶囊（滑块的当前值、只读的数值）。
+pub fn value_chip(ui: &mut Ui, palette: &Palette, text: &str) -> Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_string(), FontId::proportional(TEXT_HINT), palette.text);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(galley.size().x + 18.0, 20.0),
+        Sense::hover(),
+    );
+    ui.painter().rect_filled(rect, CAPSULE, palette.field);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, palette.text);
+    response
+}
+
 /// 小圆点状态指示。
 pub fn status_dot(ui: &mut Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
@@ -209,6 +281,10 @@ pub fn time_label(ts: Option<i64>) -> String {
 }
 
 /// 中间省略（路径列）：保留两头，超宽时中间换成 `…`。
+/// 中间省略：放不下时保留首尾各一段，中间用 `…`（路径列用）。
+///
+/// 保证返回的文本**一定**不超过 `width`：最窄时只留一个 `…`（再窄就返回空串，
+/// 由调用方的裁剪兜底）。早先的实现在一个字符都放不下时返回原文，路径会画到右边的列上。
 pub fn middle_ellipsis(ui: &Ui, text: &str, font: FontId, width: f32) -> String {
     let measure = |s: &str| {
         ui.painter()
@@ -216,21 +292,26 @@ pub fn middle_ellipsis(ui: &Ui, text: &str, font: FontId, width: f32) -> String 
             .size()
             .x
     };
-    if measure(text) <= width || text.chars().count() < 5 {
+    if measure(text) <= width {
         return text.to_string();
     }
+    const ELLIPSIS: &str = "…";
+    if measure(ELLIPSIS) > width {
+        return String::new();
+    }
     let chars: Vec<char> = text.chars().collect();
+    // 从"首尾各留一半"开始收缩：第一个放得下的就是能显示最多的。
     let mut keep = chars.len() / 2;
-    while keep > 1 {
+    while keep > 0 {
         let head: String = chars[..keep].iter().collect();
         let tail: String = chars[chars.len() - keep..].iter().collect();
-        let candidate = format!("{head}…{tail}");
+        let candidate = format!("{head}{ELLIPSIS}{tail}");
         if measure(&candidate) <= width {
             return candidate;
         }
         keep -= 1;
     }
-    text.to_string()
+    ELLIPSIS.to_string()
 }
 
 #[cfg(test)]
