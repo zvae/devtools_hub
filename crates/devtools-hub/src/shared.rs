@@ -10,6 +10,20 @@ use crate::platform::panel::Placement;
 use crate::settings::Settings;
 use crate::update::UpdateState;
 
+/// FIXME: 临时调试：退出链路打点（release 是 GUI 子系统没有控制台，tracing 看不见），
+/// 写入临时目录 `devtools-hub-quit-debug.log`，定位退出卡死后删除。
+pub fn quit_trace(msg: &str) {
+    use std::io::Write as _;
+    let path = std::env::temp_dir().join("devtools-hub-quit-debug.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(file, "{now} {msg}");
+    }
+}
+
 /// 打开搜索页的来源（决定预填内容与是否按字面短语搜索，见 devtools-search 的 SearchOptions）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SearchEntry {
@@ -97,6 +111,8 @@ pub struct Shared {
     pub middle_click: AtomicBool,
     /// 是否定时检查更新（检查更新线程据此决定是否检查）。
     pub auto_check_updates: AtomicBool,
+    /// UI 线程已消费 `AppEvent::Quit`（托盘退出看门狗据此判断是否需要强杀）。
+    pub quit_consumed: AtomicBool,
     config: Mutex<MonitorConfig>,
     placement: Mutex<Placement>,
     /// 剪贴板面板的大小（逻辑像素）。窗口也用作快捷面板和 JSON 编辑器，
@@ -119,6 +135,7 @@ impl Shared {
             stop: AtomicBool::new(false),
             middle_click: AtomicBool::new(settings.middle_click),
             auto_check_updates: AtomicBool::new(settings.auto_check_updates),
+            quit_consumed: AtomicBool::new(false),
             config: Mutex::new(MonitorConfig {
                 rules: settings.rules.clone(),
                 retention_ms: settings.retention.millis(),

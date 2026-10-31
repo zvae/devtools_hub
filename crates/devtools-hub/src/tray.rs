@@ -132,7 +132,29 @@ impl Tray {
                 shared.post(AppEvent::RevealUpdate);
             }
             // 正常关闭：交由 UI 线程收起窗口并走 on_exit（不再 process::exit）。
-            "quit" => shared.post(AppEvent::Quit),
+            // 兜底看门狗：UI 事件循环偶尔会卡到收不到重绘唤醒，正常关闭 5 秒没完成
+            // 就强制结束进程，保证托盘退出永远可用。正常退出时进程先结束，看门狗随之消失。
+            "quit" => {
+                tracing::info!("托盘菜单：退出");
+                crate::shared::quit_trace("1 tray: quit clicked");
+                // 看门狗：UI 事件循环偶尔会卡到收不到重绘唤醒（egui/eframe 0.36 上游竞态，
+                // 隐藏窗口的唤醒请求被静默丢弃），Quit 事件入队后无人消费。轮询消费标志，
+                // 正常退出（一帧内消费）后本线程静默结束；3 秒仍未消费才强杀，保证托盘
+                // 退出永远可用。on_exit 最长 1.5 秒的收尾发生在消费之后，不受影响。
+                let watchdog_shared = Arc::clone(&shared);
+                std::thread::spawn(move || {
+                    for _ in 0..30 {
+                        if watchdog_shared.quit_consumed.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    tracing::warn!("正常退出 3 秒未完成，强制结束进程");
+                    crate::shared::quit_trace("W watchdog: firing process::exit");
+                    std::process::exit(0);
+                });
+                shared.post(AppEvent::Quit)
+            }
             // 面板的右键菜单（见 `ui::native_menu`）：交给界面在下一帧处理。
             id => shared.post(AppEvent::MenuCommand(id.to_string())),
         }));
