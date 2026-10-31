@@ -8,7 +8,7 @@ use crate::platform::{floating, keyboard, login_item, panel::Placement, screen};
 use crate::settings::{Retention, Settings, POLL_INTERVALS};
 use crate::ui::icons::{self, Icon};
 use crate::ui::style::Palette;
-use crate::ui::widgets::keycaps;
+use crate::ui::widgets::{icon_button, keycaps};
 use crate::ui::HubApp;
 use crate::{hotkey, keys, platform};
 
@@ -124,9 +124,21 @@ impl HubApp {
                         service.suspend(action);
                     }
                 }
+                // 删除：清空后 `apply_hotkey` 会注销这个组合键，功能不再关联任何快捷键。
+                if !settings.hotkey(action).trim().is_empty()
+                    && icon_button(ui, Icon::Trash, false, palette)
+                        .on_hover_text("删除快捷键，之后这个功能不再有快捷键")
+                        .clicked()
+                {
+                    settings.hotkey_mut(action).clear();
+                }
                 let parts = hotkey::display_parts(settings.hotkey(action));
-                let keys: Vec<&str> = parts.iter().map(String::as_str).collect();
-                keycaps(ui, &keys, palette);
+                if parts.is_empty() {
+                    ui.label(hint_text("未设置", palette.faint));
+                } else {
+                    let keys: Vec<&str> = parts.iter().map(String::as_str).collect();
+                    keycaps(ui, &keys, palette);
+                }
             });
             let default = Settings::default().hotkey(action).to_string();
             let restore = format!("恢复默认 {}", hotkey::display(&default));

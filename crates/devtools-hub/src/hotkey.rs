@@ -176,7 +176,13 @@ pub fn display(spec: &str) -> String {
 }
 
 /// 拆成一个个按键，用于绘制键帽：`Cmd+Shift+V` → `["⇧", "⌘", "V"]`。
+///
+/// 没有设置快捷键（空字符串）时返回空列表，调用方据此显示“未设置”而不是一个空的键帽。
 pub fn display_parts(spec: &str) -> Vec<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Vec::new();
+    }
     let parts: Vec<String> = spec
         .split('+')
         .map(|p| p.trim().to_ascii_uppercase())
@@ -241,6 +247,14 @@ mod tests {
         // 功能键可以不带修饰键。
         assert!(parse("F1").is_ok());
         assert!(parse("Shift+F3").is_ok());
+    }
+
+    #[test]
+    fn empty_spec_means_no_shortcut() {
+        // 设置里“删除”快捷键后保存的是空字符串：没有键帽可画，菜单里也不显示按键。
+        assert!(display_parts("").is_empty());
+        assert!(display_parts("   ").is_empty());
+        assert_eq!(display(""), "");
     }
 
     #[cfg(target_os = "macos")]

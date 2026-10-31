@@ -329,7 +329,7 @@ impl HubApp {
             "复制（或双击）".to_string()
         };
         let hotkey = hotkey::display_parts(&self.settings.hotkey);
-        let rows: [(Vec<&str>, &str); 11] = [
+        let mut rows: Vec<(Vec<&str>, &str)> = vec![
             (vec![keys::RETURN], paste.as_str()),
             (vec![keys::SHIFT, keys::RETURN], "以纯文本粘贴"),
             (vec![keys::COMMAND, keys::RETURN], "仅复制"),
@@ -340,11 +340,16 @@ impl HubApp {
             (vec![keys::TAB], "切换分类"),
             (vec![keys::COMMAND, ","], "设置"),
             (vec![keys::ESCAPE], "清空搜索 / 关闭"),
-            (
+        ];
+        // 设置里删掉快捷键后按键列表是空的：直接说明，免得只看到一句“在任意应用中唤起”。
+        if hotkey.is_empty() {
+            rows.push((Vec::new(), "未设置唤起快捷键"));
+        } else {
+            rows.push((
                 hotkey.iter().map(String::as_str).collect(),
                 "在任意应用中唤起",
-            ),
-        ];
+            ));
+        }
         egui::Grid::new("shortcuts")
             .num_columns(2)
             .spacing([14.0, 6.0])
