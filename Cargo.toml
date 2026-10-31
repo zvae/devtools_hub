@@ -102,6 +102,12 @@ windows = { version = "0.62", features = [
     "Graphics_Imaging",
     "Media_Ocr",
     "Storage_Streams",
+    # 系统缩略图：IShellItemImageFactory（`Win32_UI_Shell`）+ HBITMAP 取像素（GDI）
+    # + 隐藏线程的 STA 初始化（COM）。只为了搜索结果里的预览，别处不用。
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
     "Win32_System_WinRT",
 ] }
 windows-sys = { version = "0.61", features = [
@@ -144,6 +150,10 @@ devtools-ui = { path = "crates/devtools-ui" }
 # 留下一批新的 .o 文件且不会被清理，几次构建后就是数 GB。这里改为打包调试信息，
 # 并且只给本项目代码保留行号信息，依赖不生成调试信息（同时开启优化，egui 在 debug 下更流畅）。
 [profile.dev]
+# 本项目自己的代码也做轻度优化：依赖一直是 opt-level = 2，只有自己的 crate 是 0，
+# 结果 debug 构建下文件搜索的一次排序要 260ms、界面也跟着顿。opt-level = 1 让这部分
+# 快 3-5 倍，编译只慢一点点，行号信息还在（断点照常可用）。
+opt-level = 1
 debug = "line-tables-only"
 split-debuginfo = "packed"
 

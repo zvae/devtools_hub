@@ -264,3 +264,70 @@ fn node_id_never_used_as_path_order() {
     assert!(index.rank_of(first) < index.rank_of(kids[kids.len() - 1]));
     let _ = NodeId(0);
 }
+
+/// 性能基准（默认 skip）：20 万个节点上的全量查询，看看 eval 与排序各占多少。
+///
+/// 跑法：`cargo test -p devtools-search-core --release -- --ignored --nocapture bench`
+#[test]
+#[ignore = "性能基准，手动跑（release）"]
+fn bench_full_scan_query() {
+    use std::time::Instant;
+
+    let mut index = RootIndex::new(RootId(0));
+    let root = index.insert(None, OsStr::new("root"), NodeKind::Dir, NodeMeta::default());
+    const DIRS: usize = 200;
+    const FILES: usize = 1000;
+    for dir_index in 0..DIRS {
+        let dir = index.insert(
+            Some(root),
+            OsStr::new(&format!("dir{dir_index:03}")),
+            NodeKind::Dir,
+            NodeMeta::default(),
+        );
+        for file_index in 0..FILES {
+            let name = format!("file_{dir_index:03}_{file_index:04}.rs");
+            index.insert(
+                Some(dir),
+                OsStr::new(&name),
+                NodeKind::File,
+                NodeMeta {
+                    size: Some(1024),
+                    mtime: Some(1_700_000_000),
+                    btime: Some(1_700_000_000),
+                },
+            );
+        }
+    }
+    index.commit();
+    eprintln!("索引节点数：{}", index.len());
+
+    let opts = EvalOptions {
+        case_sensitive: false,
+        home: None,
+        root_abs: PathBuf::from("/root"),
+    };
+    let cancel = AtomicBool::new(false);
+    // 空查询 = 全部命中（"没有筛选条件"时最坏的情况）。
+    let ast = Ast::And(Vec::new());
+
+    let start = Instant::now();
+    let outcome = eval(&index, &ast, &opts, &cancel);
+    let eval_time = start.elapsed();
+
+    let matched = outcome.matches.len();
+    let total = outcome.matches.clone();
+    let start = Instant::now();
+    let (by_name, _) = sort_matches(&index, outcome.matches, SortColumn::Name, SortDir::Asc, 1000);
+    let name_sort_time = start.elapsed();
+
+    let start = Instant::now();
+    let (sorted, _) = sort_matches(&index, total, SortColumn::Path, SortDir::None, 1000);
+    let sort_time = start.elapsed();
+
+    eprintln!(
+        "eval: {eval_time:?}（{matched} 项） / 路径序: {sort_time:?}（{} 项） / 名称排序: {name_sort_time:?}（{} 项）",
+        sorted.len(),
+        by_name.len()
+    );
+    assert!(matched > 0);
+}

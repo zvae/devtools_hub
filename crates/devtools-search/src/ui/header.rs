@@ -76,6 +76,8 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> HeaderActio
     let card_width = (row.width() - reserved).max(220.0);
     let (card_rect, _) = bar.allocate_exact_size(Vec2::new(card_width, 34.0), Sense::hover());
     let focused = ui.memory(|m| m.has_focus(ui.id().with("search-field")));
+    // 结果区要据此决定 ⌘A / ←→ 归谁：输入框有焦点时不能抢它的全选与光标移动。
+    view.search_focused = focused;
     ui.painter().add(theme::continuous_rect(
         card_rect,
         12.0,

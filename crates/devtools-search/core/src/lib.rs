@@ -27,4 +27,6 @@ pub use model::{
     RootLocation, RootSpec, SortColumn, SortDir, VolumeId,
 };
 pub use ports::{Entry, EntryKind, FsSource, VolumeSource};
+// 结果区的类型筛选：查询层与设置层共用同一个枚举。
+pub use query::FileKind;
 pub use volumes::{root_key, RootState};

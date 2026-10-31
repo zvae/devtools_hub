@@ -41,6 +41,35 @@ impl FolderPurpose {
     }
 }
 
+/// 图标视图里一项要画的东西。
+///
+/// 区分 `preview` 是为了缓存：**内容预览必须按路径存**（每个文件都不一样），
+/// 而文件图标只要扩展名相同就一样（`.rs` 全是同一个图标），可以按扩展名复用，
+/// 滚动长列表时能省掉绝大部分 shell 调用和解码。
+#[derive(Clone, Debug)]
+pub struct Thumbnail {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    /// 是否是内容预览（`false` = 按尺寸渲染的文件 / 文件夹图标）。
+    pub preview: bool,
+}
+
+/// 系统右键菜单的返回结果：菜单里选了什么，交给模块执行（与键盘操作走同一条路）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SystemMenuChoice {
+    /// 取消了 / 没弹出来。
+    Dismissed,
+    /// 用默认程序打开。
+    Open(PathBuf),
+    /// 打开所在位置（文件管理器中选中它）。
+    Reveal(PathBuf),
+    /// 复制完整路径（含文件名）。
+    CopyPath(String),
+    /// shell 自己的命令已经执行完了。
+    Handled,
+}
+
 /// 宿主平台层必须提供的原生能力（§4.1）。
 ///
 /// 这些实现不属于模块：文件夹选择、系统模态期间的原生窗口状态、打开/显示、原生图标、
@@ -67,6 +96,34 @@ pub trait HostServices: Send + Sync {
 
     /// 原生文件图标（RGBA）。`None` 时界面画占位符。
     fn icon(&self, path: &Path) -> Option<(u32, u32, Vec<u8>)>;
+
+    /// 图标视图里画的东西（长边约 `size`）：优先内容预览，其次按尺寸渲染的系统图标。
+    ///
+    /// 语义是"这个文件在图标视图里应该长什么样"，所以实现方在没有预览处理器时
+    /// **应该回退到按尺寸渲染的图标**（并把 `preview` 置为 `false`，界面才好按扩展名复用），
+    /// 而不是返回 `None` 让界面去放大 32×32 的小图标（会糊）。
+    ///
+    /// 解码很慢：模块只会在后台线程里调用，实现方不要假设自己在 UI 线程上。
+    /// 默认实现返回 `None`（界面画矢量图标兜底）。
+    fn thumbnail(&self, path: &Path, size: u32) -> Option<Thumbnail> {
+        let _ = (path, size);
+        None
+    }
+
+    /// 是否用系统自带的右键菜单（Windows 的 shell 菜单）。
+    ///
+    /// 返回 `true` 时模块不再画自己的菜单，右键直接交给 [`system_context_menu`](Self::system_context_menu)。
+    fn has_system_context_menu(&self) -> bool {
+        false
+    }
+
+    /// 在鼠标位置弹出系统右键菜单；返回用户在菜单里选了什么。
+    ///
+    /// 注意这是**模态**调用：选完（或取消）才返回，期间界面不重绘。
+    fn system_context_menu(&self, path: &Path) -> SystemMenuChoice {
+        let _ = path;
+        SystemMenuChoice::Dismissed
+    }
 
     /// 搜索页的窗口层级/空格行为（macOS 层级 101、空格键交给搜索框）。
     fn set_search_space_behavior(&self, searching: bool);

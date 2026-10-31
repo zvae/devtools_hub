@@ -60,6 +60,29 @@ impl HostServices for HostBridge {
         crate::platform::icons::file_icon_rgba(path, 32)
     }
 
+    fn thumbnail(&self, path: &Path, size: u32) -> Option<devtools_search::Thumbnail> {
+        // 与资源管理器一致：交给系统的缩略图提供者，图片 / 视频 / PDF / Office 都能出预览。
+        // 调用方（搜索页的缩略图缓存）保证这个函数跑在后台线程上。
+        crate::platform::thumbnail(path, size)
+    }
+
+    fn has_system_context_menu(&self) -> bool {
+        crate::platform::has_system_context_menu()
+    }
+
+    fn system_context_menu(&self, path: &Path) -> devtools_search::SystemMenuChoice {
+        use devtools_search::SystemMenuChoice;
+        match crate::platform::system_context_menu(path) {
+            crate::platform::MenuChoice::Open => SystemMenuChoice::Open(path.to_path_buf()),
+            crate::platform::MenuChoice::Reveal => SystemMenuChoice::Reveal(path.to_path_buf()),
+            crate::platform::MenuChoice::CopyPath => {
+                SystemMenuChoice::CopyPath(path.to_string_lossy().into_owned())
+            }
+            crate::platform::MenuChoice::Handled => SystemMenuChoice::Handled,
+            crate::platform::MenuChoice::Dismissed => SystemMenuChoice::Dismissed,
+        }
+    }
+
     fn set_search_space_behavior(&self, searching: bool) {
         panel::set_search_space_behavior(searching);
     }

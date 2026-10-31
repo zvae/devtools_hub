@@ -16,8 +16,8 @@ use devtools_search_core::scan::{self, ExcludeSet, ScanOptions, ScanStats};
 use devtools_search_core::snapshot::{config_fingerprint, EventCheckpoint, SnapshotStore};
 use devtools_search_core::volumes::RootState;
 use devtools_search_core::{
-    IndexConfig, NodeId, NodeKind, NodeMeta, ResultId, RootId, RootIndex, RootLocation, SortColumn,
-    SortDir,
+    FileKind, IndexConfig, NodeId, NodeKind, NodeMeta, ResultId, RootId, RootIndex, RootLocation,
+    SortColumn, SortDir,
 };
 
 use super::protocol::{Event, RootStatus, RowData, SearchResult};
@@ -87,6 +87,8 @@ pub struct QuerySpec {
     pub literal: bool,
     pub case_sensitive: bool,
     pub scope: Option<PathBuf>,
+    /// 结果区的类型筛选（空查询时也生效）。
+    pub kind: FileKind,
     pub max_results: u32,
     pub show_all_on_empty: bool,
     pub sort_column: SortColumn,
@@ -461,8 +463,13 @@ impl QueryOutcome {
 }
 
 fn run_query(slots: &[Arc<RootSlot>], spec: &QuerySpec, cancel: &AtomicBool) -> QueryOutcome {
-    // 空查询：只有"列出全部"或指定了目录范围时才继续（范围本身就是过滤条件）。
-    if spec.text.trim().is_empty() && !spec.show_all_on_empty && spec.scope.is_none() {
+    // 空查询：只有"列出全部"、指定了目录范围或选了具体类型时才继续
+    // （范围与类型本身就是过滤条件）。
+    if spec.text.trim().is_empty()
+        && !spec.show_all_on_empty
+        && spec.scope.is_none()
+        && spec.kind == FileKind::All
+    {
         return QueryOutcome::empty(None, None);
     }
     // 解析（字面模式跳过语法，§4.5）。
@@ -479,13 +486,19 @@ fn run_query(slots: &[Arc<RootSlot>], spec: &QuerySpec, cancel: &AtomicBool) -> 
             Err(err) => return QueryOutcome::empty(Some(err.to_string()), None),
         }
     };
-    // 目录范围：入口带选中的文件夹时作为 infolder 过滤（§4.5）。
-    let ast = match &spec.scope {
-        Some(scope) => Ast::And(vec![
-            ast,
-            Ast::Term(Term::InFolder(scope.to_string_lossy().into_owned())),
-        ]),
-        None => ast,
+    // 附加条件：类型筛选与目录范围（都是与查询本身 AND 的过滤项）。
+    let mut terms = vec![ast];
+    if let Some(kind_ast) = spec.kind.to_ast() {
+        terms.push(kind_ast);
+    }
+    if let Some(scope) = &spec.scope {
+        // 入口带选中的文件夹时作为 infolder 过滤（§4.5）。
+        terms.push(Ast::Term(Term::InFolder(scope.to_string_lossy().into_owned())));
+    }
+    let ast = if terms.len() == 1 {
+        terms.pop().unwrap()
+    } else {
+        Ast::And(terms)
     };
     let mut per_root: Vec<(usize, Vec<NodeId>)> = Vec::new();
     let mut total = 0usize;
@@ -510,8 +523,16 @@ fn run_query(slots: &[Arc<RootSlot>], spec: &QuerySpec, cancel: &AtomicBool) -> 
         if let Some(query::Notice::NotIndexed { value }) = outcome.notice {
             notice.get_or_insert(format!("{value} 不在索引范围内，可把它添加为索引根"));
         }
-        total += outcome.matches.len();
-        per_root.push((slot_index, outcome.matches));
+        // 索引根节点自身不作为结果：它只是遍历起点。否则搜根目录名、或按「文件夹」
+        // 筛选时，结果里会多出一条"就是搜索范围本身"的项（Everything 也只列根下的条目）。
+        let root_node = index.root_node();
+        let matches: Vec<NodeId> = outcome
+            .matches
+            .into_iter()
+            .filter(|node| Some(*node) != root_node)
+            .collect();
+        total += matches.len();
+        per_root.push((slot_index, matches));
     }
     let limit = if spec.max_results == 0 {
         usize::MAX

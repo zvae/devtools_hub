@@ -980,6 +980,15 @@ fn snapshot_search_page() {
     .unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();
     std::fs::write(root.path().join("src/main.rs"), "fn main() {}").unwrap();
+    // 两张真实图片：确认图标视图画的是预览（缩略图）而不是通用图标，且保持宽高比。
+    let wide = image::RgbaImage::from_fn(320, 180, |x, y| {
+        image::Rgba([(40 + x / 4) as u8, (90 + y / 3) as u8, 200, 255])
+    });
+    wide.save(root.path().join("海边日落.png")).unwrap();
+    let tall = image::RgbImage::from_fn(150, 200, |x, y| {
+        image::Rgb([220, (60 + x / 2) as u8, (40 + y / 3) as u8])
+    });
+    tall.save(root.path().join("竖版海报.jpg")).unwrap();
 
     let data = tempfile::tempdir().unwrap();
     let shared = Shared::new(&Settings::default());
@@ -1115,6 +1124,51 @@ fn snapshot_search_page() {
     }
     harness.run_steps(4);
     save(&mut harness, "search-page");
+
+    // 图标视图与类型筛选下拉（2026-10-31 新增）：确认网格布局、工具条与浮层菜单。
+    if let Some(handle) = harness.state_mut().search.as_ref() {
+        super::lock_search(handle)
+            .service_mut()
+            .handle(SearchCommand::SetView {
+                view: devtools_search::settings::ResultView::Large,
+            });
+    }
+    // 缩略图在后台线程解码（每个文件先试预览、再试按尺寸的图标）：多跑几帧等它们到货。
+    for _ in 0..150 {
+        harness.run_steps(1);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    save(&mut harness, "search-page-grid");
+    // 深色主题下的图标视图：确认工具条与卡片跟着取色。
+    let ctx = harness.ctx.clone();
+    ctx.set_theme(egui::Theme::Dark);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(3);
+    save(&mut harness, "search-page-grid-dark");
+    let ctx = harness.ctx.clone();
+    ctx.set_theme(egui::Theme::Light);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(2);
+    // 点工具条左侧的类型按钮，展开「所有 / 音频 / …」下拉。
+    click_at(&mut harness, egui::pos2(49.0, 82.0), egui::PointerButton::Primary);
+    harness.run_steps(3);
+    save(&mut harness, "search-page-grid-kind");
+    // 关掉下拉、展开右侧的「视图」菜单（确认快捷键提示与选中标记）。
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    click_at(&mut harness, egui::pos2(1040.0, 82.0), egui::PointerButton::Primary);
+    harness.run_steps(3);
+    save(&mut harness, "search-page-grid-view");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    if let Some(handle) = harness.state_mut().search.as_ref() {
+        super::lock_search(handle)
+            .service_mut()
+            .handle(SearchCommand::SetView {
+                view: devtools_search::settings::ResultView::Detail,
+            });
+    }
+    harness.run_steps(2);
 
     // 模块内的设置页。
     if let Some(handle) = harness.state_mut().search.as_ref() {

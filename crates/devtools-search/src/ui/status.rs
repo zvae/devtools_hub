@@ -4,7 +4,7 @@ use devtools_search_core::volumes::RootState;
 use devtools_ui::keys;
 use egui::{Align, FontId, Layout, RichText, Sense, Stroke, Ui, Vec2};
 
-use super::icons::Icon;
+use super::icons::{self, Icon};
 use super::{theme, ViewState};
 use crate::application::service::{Lifecycle, Service};
 
@@ -31,14 +31,63 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> StatusActio
     );
     bar.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
 
-    // 左侧：状态点 + 文字。
-    let (text, dot) = aggregate(view, service, &palette);
-    theme::status_dot(&mut bar, dot);
-    bar.label(
-        RichText::new(text)
-            .size(theme::TEXT_HINT)
-            .color(palette.weak),
-    );
+    // 左侧：有选中项时显示它的完整路径（中间省略，悬停看全文），否则显示索引状态。
+    // 路径优先，因为"这个东西到底在哪"是选完一项后最常问的问题。
+    let selected = view
+        .cache
+        .get(view.cursor as u32)
+        .filter(|row| !row.missing)
+        .cloned();
+    match &selected {
+        Some(row) => {
+            let (icon_rect, _) = bar.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+            icons::paint_centered(
+                bar.painter(),
+                icon_rect,
+                11.0,
+                if row.kind == devtools_search_core::NodeKind::Dir {
+                    Icon::Folder
+                } else {
+                    Icon::Document
+                },
+                palette.weak,
+            );
+            bar.add_space(3.0);
+            // 右侧还要放模式胶囊、计数与快捷键提示，给路径留出剩下的宽度。
+            let width = (bar.available_width() - 390.0).max(120.0);
+            let text = theme::middle_ellipsis(
+                &bar,
+                &row.path,
+                FontId::proportional(theme::TEXT_HINT),
+                width,
+            );
+            bar.label(
+                RichText::new(text)
+                    .size(theme::TEXT_HINT)
+                    .color(palette.secondary),
+            )
+            .on_hover_text(&row.path);
+            // 文件大小跟在路径后面（目录没有大小，显示破折号）。
+            let size = match (row.kind, row.size) {
+                (devtools_search_core::NodeKind::File, Some(bytes)) => theme::byte_size(bytes),
+                _ => "—".to_string(),
+            };
+            bar.label(
+                RichText::new(format!("· {size}"))
+                    .size(theme::TEXT_HINT)
+                    .color(palette.weak),
+            );
+        }
+        None => {
+            let (text, dot) = aggregate(view, service, &palette);
+            theme::status_dot(&mut bar, dot);
+            bar.label(
+                RichText::new(text)
+                    .size(theme::TEXT_HINT)
+                    .color(palette.weak),
+            );
+        }
+    }
     if let Some(error) = &view.error {
         bar.label(
             RichText::new(error)
@@ -75,8 +124,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> StatusActio
         }
         let _ = Icon::Pin;
 
-        let rows = service.results_len();
-        let selected = view.selected_count(rows);
+        let selected = view.selected_count();
         if selected > 1 {
             ui.label(
                 RichText::new(format!("已选 {} 项", theme::thousands(selected)))

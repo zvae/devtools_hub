@@ -380,7 +380,13 @@ impl HubApp {
                 AppEvent::HidePanel => self.hide_panel(true),
                 AppEvent::ShowSearch(entry) => self.open_search(entry),
                 // 托盘"退出"：走正常关闭流程，让 on_exit 保存尺寸并停止索引（§4.6）。
-                AppEvent::Quit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                AppEvent::Quit => {
+                    tracing::info!("退出：发送窗口关闭命令");
+                    // 告诉托盘退出看门狗：Quit 已消费，不用强杀。
+                    self.shared.quit_consumed.store(true, Ordering::Relaxed);
+                    crate::shared::quit_trace("2 ui: Quit event -> ViewportCommand::Close");
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
         }
         let revision = self.shared.revision.load(Ordering::Relaxed);
@@ -1044,7 +1050,9 @@ impl eframe::App for HubApp {
 
     /// 退出前：保存搜索窗口尺寸并停止索引（§4.6：托盘退出、更新重启都走这里）。
     fn on_exit(&mut self) {
+        crate::shared::quit_trace("3 eframe: on_exit start");
         if self.search_open {
+            crate::shared::quit_trace("4a on_exit: search_open branch, before lock_search");
             let size = self
                 .ctx
                 .input(|i| {
@@ -1065,13 +1073,16 @@ impl eframe::App for HubApp {
             }
             self.search_open = false;
         }
+        crate::shared::quit_trace("4b on_exit: search_open branch done");
         if let Some(handle) = self.search.take() {
             // 有界阻塞：取消后等待线程池收尾，最多 1.5 秒。
+            crate::shared::quit_trace("5 on_exit: shutdown_blocking search");
             let stopped = lock_search(&handle).shutdown_blocking(Duration::from_millis(1500));
             if !stopped {
                 tracing::warn!("搜索模块未在 1.5 秒内停止，继续退出");
             }
         }
+        crate::shared::quit_trace("6 on_exit: done");
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

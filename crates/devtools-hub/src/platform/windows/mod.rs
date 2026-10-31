@@ -18,6 +18,8 @@ pub mod pasteboard;
 mod resize;
 pub mod screen;
 mod scroll_mask;
+pub mod shell_menu;
+pub mod shell_thumbnail;
 pub mod updater;
 pub mod workspace;
 

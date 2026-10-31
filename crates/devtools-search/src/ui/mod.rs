@@ -14,6 +14,8 @@ mod saved;
 mod settings_panel;
 mod status;
 mod theme;
+mod thumb_cache;
+mod toolbar;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,11 +26,13 @@ use egui::Ui;
 
 use crate::application::protocol::{Command, Event, RootStatus};
 use crate::application::service::{Lifecycle, Service, WindowPolicy};
-use crate::settings::SearchSettings;
+use crate::SystemMenuChoice;
+use crate::settings::{ResultView, SearchSettings};
 use crate::HostServices;
 
 use cache::RowCache;
 use icon_cache::IconCache;
+use thumb_cache::ThumbnailCache;
 
 /// 打开搜索页时传入的入口信息（§4.5）。
 #[derive(Clone, Debug, Default)]
@@ -76,9 +80,19 @@ pub(crate) struct ViewState {
     pub cursor: usize,
     /// 多选的锚点（Shift 连选时固定）。
     pub anchor: usize,
+    /// 选中的结果下标。用集合而不是区间：要支持 Ctrl 点选、框选这种不连续的选法。
+    pub selected: std::collections::BTreeSet<usize>,
+    /// 框选起点（屏幕坐标）；`None` 表示没在拖。
+    pub drag_origin: Option<egui::Pos2>,
+    /// 开始框选时已经选中的项（按住 Ctrl 拖动时保留，普通拖动为空）。
+    pub drag_base: std::collections::BTreeSet<usize>,
+    /// 上一帧画出来的项与它的矩形（框选命中测试用）。
+    pub hit_cells: Vec<(usize, egui::Rect)>,
     pub cache: RowCache,
     /// 原生文件图标的纹理缓存（按扩展名）。
     pub icons: IconCache,
+    /// 预览缩略图（按路径缓存，后台线程解码）。
+    pub thumbs: ThumbnailCache,
     /// 列宽（从设置复制，拖动时实时更新，松手后持久化）。
     pub columns: crate::settings::ColumnWidths,
     /// 键盘移动后要滚到的偏移。
@@ -105,6 +119,18 @@ pub(crate) struct ViewState {
     pub visible: (usize, usize),
     /// 顶栏的实际高度（含范围胶囊行），历史下拉据此定位。
     pub header_height: f32,
+    /// 类型筛选下拉是否展开。
+    pub kind_open: bool,
+    /// 视图菜单是否展开。
+    pub view_open: bool,
+    /// 排序下拉是否展开。
+    pub sort_open: bool,
+    /// 图标视图上一帧算出的列数（键盘上下移动一整行时用）。
+    pub grid_cols: usize,
+    /// 搜索框当前是否有焦点（决定 ⌘A / ←→ 归输入框还是归结果区）。
+    pub search_focused: bool,
+    /// 右键用系统菜单还是自绘菜单（Windows 用系统菜单，macOS 自绘）。
+    pub system_menus: bool,
     pub results_stale: bool,
     pub stop_requested: bool,
 }
@@ -123,8 +149,13 @@ impl ViewState {
             submitted: String::new(),
             cursor: 0,
             anchor: 0,
+            selected: std::collections::BTreeSet::new(),
+            drag_origin: None,
+            drag_base: std::collections::BTreeSet::new(),
+            hit_cells: Vec::new(),
             cache: RowCache::default(),
             icons: IconCache::default(),
+            thumbs: ThumbnailCache::default(),
             columns: Default::default(),
             pending_scroll: None,
             roots: Vec::new(),
@@ -145,6 +176,12 @@ impl ViewState {
             lifecycle: Lifecycle::Dormant,
             visible: (0, 0),
             header_height: theme::HEADER_HEIGHT,
+            kind_open: false,
+            view_open: false,
+            sort_open: false,
+            grid_cols: 1,
+            search_focused: true,
+            system_menus: false,
             results_stale: false,
             stop_requested: false,
         }
@@ -152,24 +189,64 @@ impl ViewState {
 }
 
 impl ViewState {
-    /// 当前选中的行范围（含两端）；结果为空时退化为 0..=0。
-    pub fn selection_range(&self, rows: usize) -> std::ops::RangeInclusive<usize> {
-        if rows == 0 {
-            return 0..=0;
-        }
-        let last = rows - 1;
-        let a = self.anchor.min(last);
-        let b = self.cursor.min(last);
-        a.min(b)..=a.max(b)
+    /// 某一项是否被选中。
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selected.contains(&index)
     }
 
-    /// 选中的行数。
-    pub fn selected_count(&self, rows: usize) -> usize {
-        if rows == 0 {
-            0
-        } else {
-            self.selection_range(rows).count()
+    /// 选中的项数。
+    pub fn selected_count(&self) -> usize {
+        self.selected.len()
+    }
+
+    /// 只选中一项（普通点击、键盘移动）。
+    pub fn select_only(&mut self, index: usize) {
+        self.selected.clear();
+        self.selected.insert(index);
+        self.cursor = index;
+        self.anchor = index;
+    }
+
+    /// Ctrl 点击：把一项加入 / 移出选择。
+    pub fn toggle_selection(&mut self, index: usize) {
+        if !self.selected.remove(&index) {
+            self.selected.insert(index);
         }
+        self.cursor = index;
+        self.anchor = index;
+    }
+
+    /// Shift 点击 / Shift 方向键：把锚点到 `index` 这一段并入选择。
+    pub fn extend_selection_to(&mut self, index: usize) {
+        let (first, last) = (self.anchor.min(index), self.anchor.max(index));
+        self.selected.extend(first..=last);
+        self.cursor = index;
+    }
+
+    /// 全选。
+    pub fn select_all(&mut self, rows: usize) {
+        self.selected = (0..rows).collect();
+        self.cursor = rows.saturating_sub(1);
+        self.anchor = 0;
+    }
+
+    /// 清空选择（点空白处）。
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
+        self.drag_origin = None;
+    }
+
+    /// 结果集变化后，把越界的下标清掉。
+    pub fn clamp_selection(&mut self, rows: usize) {
+        if rows == 0 {
+            self.selected.clear();
+            self.cursor = 0;
+            self.anchor = 0;
+            return;
+        }
+        self.selected.retain(|&index| index < rows);
+        self.cursor = self.cursor.min(rows - 1);
+        self.anchor = self.anchor.min(rows - 1);
     }
 }
 
@@ -199,8 +276,13 @@ impl SearchModule {
             submitted: String::new(),
             cursor: 0,
             anchor: 0,
+            selected: std::collections::BTreeSet::new(),
+            drag_origin: None,
+            drag_base: std::collections::BTreeSet::new(),
+            hit_cells: Vec::new(),
             cache: RowCache::default(),
             icons: IconCache::default(),
+            thumbs: ThumbnailCache::default(),
             columns: settings.ui.columns.clone(),
             pending_scroll: None,
             roots: Vec::new(),
@@ -225,6 +307,12 @@ impl SearchModule {
             lifecycle,
             visible: (0, 0),
             header_height: theme::HEADER_HEIGHT,
+            kind_open: false,
+            view_open: false,
+            sort_open: false,
+            grid_cols: 1,
+            search_focused: true,
+            system_menus: host.has_system_context_menu(),
             results_stale: false,
             stop_requested: false,
         };
@@ -342,14 +430,14 @@ impl SearchModule {
                     // 增量应用结果集：索引更新导致的重跑只补/删变化的那几行，
                     // 不整表清空重填（否则建立索引期间表格会一直闪）。
                     let reused = self.view.cache.apply_results(&result.ids);
-                    let last = result.ids.len().saturating_sub(1);
                     if reused == 0 {
                         // 全新的结果集（换了查询）：选中回到第一行。
+                        self.view.selected.clear();
                         self.view.cursor = 0;
                         self.view.anchor = 0;
                     } else {
-                        self.view.cursor = self.view.cursor.min(last);
-                        self.view.anchor = self.view.anchor.min(last);
+                        // 增量重排：只清掉越界的下标，用户选中的项尽量留着。
+                        self.view.clamp_selection(result.ids.len());
                     }
                 }
                 Event::Rows { rows, .. } => {
@@ -469,13 +557,20 @@ impl SearchModule {
                     self.submit();
                 }
                 // 下拉打开时 Esc 先关下拉，不要直接收起窗口。
-                if (self.view.history_open || self.view.saved_open)
+                if (self.view.history_open
+                    || self.view.saved_open
+                    || self.view.kind_open
+                    || self.view.view_open
+                    || self.view.sort_open)
                     && ui.input_mut(|input| {
                         input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                     })
                 {
                     self.view.history_open = false;
                     self.view.saved_open = false;
+                    self.view.kind_open = false;
+                    self.view.view_open = false;
+                    self.view.sort_open = false;
                 }
                 if self.view.saved_open {
                     let saved = saved::show(ui, &mut self.view, &self.service);
@@ -495,8 +590,39 @@ impl SearchModule {
                     }
                 }
                 self.debounce(ui);
-                let action = results::show(ui, &mut self.view, &self.service, self.host.as_ref());
+                // 「视图」菜单的快捷键：⌘⇧1…4（Windows 为 Ctrl+Shift+1…4）。
+                if let Some(view) = view_shortcut(ui, self.service.settings().ui.view) {
+                    // 换了视图，上一视图按行高算出的滚动偏移就不能再用了。
+                    self.view.pending_scroll = None;
+                    self.service.handle(Command::SetView { view });
+                }
+                let action = results::show(ui, &mut self.view, &self.service, &self.host);
+                // 换筛选 / 换视图 / 换排序：结果集含义变了，之前选中的下标不能再当成同一批东西。
+                if let Some(kind) = action.set_kind {
+                    self.view.clear_selection();
+                    self.service.handle(Command::SetKind { kind });
+                }
+                if let Some(view) = action.set_view {
+                    self.view.pending_scroll = None;
+                    self.view.clear_selection();
+                    self.service.handle(Command::SetView { view });
+                }
+                // 系统右键菜单是模态的：放在结果区完全绘制之后再弹，选完才继续这一帧。
+                // 顶部三条固定项走和键盘一样的命令/按键逻辑（打开、显示、复制）。
+                if let Some(path) = action.system_menu {
+                    match self.host.system_context_menu(&path) {
+                        SystemMenuChoice::Open(path) => {
+                            self.service.handle(Command::Open { path });
+                        }
+                        SystemMenuChoice::Reveal(path) => {
+                            self.service.handle(Command::Reveal { path });
+                        }
+                        SystemMenuChoice::CopyPath(text) => ui.ctx().copy_text(text),
+                        SystemMenuChoice::Dismissed | SystemMenuChoice::Handled => {}
+                    }
+                }
                 if let Some((column, dir)) = action.sort {
+                    self.view.clear_selection();
                     self.service.handle(Command::SetSort { column, dir });
                 }
                 for (start, count) in action.requests {
@@ -526,6 +652,8 @@ impl SearchModule {
                     close = true;
                 }
                 let status = status::show(ui, &mut self.view, &self.service);
+                // 状态栏下面留一点空白，不然文字和胶囊贴着窗口底边（Windows 上还会被裁）。
+                ui.add_space(theme::BOTTOM_PAD);
                 if status.toggle_mode {
                     let next = self.service.window_policy().mode.next();
                     self.service.handle(Command::SetMode { mode: next });
@@ -570,6 +698,8 @@ impl SearchModule {
         {
             return;
         }
+        // 新查询：旧结果集里的选中项不再有意义。
+        self.view.clear_selection();
         self.view.submitted = text.clone();
         self.view.searching = true;
         self.view.error = None;
@@ -765,6 +895,25 @@ impl SearchModule {
     }
 }
 
+/// 「视图」菜单的快捷键：⌘⇧1 → 超大图标 … ⌘⇧4 → 详情（Windows 为 Ctrl+Shift+1…4）。
+///
+/// 返回要切换到的视图；按的是当前视图对应的组合键时返回 `None`（不做无谓的写入）。
+fn view_shortcut(ui: &mut Ui, current: ResultView) -> Option<ResultView> {
+    const SHORTCUTS: [(egui::Key, ResultView); 4] = [
+        (egui::Key::Num1, ResultView::ExtraLarge),
+        (egui::Key::Num2, ResultView::Large),
+        (egui::Key::Num3, ResultView::Medium),
+        (egui::Key::Num4, ResultView::Detail),
+    ];
+    let modifiers = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+    for (key, view) in SHORTCUTS {
+        if ui.input_mut(|input| input.consume_key(modifiers, key)) && view != current {
+            return Some(view);
+        }
+    }
+    None
+}
+
 /// 表头点击后的排序循环（§5.1）：升 → 降 → 默认。
 pub(crate) fn next_sort(
     current: (SortColumn, bool),
@@ -791,19 +940,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selection_range_is_inclusive_and_clamped() {
+    fn selection_supports_range_toggle_and_clear() {
         let mut view = ViewState::default_for_test();
+        // 单选。
+        view.select_only(3);
+        assert!(view.is_selected(3));
+        assert_eq!(view.selected_count(), 1);
+        // Shift 连选：锚点 2 到 5。
         view.anchor = 2;
-        view.cursor = 5;
-        assert_eq!(view.selection_range(10), 2..=5);
-        assert_eq!(view.selected_count(10), 4);
-        // 反向选择（向上拖）范围也一样。
-        view.anchor = 7;
-        view.cursor = 3;
-        assert_eq!(view.selection_range(10), 3..=7);
-        // 结果变少时收敛到有效范围。
-        assert_eq!(view.selection_range(4), 3..=3);
-        assert_eq!(view.selected_count(0), 0);
+        view.extend_selection_to(5);
+        assert_eq!(view.selected_count(), 4);
+        for index in 2..=5 {
+            assert!(view.is_selected(index), "第 {index} 项应被选中");
+        }
+        // Ctrl 切换：把 4 移出。
+        view.toggle_selection(4);
+        assert!(!view.is_selected(4));
+        assert_eq!(view.selected_count(), 3);
+        // 全选、清空。
+        view.select_all(6);
+        assert_eq!(view.selected_count(), 6);
+        view.clear_selection();
+        assert_eq!(view.selected_count(), 0);
+        // 结果变少时只丢掉越界的下标。
+        view.select_all(10);
+        view.clamp_selection(4);
+        assert_eq!(view.selected_count(), 4);
+        assert!(!view.is_selected(4));
+        // 空结果直接清空。
+        view.clamp_selection(0);
+        assert_eq!(view.selected_count(), 0);
     }
 
     #[test]

@@ -23,6 +23,8 @@ pub const TABLE_HEADER_HEIGHT: f32 = 30.0;
 pub const HEADER_HEIGHT: f32 = 58.0;
 /// 状态栏高度。
 pub const STATUS_HEIGHT: f32 = 28.0;
+/// 状态栏下方的留白（与顶栏内容的呼吸感一致，状态栏不贴窗口底边）。
+pub const BOTTOM_PAD: f32 = 10.0;
 
 /// 标题字体：有 semibold 就用，没有退回常规（字号由调用方决定）。
 ///

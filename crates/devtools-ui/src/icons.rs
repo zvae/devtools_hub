@@ -57,6 +57,8 @@ pub enum Icon {
     ZoomIn,
     /// 缩小。
     ZoomOut,
+    /// 排序（三条由长到短的横线）。
+    Sort,
 }
 
 /// 16×16 网格坐标到屏幕坐标的映射。
@@ -437,6 +439,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(4.8, 7.0), (9.2, 7.0)]);
             if icon == Icon::ZoomIn {
                 line(&[(7.0, 4.8), (7.0, 9.2)]);
+            }
+        }
+        Icon::Sort => {
+            for (y, right) in [(4.6, 13.2), (8.0, 10.4), (11.4, 7.6)] {
+                line(&[(2.8, y), (right, y)]);
             }
         }
         Icon::Copy => {

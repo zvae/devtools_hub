@@ -6,6 +6,8 @@
 //! Windows 另有自绘的右键菜单 `menu`，排布与绘制在与平台无关的 `drawn_menu` 里。
 
 pub mod drawn_menu;
+/// 图片缩略图（与平台无关：`image` 解码，两个平台共用）。
+pub mod thumbnails;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -23,6 +25,97 @@ pub use self::windows::*;
 mod windows;
 
 use serde::{Deserialize, Serialize};
+
+/// 图标视图里画的东西：优先系统预览，其次按尺寸渲染的系统图标。
+///
+/// - **预览**：与资源管理器一致（图片、视频首帧、PDF / Office，取决于装了哪些缩略图处理器）；
+/// - **图标**：没有预览时由 shell 按目标尺寸出图（不是 `SHGetFileInfoW` 的 32×32 小图标，
+///   放大到 96 也不会糊）。
+///
+/// Windows 走 `IShellItemImageFactory`（先 `THUMBNAILONLY` 再 `ICONONLY`）；macOS 的
+/// QuickLook 还没接，先用 `NSWorkspace` 按尺寸取图标。最后才用 `image` 自己解码兜底。
+///
+/// **调用很慢**（几十毫秒到几百毫秒，取决于格式），必须在后台线程里调用。
+pub fn thumbnail(path: &std::path::Path, size: u32) -> Option<Thumbnail> {
+    #[cfg(windows)]
+    {
+        // 目录没有"内容预览"，直接要按尺寸渲染的文件夹图标（省一次 shell 调用）。
+        let is_dir = std::fs::metadata(path).map(|meta| meta.is_dir()).unwrap_or(false);
+        if !is_dir {
+            if let Some((width, height, rgba)) = windows::shell_thumbnail::thumbnail(path, size) {
+                return Some(Thumbnail {
+                    width,
+                    height,
+                    rgba,
+                    preview: true,
+                });
+            }
+        }
+        if let Some((width, height, rgba)) = windows::shell_thumbnail::icon(path, size) {
+            return Some(Thumbnail {
+                width,
+                height,
+                rgba,
+                // 图标按扩展名就能复用，交给界面缓存。
+                preview: false,
+            });
+        }
+    }
+    // macOS：没有预览接口时按尺寸取系统图标（`iconForFile` 支持任意尺寸）。
+    #[cfg(target_os = "macos")]
+    if let Some((width, height, rgba)) = icons::file_icon_rgba(path, size) {
+        return Some(Thumbnail {
+            width,
+            height,
+            rgba,
+            preview: false,
+        });
+    }
+    // 最后的兜底：图片至少还能自己解码出来。
+    thumbnails::image_thumbnail(path, size).map(|(width, height, rgba)| Thumbnail {
+        width,
+        height,
+        rgba,
+        preview: true,
+    })
+}
+
+/// 这个平台是否用系统自带的右键菜单（Windows 是；macOS 继续用 egui 画的菜单）。
+pub fn has_system_context_menu() -> bool {
+    cfg!(windows)
+}
+
+use devtools_search::Thumbnail;
+
+/// 系统右键菜单里用户选了什么（宿主自己处理，模块据此执行）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MenuChoice {
+    /// 点了外面 / 按 Esc 取消，或者根本没弹出来。
+    Dismissed,
+    /// 菜单顶部固定项：用默认程序打开。
+    Open,
+    /// 菜单顶部固定项：打开所在位置（资源管理器里选中它）。
+    Reveal,
+    /// 菜单顶部固定项：复制完整路径（含文件名）。
+    CopyPath,
+    /// shell 自己的命令（"打开方式""属性"、第三方扩展…），已经执行完。
+    Handled,
+}
+
+/// 在鼠标位置弹出系统右键菜单（资源管理器同款，含第三方扩展）。
+///
+/// **这是模态调用**，选完（或取消）才返回。
+pub fn system_context_menu(path: &std::path::Path) -> MenuChoice {
+    #[cfg(windows)]
+    {
+        windows::shell_menu::show_for_path(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        MenuChoice::Dismissed
+    }
+}
 
 /// 文件管理器的名称（右键菜单“在访达中显示”）。
 pub const FILE_MANAGER: &str = if cfg!(target_os = "macos") {

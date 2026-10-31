@@ -215,6 +215,15 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
                     &palette,
                     "开启后新增、删除、改名会即时反映到结果里；监听不可用时仍可手动“重建全部”。",
                 );
+                theme::divider(ui, &palette);
+                theme::row(ui, &palette, "索引变化时自动刷新结果", |ui| {
+                    theme::toggle(ui, &palette, &mut draft.auto_refresh);
+                });
+                theme::hint(
+                    ui,
+                    &palette,
+                    "关掉后结果集不会自己更新：改了文件要重新搜一次才看得到（大索引下能省掉反复重查的开销）。",
+                );
                 ui.add_space(2.0);
             });
 

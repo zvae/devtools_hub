@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use devtools_search_core::scan::ExcludeSet;
 use devtools_search_core::volumes::{validate_new_root, RootState};
@@ -19,6 +20,14 @@ use super::protocol::{Command, Event, RootStatus};
 use super::runtime::{QuerySpec, RootSlot, Runtime};
 use crate::settings::{SearchSettings, SearchSettingsStore, SearchWindowMode, SETTINGS_VERSION};
 use crate::{FolderPurpose, HostServices};
+
+/// 索引变化之后等这么久再重跑查询。
+///
+/// 扫描和文件监听都是一连串的变化（revision 一直在涨），每变一次就重跑等于"边扫边查"：
+/// 大索引一次查询要一秒，界面会被拖成幻灯片——框选、滚动时尤其明显。
+const RERUN_SETTLE: Duration = Duration::from_millis(400);
+/// 两次重跑之间的最小间隔（再稳一稳，别让查询把 CPU 吃满）。
+const RERUN_MIN_GAP: Duration = Duration::from_millis(600);
 
 /// 搜索模块的生命周期（§7.5）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +83,12 @@ pub struct Service {
     last_notice: Option<String>,
     lifecycle: Lifecycle,
     indexed_fingerprints: BTreeMap<RootId, (u32, u64, u32)>,
+    /// 第一次发现索引变化的时间（用来等索引稳定下来再重查）。
+    stale_since: Option<Instant>,
+    /// 上一次因为索引变化重跑查询的时间（限流用）。
+    last_rerun: Option<Instant>,
+    /// 上次同步监听时的（排除规则, 各根状态）。没变就不要再编译一遍 glob、也不要重复挂监听。
+    watcher_sync: Option<(Vec<String>, bool, Vec<(RootId, RootState)>)>,
     visible: bool,
     policy_dirty: bool,
     stopped: bool,
@@ -127,6 +142,9 @@ impl Service {
             last_notice: None,
             lifecycle,
             indexed_fingerprints: BTreeMap::new(),
+            stale_since: None,
+            last_rerun: None,
+            watcher_sync: None,
             visible: false,
             policy_dirty: false,
             stopped: false,
@@ -217,6 +235,8 @@ impl Service {
                 let _ = self.tx.send(Event::Rows { start, rows });
             }
             Command::SetSort { column, dir } => self.set_sort(column, dir),
+            Command::SetView { view } => self.set_view(view),
+            Command::SetKind { kind } => self.set_kind(kind),
             Command::ApplySettings { draft } => self.apply_settings(*draft),
             Command::PickFolder => self.pick_folder(),
             Command::PickScope => self.pick_scope(),
@@ -316,6 +336,7 @@ impl Service {
             literal,
             case_sensitive,
             scope: scope.clone(),
+            kind: self.settings.ui.kind,
             max_results: self.settings.max_results,
             show_all_on_empty: self.settings.show_all_on_empty,
             sort_column: sort.column,
@@ -375,8 +396,37 @@ impl Service {
         }
     }
 
-    fn apply_settings(&mut self, mut draft: SearchSettings) {
-        draft.version = SETTINGS_VERSION;
+    /// 切换结果区视图：只影响绘制，不重跑查询（图标视图和详情共用同一份结果集）。
+    fn set_view(&mut self, view: crate::settings::ResultView) {
+        if self.settings.ui.view == view {
+            return;
+        }
+        self.settings.ui.view = view;
+        self.persist();
+    }
+
+    /// 切换类型筛选：筛选是查询条件的一部分，改了要重跑当前查询。
+    fn set_kind(&mut self, kind: devtools_search_core::FileKind) {
+        if self.settings.ui.kind == kind {
+            return;
+        }
+        self.settings.ui.kind = kind;
+        self.persist();
+        match self.last_query.clone() {
+            Some(last) => self.search(last.text, last.literal, last.case_sensitive, last.scope, false),
+            // 还没搜索过（例如刚打开就选了「图片」）：按"空关键词 + 该类型"查一次，
+            // 首次搜索也会顺带把索引建起来。
+            None => self.search(
+                String::new(),
+                false,
+                self.settings.default_case_sensitive,
+                None,
+                false,
+            ),
+        }
+    }
+
+    fn apply_settings(&mut self, mut draft: SearchSettings) {        draft.version = SETTINGS_VERSION;
         if self.read_only {
             let _ = self.tx.send(Event::SettingsApplied(Err(
                 "当前设置文件来自更高版本，只读模式不能修改".into()
@@ -390,6 +440,7 @@ impl Service {
         let old_config = config::index_config(&self.settings);
         let old_mode = self.settings.ui.window.mode;
         let old_sort = self.settings.ui.sort;
+        let old_kind = self.settings.ui.kind;
         let was_consent = !self.settings.permission_onboarding_completed;
         self.settings = draft;
         if was_consent && self.settings.permission_onboarding_completed {
@@ -406,7 +457,7 @@ impl Service {
         if old_mode != self.settings.ui.window.mode {
             self.policy_dirty = true;
         }
-        if old_sort != self.settings.ui.sort {
+        if old_sort != self.settings.ui.sort || old_kind != self.settings.ui.kind {
             if let Some(last) = self.last_query.clone() {
                 self.search(last.text, last.literal, last.case_sensitive, last.scope, false);
             }
@@ -600,6 +651,20 @@ impl Service {
             for slot in self.runtime.slots() {
                 self.runtime.stop_watch(&slot);
             }
+            self.watcher_sync = None;
+            return;
+        }
+        // 每帧都重新编译一边 glob 规则是白烧 CPU：配置和根状态没变就直接跳过。
+        let signature = (
+            self.settings.exclude_patterns.clone(),
+            self.settings.exclude_case_sensitive,
+            self.runtime
+                .slots()
+                .iter()
+                .map(|slot| (slot.id, slot.state()))
+                .collect::<Vec<_>>(),
+        );
+        if self.watcher_sync.as_ref() == Some(&signature) {
             return;
         }
         let config = config::index_config(&self.settings);
@@ -614,6 +679,7 @@ impl Service {
                 self.runtime.spawn_watch(slot, excludes.clone());
             }
         }
+        self.watcher_sync = Some(signature);
     }
 
     /// 监听溢出的根转为全量重扫（`Dirty`）。
@@ -798,6 +864,10 @@ impl Service {
     ///
     /// 扫描完成会替换整个索引并递增 epoch，只比较 revision 发现不了（新索引从 0 开始）。
     fn rerun_if_stale(&mut self) -> bool {
+        // 关掉自动刷新：索引怎么变都不重跑，用户重新搜一次才更新（省掉反复重查的开销）。
+        if !self.settings.auto_refresh {
+            return false;
+        }
         let current: BTreeMap<RootId, (u32, u64, u32)> = self
             .runtime
             .slots()
@@ -805,8 +875,36 @@ impl Service {
             .map(|slot| (slot.id, slot.fingerprint()))
             .collect();
         if current == self.indexed_fingerprints {
+            // 索引稳定了：清掉等待状态，下次变化重新计时。
+            self.stale_since = None;
             return false;
         }
+        // 正在扫描 / 校验的根：等它扫完再查。边扫边查最费 CPU——索引一直在变，
+        // 每帧都会发现"过期"，结果就是一条查询接一条查询地跑，界面直接卡住。
+        if self.runtime.slots().iter().any(|slot| {
+            matches!(
+                slot.state(),
+                RootState::Scanning | RootState::PendingValidation | RootState::Verifying
+            )
+        }) {
+            self.stale_since = None;
+            return false;
+        }
+        let now = Instant::now();
+        // 第一次发现变化时开始计时，等索引安静 `RERUN_SETTLE` 再重跑。
+        let first_seen = *self.stale_since.get_or_insert(now);
+        if now.duration_since(first_seen) < RERUN_SETTLE {
+            return false;
+        }
+        // 再稳一稳：两次重跑之间至少隔 `RERUN_MIN_GAP`。
+        // 间隔还要跟上次查询的耗时走——查询本身要一秒时，固定 600ms 会让新查询
+        // 每次都把上一次取消掉，结果永远出不来、CPU 还一直满着。
+        let gap = RERUN_MIN_GAP.max(Duration::from_millis(self.last_took_ms.saturating_mul(3) / 2));
+        if self.last_rerun.is_some_and(|last| now.duration_since(last) < gap) {
+            return false;
+        }
+        self.stale_since = None;
+        self.last_rerun = Some(now);
         self.indexed_fingerprints = current;
         let Some(last) = self.last_query.clone() else {
             return false;

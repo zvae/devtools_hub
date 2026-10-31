@@ -345,6 +345,60 @@ fn watch_updates_index_without_rebuild() {
     service.shutdown();
 }
 
+/// 类型筛选：作为查询条件生效（空关键词也生效），并且重启后仍然保留（§5.1）。
+#[test]
+fn kind_filter_narrows_results_and_survives_restart() {
+    use devtools_search::settings::{FileKind, ResultView};
+
+    let fixture = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let host: Arc<dyn HostServices> = Arc::new(FakeHost::default());
+    let mut settings = settings_for(fixture.path());
+    settings.show_all_on_empty = true;
+    let mut service = Service::new(data.path(), host.clone());
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+
+    // 所有：全部文件与目录。
+    let all = names(&search(&mut service, ""));
+    assert!(all.contains(&"alpha.txt".to_string()), "{all:?}");
+
+    // 文档：只剩扩展名属于文档组的文件（目录不再出现）。
+    service.handle(Command::SetKind {
+        kind: FileKind::Document,
+    });
+    let docs = names(&search(&mut service, ""));
+    assert_eq!(docs, ["alpha.txt", "beta.PDF", "delta.txt", "gamma.md"]);
+
+    // 图片：fixture 里没有图片。
+    service.handle(Command::SetKind {
+        kind: FileKind::Picture,
+    });
+    assert!(search(&mut service, "").is_empty());
+
+    // 文件夹：只剩目录（node_modules 被排除规则剪掉）。
+    service.handle(Command::SetKind {
+        kind: FileKind::Folder,
+    });
+    let dirs = names(&search(&mut service, ""));
+    assert_eq!(dirs, ["sub"]);
+
+    // 视图切换只影响绘制，不影响结果集，并且会持久化。
+    service.handle(Command::SetView {
+        view: ResultView::Large,
+    });
+    service.shutdown();
+
+    let mut restarted = Service::new(data.path(), host);
+    restarted.handle(Command::WarmUp);
+    wait_ready(&mut restarted);
+    assert_eq!(restarted.settings().ui.kind, FileKind::Folder);
+    assert_eq!(restarted.settings().ui.view, ResultView::Large);
+    restarted.shutdown();
+}
+
 /// 排序偏好持久化：改一次排序，重启（重建 Service）后仍然生效（§5.1）。
 #[test]
 fn sort_preference_survives_restart() {

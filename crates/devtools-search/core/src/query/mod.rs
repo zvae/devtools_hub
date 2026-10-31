@@ -15,7 +15,7 @@ pub use ast::{Ast, DateFilter, PathSegment, SizeFilter, Term};
 pub use eval::{compile, eval, EvalOptions, EvalOutcome, Notice};
 pub use parse::{parse, ParseError};
 pub use sort::sort_matches;
-pub use types::extensions_for;
+pub use types::{extensions_for, FileKind};
 
 #[cfg(test)]
 pub(crate) use eval::wildcard_match;

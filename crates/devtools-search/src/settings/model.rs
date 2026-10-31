@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use devtools_search_core::{RootLocation, SortColumn, SortDir, VolumeId};
+use devtools_search_core::{FileKind, RootLocation, SortColumn, SortDir, VolumeId};
 use serde::{Deserialize, Serialize};
 
 /// 当前设置格式版本（§6.2：从 version 1 开始；version 2 起搜索页使用独立普通窗口）。
@@ -142,6 +142,59 @@ impl UiSort {
     }
 }
 
+/// 结果区的视图（参照 Everything 的「视图」菜单）。
+///
+/// 顺序即「视图」菜单里的顺序：超大图标 → 大图标 → 中等图标 → 详情，
+/// 快捷键依次是 ⌘⇧1 … ⌘⇧4（Windows 为 Ctrl+Shift+1…4）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultView {
+    /// 超大图标。
+    ExtraLarge,
+    /// 大图标。
+    Large,
+    /// 中等图标。
+    Medium,
+    /// 详情（五列表格）。
+    #[default]
+    Detail,
+}
+
+impl ResultView {
+    /// 菜单里的顺序。
+    pub const ALL: [ResultView; 4] = [
+        ResultView::ExtraLarge,
+        ResultView::Large,
+        ResultView::Medium,
+        ResultView::Detail,
+    ];
+
+    /// 界面上显示的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            ResultView::ExtraLarge => "超大图标",
+            ResultView::Large => "大图标",
+            ResultView::Medium => "中等图标",
+            ResultView::Detail => "详情",
+        }
+    }
+
+    /// 是否是图标网格（详情之外的三种）。
+    pub fn is_grid(self) -> bool {
+        self != ResultView::Detail
+    }
+
+    /// 「视图」菜单里的快捷键数字（⌘⇧1 … ⌘⇧4，Windows 为 Ctrl+Shift+1…4）。
+    pub fn digit(self) -> &'static str {
+        match self {
+            ResultView::ExtraLarge => "1",
+            ResultView::Large => "2",
+            ResultView::Medium => "3",
+            ResultView::Detail => "4",
+        }
+    }
+}
+
 /// UI 偏好。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -149,6 +202,10 @@ pub struct UiPrefs {
     pub window: WindowPrefs,
     pub columns: ColumnWidths,
     pub sort: UiSort,
+    /// 结果区视图。
+    pub view: ResultView,
+    /// 类型筛选（所有 / 音频 / 文档…）。
+    pub kind: FileKind,
 }
 
 /// 一条历史记录（§5.4）。
@@ -184,6 +241,11 @@ pub struct SearchSettings {
     pub scan_app_bundles: bool,
     pub watch: bool,
     pub lazy_start: bool,
+    /// 索引变化（扫描/监听）后自动重跑当前查询。
+    ///
+    /// 关掉的话结果集不会自己刷新：改了文件要重新搜索一次才看得到。
+    /// 大索引 + debug 构建下这块开销明显，给个开关让用户自己取舍。
+    pub auto_refresh: bool,
     pub continue_when_hidden: bool,
     pub index_paused: bool,
     pub persist_index: bool,
@@ -211,6 +273,7 @@ impl Default for SearchSettings {
             scan_app_bundles: false,
             watch: true,
             lazy_start: true,
+            auto_refresh: true,
             continue_when_hidden: false,
             index_paused: false,
             persist_index: true,

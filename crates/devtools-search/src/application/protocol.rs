@@ -5,10 +5,10 @@
 
 use std::path::PathBuf;
 
-use devtools_search_core::{NodeKind, ResultId, RootId, SortColumn, SortDir};
+use devtools_search_core::{FileKind, NodeKind, ResultId, RootId, SortColumn, SortDir};
 use devtools_search_core::volumes::RootState;
 
-use crate::settings::{SearchSettings, SearchWindowMode};
+use crate::settings::{ResultView, SearchSettings, SearchWindowMode};
 
 /// 一次根的状态快照。
 #[derive(Clone, Debug)]
@@ -74,6 +74,10 @@ pub enum Command {
     LoadRows { start: u32, count: u32 },
     /// 切换排序。
     SetSort { column: SortColumn, dir: SortDir },
+    /// 切换结果区视图（图标 / 详情），只影响绘制，不重跑查询。
+    SetView { view: ResultView },
+    /// 切换类型筛选：作为查询条件 AND 进当前查询，因此需要重跑。
+    SetKind { kind: FileKind },
     /// 提交设置草稿（Service 校验后原子保存并应用）。
     ApplySettings { draft: Box<SearchSettings> },
     /// 添加索引根（走原生选择对话框）。
