@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::model::{SearchSettings, SETTINGS_VERSION};
+use super::model::{SearchSettings, SearchWindowMode, SETTINGS_VERSION};
 
 /// 加载结果。
 pub struct LoadOutcome {
@@ -58,11 +58,14 @@ impl SearchSettingsStore {
                 read_only: true,
             },
             _ => match serde_json::from_slice::<SearchSettings>(&bytes) {
-                Ok(settings) => LoadOutcome {
-                    settings,
-                    notice: None,
-                    read_only: false,
-                },
+                Ok(mut settings) => {
+                    migrate(&mut settings);
+                    LoadOutcome {
+                        settings,
+                        notice: None,
+                        read_only: false,
+                    }
+                }
                 Err(err) => {
                     // 损坏隔离：重命名为 .corrupt.<unix_ts>（§6.2）。
                     let ts = std::time::SystemTime::now()
@@ -108,6 +111,17 @@ impl SearchSettingsStore {
     }
 }
 
+/// 旧版本的设置升级到当前格式。
+///
+/// version 1 的搜索页和剪贴板面板共用一个无边框置顶窗口，只有 `floating` / `pinned`
+/// 两种模式；version 2 起搜索页改用独立窗口，旧配置统一升级为默认的普通窗口。
+fn migrate(settings: &mut SearchSettings) {
+    if settings.version < 2 {
+        settings.ui.window.mode = SearchWindowMode::Normal;
+    }
+    settings.version = SETTINGS_VERSION;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +138,23 @@ mod tests {
         assert!(!loaded.read_only);
         assert!(loaded.notice.is_none());
         assert_eq!(loaded.settings, settings);
+    }
+
+    #[test]
+    fn version_1_settings_upgrade_to_normal_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SearchSettingsStore::new(dir.path());
+        fs::write(
+            store.path(),
+            r#"{"version":1,"ui":{"window":{"mode":"floating","size":[1000.0,600.0]}}}"#,
+        )
+        .unwrap();
+        let loaded = store.load();
+        assert!(!loaded.read_only);
+        assert_eq!(loaded.settings.version, SETTINGS_VERSION);
+        assert_eq!(loaded.settings.ui.window.mode, SearchWindowMode::Normal);
+        // 其余字段保持用户原值。
+        assert_eq!(loaded.settings.ui.window.size, [1000.0, 600.0]);
     }
 
     #[test]

@@ -325,15 +325,6 @@ unsafe fn position(hwnd: HWND, anchor: Anchor) {
                 work,
             )
         }
-        Anchor::Center => {
-            let work = work_area_at(cursor);
-            let (work_width, work_height) = (work.right - work.left, work.bottom - work.top);
-            (
-                work.left + (work_width - width) / 2,
-                work.top + (work_height - height) / 2,
-                work,
-            )
-        }
         Anchor::Placement(Placement::LastPosition) => {
             // 上次的位置仍在某个显示器上就不动，否则居中（例如外接显示器已断开）。
             if !MonitorFromRect(&frame, MONITOR_DEFAULTTONULL).is_null() {
@@ -399,8 +390,19 @@ pub(super) unsafe fn work_area_at(point: POINT) -> RECT {
     info.rcWork
 }
 
+/// 激活搜索窗口（Windows 由 winit 的 `ViewportCommand::Focus` 负责）。
+pub fn activate_search_window() {}
+
+/// 安装应用图标（macOS 专属；Windows 的图标由 exe 资源决定）。
+pub fn install_application_icon() {}
+
 /// 搜索页的窗口行为（§4.2：由宿主平台层实现）。
 ///
-/// Windows 上没有需要额外调整的层级或空格处理；宿主也没有全局绑定空格键。
-/// 保留这个入口，方便以后接入原生焦点/输入法处理。
+/// 面板层级与空格键行为沿用现有实现；Windows 没有额外的桌面集合行为。
 pub fn set_search_space_behavior(_searching: bool) {}
+
+/// 搜索窗口是否显示任务栏按钮。
+///
+/// Windows 的任务栏属性是窗口创建参数，由搜索窗口的 `ViewportBuilder`（普通模式）
+/// 在创建 / 重建时决定；这里不需要运行时处理。
+pub fn set_search_dock_visible(_visible: bool) {}

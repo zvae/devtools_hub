@@ -18,7 +18,7 @@ use super::config;
 use super::protocol::{Command, Event, RootStatus};
 use super::runtime::{QuerySpec, RootSlot, Runtime};
 use crate::settings::{SearchSettings, SearchSettingsStore, SearchWindowMode, SETTINGS_VERSION};
-use crate::HostServices;
+use crate::{FolderPurpose, HostServices};
 
 /// 搜索模块的生命周期（§7.5）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +199,10 @@ impl Service {
         if self.stopped {
             return;
         }
+        // 命令的结果通过 `poll()` 回到界面：宿主需要再跑一帧。
+        // 搜索窗口是独立的延迟视口，子窗口的重绘不会唤醒父窗口，所以每条命令都主动唤醒宿主；
+        // 重复的请求会被事件循环合并。
+        self.host.request_repaint();
         match command {
             Command::WarmUp => self.warm_up(),
             Command::StartIndexing => self.start_indexing(),
@@ -415,7 +419,7 @@ impl Service {
     /// 添加索引根（原生选择对话框，§5.3）。
     fn pick_folder(&mut self) {
         let guard = self.host.begin_system_modal();
-        let result = self.host.pick_folder(None);
+        let result = self.host.pick_folder(None, FolderPurpose::IndexRoot);
         if let Some(guard) = guard {
             // 面板仍在使用：对话框关闭后不还原焦点（§0）。
             guard.end(false);
@@ -430,7 +434,7 @@ impl Service {
     /// 选择"在目录中搜索"的范围（原生选择对话框，§5.3）。
     fn pick_scope(&mut self) {
         let guard = self.host.begin_system_modal();
-        let result = self.host.pick_folder(None);
+        let result = self.host.pick_folder(None, FolderPurpose::SearchScope);
         if let Some(guard) = guard {
             // 面板仍在使用：对话框关闭后不还原焦点（§0）。
             guard.end(false);

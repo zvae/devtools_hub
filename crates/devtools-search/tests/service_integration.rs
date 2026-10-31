@@ -19,7 +19,11 @@ struct FakeHost {
 }
 
 impl HostServices for FakeHost {
-    fn pick_folder(&self, _initial: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    fn pick_folder(
+        &self,
+        _initial: Option<&Path>,
+        _purpose: devtools_search::FolderPurpose,
+    ) -> Result<Option<PathBuf>, String> {
         Ok(None)
     }
     fn begin_system_modal(&self) -> Option<Box<dyn SystemModalGuard>> {

@@ -280,9 +280,12 @@ impl SearchModule {
         self.last_size = size;
     }
 
-    /// 搜索页的窗口尺寸（逻辑像素）：宿主显示窗口时使用。
+    /// 搜索页的窗口尺寸（逻辑像素）：宿主创建窗口时使用。
+    ///
+    /// 返回本次会话里最新的尺寸；宿主在打开窗口时取一次，之后缩放只更新这里的值，
+    /// 避免每帧把用户正在拖动的尺寸写回窗口。
     pub fn window_size(&self) -> [f32; 2] {
-        self.service.settings().ui.window.size
+        self.last_size
     }
 
     /// 拉取事件并刷新界面状态。
@@ -524,10 +527,7 @@ impl SearchModule {
                 }
                 let status = status::show(ui, &mut self.view, &self.service);
                 if status.toggle_mode {
-                    let next = match self.service.window_policy().mode {
-                        crate::SearchWindowMode::Floating => crate::SearchWindowMode::Pinned,
-                        crate::SearchWindowMode::Pinned => crate::SearchWindowMode::Floating,
-                    };
+                    let next = self.service.window_policy().mode.next();
                     self.service.handle(Command::SetMode { mode: next });
                 }
             }

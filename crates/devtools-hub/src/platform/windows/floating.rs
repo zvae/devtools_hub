@@ -39,6 +39,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WDA_EXCLUDEFROMCAPTURE,
 };
 
+use devtools_search::FolderPurpose;
+
 use super::{panel, scroll_mask, wide, workspace};
 
 /// 贴图窗口是否支持调整不透明度。
@@ -499,11 +501,15 @@ extern "system" {
     fn SHGetPathFromIDListW(pidl: *const std::ffi::c_void, path: *mut u16) -> i32;
 }
 
-/// 选择文件夹（文件搜索模块的索引根）。取消返回 `Ok(None)`。
+/// 选择文件夹。取消返回 `Ok(None)`。
 ///
 /// 用 `SHBrowseForFolderW`（不需要 COM 接口对象）；`initial` 暂不支持——
 /// 指定初始目录需要 BFFM_SETSELECTION 回调，v1 从默认位置开始。
-pub fn pick_folder(_initial: Option<&Path>) -> Result<Option<PathBuf>, String> {
+/// `purpose` 决定对话框标题（添加索引根 / 设置搜索范围）。
+pub fn pick_folder(
+    _initial: Option<&Path>,
+    purpose: FolderPurpose,
+) -> Result<Option<PathBuf>, String> {
     use windows_sys::Win32::System::Com::{
         CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
     };
@@ -514,10 +520,7 @@ pub fn pick_folder(_initial: Option<&Path>) -> Result<Option<PathBuf>, String> {
     unsafe {
         CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
     }
-    let title: Vec<u16> = "选择要建立索引的文件夹"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let title: Vec<u16> = wide(purpose.message());
     let mut display = [0u16; 260];
     DIALOG_OPEN.store(true, Ordering::Relaxed);
     // SAFETY: 同上；pidl 由 shell32 分配，下面立即释放。

@@ -1,7 +1,7 @@
 //! 状态栏：索引状态点、计数、耗时、快捷键提示与窗口模式（§5.1、§5.3）。
 
-use egui::{Align, FontId, Layout, RichText, Sense, Stroke, Ui, Vec2};
 use devtools_search_core::volumes::RootState;
+use egui::{Align, FontId, Layout, RichText, Sense, Stroke, Ui, Vec2};
 
 use super::icons::Icon;
 use super::{theme, ViewState};
@@ -54,16 +54,21 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> StatusActio
 
     // 右侧：模式切换、结果计数、快捷键提示。
     bar.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        // 窗口模式：图标 + 文字胶囊。
-        let pinned = service.window_policy().mode == crate::SearchWindowMode::Pinned;
-        let label = if pinned { "固定" } else { "浮动" };
-        if theme::pill_button(ui, &palette, label, pinned)
-            .on_hover_text(if pinned {
-                "固定窗口：失焦不收起"
-            } else {
-                "浮动窗口：失焦收起"
-            })
-            .clicked()
+        // 窗口模式：图标 + 文字胶囊。点击循环 浮动 → 固定 → 普通。
+        let mode = service.window_policy().mode;
+        let hint = match mode {
+            crate::SearchWindowMode::Floating => "浮动窗口：失焦收起",
+            crate::SearchWindowMode::Pinned => "固定窗口：失焦不收起，始终置顶",
+            crate::SearchWindowMode::Normal => "普通窗口：带标题栏，不置顶",
+        };
+        if theme::pill_button(
+            ui,
+            &palette,
+            mode.label(),
+            mode != crate::SearchWindowMode::Floating,
+        )
+        .on_hover_text(hint)
+        .clicked()
         {
             action.toggle_mode = true;
         }
@@ -113,7 +118,11 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> StatusActio
         }
     });
 
-    let _ = (Sense::hover(), FontId::proportional(11.0), Layout::left_to_right(Align::Center));
+    let _ = (
+        Sense::hover(),
+        FontId::proportional(11.0),
+        Layout::left_to_right(Align::Center),
+    );
     action
 }
 

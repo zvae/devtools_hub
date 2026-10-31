@@ -3,7 +3,7 @@
 //! 视觉与宿主设置页一致：分组标题 + 15pt 圆角卡片、iOS 风格开关、主/次按钮。
 //! 编辑只改本地草稿，点"保存并应用"才经 Service 校验、原子保存并生效。
 
-use egui::{Align, Layout, Rect, RichText, Sense, ScrollArea, Stroke, Ui, Vec2};
+use egui::{Align, Layout, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2};
 
 use super::icons::{self, Icon};
 use super::{theme, ViewState};
@@ -322,24 +322,22 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> SettingsOut
             // 界面。
             theme::section(ui, &palette, "界面", |ui| {
                 theme::row(ui, &palette, "窗口模式", |ui| {
-                    let floating =
-                        theme::pill_button(
+                    for (mode, hint) in [
+                        (SearchWindowMode::Normal, "普通窗口：带标题栏，不置顶，可与其他窗口并存"),
+                        (SearchWindowMode::Pinned, "固定窗口：无边框、始终置顶，失焦不收起"),
+                        (SearchWindowMode::Floating, "浮动窗口：无边框、始终置顶，失焦收起"),
+                    ] {
+                        if theme::pill_button(
                             ui,
                             &palette,
-                            "浮动（失焦收起）",
-                            draft.ui.window.mode == SearchWindowMode::Floating,
-                        );
-                    if floating.clicked() {
-                        draft.ui.window.mode = SearchWindowMode::Floating;
-                    }
-                    let pinned = theme::pill_button(
-                        ui,
-                        &palette,
-                        "固定（失焦保留）",
-                        draft.ui.window.mode == SearchWindowMode::Pinned,
-                    );
-                    if pinned.clicked() {
-                        draft.ui.window.mode = SearchWindowMode::Pinned;
+                            mode.label(),
+                            draft.ui.window.mode == mode,
+                        )
+                        .on_hover_text(hint)
+                        .clicked()
+                        {
+                            draft.ui.window.mode = mode;
+                        }
                     }
                 });
                 theme::divider(ui, &palette);

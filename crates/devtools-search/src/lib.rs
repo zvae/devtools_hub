@@ -22,13 +22,38 @@ use std::path::{Path, PathBuf};
 pub use devtools_search_core::ports::SystemModalGuard;
 pub use devtools_search_core::volumes::RootState;
 
+/// 原生文件夹选择对话框的用途：决定给用户看的提示文案。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderPurpose {
+    /// 添加索引根：选择要纳入索引的目录。
+    IndexRoot,
+    /// “在目录中搜索”的范围：只影响当前查询，不建立索引。
+    SearchScope,
+}
+
+impl FolderPurpose {
+    /// 对话框里的提示文字。
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::IndexRoot => "选择要建立索引的文件夹",
+            Self::SearchScope => "选择要搜索的文件夹",
+        }
+    }
+}
+
 /// 宿主平台层必须提供的原生能力（§4.1）。
 ///
 /// 这些实现不属于模块：文件夹选择、系统模态期间的原生窗口状态、打开/显示、原生图标、
 /// 窗口层级与拖动，都必须操作宿主窗口（§0 的唯一机制让渡）。
 pub trait HostServices: Send + Sync {
     /// 打开原生文件夹选择对话框；取消返回 `Ok(None)`。
-    fn pick_folder(&self, initial: Option<&Path>) -> Result<Option<PathBuf>, String>;
+    ///
+    /// `purpose` 只用于对话框文案：同一个选择器既用于添加索引根，也用于设置当前搜索范围。
+    fn pick_folder(
+        &self,
+        initial: Option<&Path>,
+        purpose: FolderPurpose,
+    ) -> Result<Option<PathBuf>, String>;
 
     /// 系统模态对话框打开前调用；返回的 guard 在对话框关闭后必须及时 `end()`。
     /// 打不开（例如宿主窗口还没就绪）时返回 `None`，模块直接给出诊断（§7.10）。

@@ -17,6 +17,7 @@ mod pin;
 mod quick_panel;
 mod screenshot;
 mod search_host;
+mod search_window;
 mod settings_page;
 #[cfg(test)]
 mod snapshot_tests;
@@ -26,8 +27,8 @@ mod textures;
 mod widgets;
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -46,6 +47,14 @@ use crate::{controller, middle_click, Args};
 use devtools_search::{SearchModule, SearchOptions};
 
 use search_host::HostBridge;
+
+/// 搜索模块的共享句柄：宿主和搜索窗口的延迟视口回调都会访问它。
+type SearchHandle = Arc<Mutex<SearchModule>>;
+
+/// 取搜索模块的锁；某个回调 panic 污染了锁也继续使用，避免整个搜索窗口不可用。
+fn lock_search(search: &SearchHandle) -> MutexGuard<'_, SearchModule> {
+    search.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 use code_text::CodeStyles;
 use json_editor::JsonEditorView;
@@ -71,7 +80,8 @@ enum Page {
     JsonEditor,
     /// 提取文字（截屏、贴图的识别结果）。
     Ocr,
-    /// 文件搜索页（共享窗口，背景材质与面板一致，§5.2）。
+    /// 文件搜索页。生产环境搜索页是独立窗口（见 `search_window`），
+    /// 这个页面只保留给离屏渲染测试在共享窗口里直接绘制搜索界面。
     Search,
 }
 
@@ -170,11 +180,28 @@ pub struct HubApp {
     /// 最近一次弹出的贴图右键菜单：（贴图编号，菜单）。
     pin_menu: Option<(u64, NativeMenu<PinAction>)>,
     /// 文件搜索模块（开关关闭时为 `None`，§4.4）。
-    search: Option<SearchModule>,
+    ///
+    /// 用 `Arc<Mutex<..>>` 共享：搜索窗口是延迟视口，它的回调会在独立的重绘里访问模块，
+    /// 宿主（索引状态、设置、开关）也在主线程访问同一份状态。
+    search: Option<SearchHandle>,
     /// 宿主的平台能力实现（文件夹选择、模态保护、窗口拖动等）。
     search_host: Arc<dyn devtools_search::HostServices>,
     /// 下次打开搜索页要传入的入口信息。
     search_entry: Option<SearchOptions>,
+    /// 搜索页的独立窗口是否已经打开（与剪贴板面板的页面互不影响）。
+    search_open: bool,
+    /// 搜索窗口里的 Esc / 关闭按钮 / 浮动模式失焦：由视口回调置位，宿主在下一帧收起。
+    search_close_requested: Arc<AtomicBool>,
+    /// 上一帧搜索窗口是否有焦点（浮动模式下用它发现失焦，视口回调和宿主共用）。
+    search_focus_was: Arc<AtomicBool>,
+    /// 刚切换过窗口模式的宽限期：切换激活策略可能造成一次瞬时的失焦，这段时间内不收起。
+    search_blur_grace_until: Arc<Mutex<Option<Instant>>>,
+    /// 搜索窗口创建后需要主动聚焦一次（系统激活可能晚于窗口创建）。
+    search_focus_pending: bool,
+    /// 打开搜索窗口时使用的稳定尺寸（用户缩放后不逐帧回写，避免和拖动打架）。
+    search_window_size: [f32; 2],
+    /// 搜索窗口在本次打开期间的位置（模式切换重建窗口时保持不变）。
+    search_window_pos: egui::Pos2,
     /// 正在等待搜索模块释放（关闭开关后）。
     search_stopping: bool,
     /// 本帧绘制结束时收起窗口（Esc）。
@@ -204,6 +231,8 @@ impl HubApp {
             tracing::warn!("无法设置面板窗口：{err:#}");
         }
         app.backdrop = native_panel::backdrop();
+        #[cfg(target_os = "macos")]
+        native_panel::install_application_icon();
         app.liquid = cc.wgpu_render_state.as_ref().map(LiquidGlass::new);
         match HotkeyService::new(shared.clone()) {
             Ok(service) => {
@@ -294,6 +323,13 @@ impl HubApp {
             search: None,
             search_host,
             search_entry: None,
+            search_open: false,
+            search_close_requested: Arc::new(AtomicBool::new(false)),
+            search_focus_was: Arc::new(AtomicBool::new(false)),
+            search_blur_grace_until: Arc::new(Mutex::new(None)),
+            search_focus_pending: false,
+            search_window_size: [1100.0, 680.0],
+            search_window_pos: egui::Pos2::ZERO,
             search_stopping: false,
             pending_hide: false,
         }
@@ -377,13 +413,14 @@ impl HubApp {
         }
         self.page = to;
         if from == Page::Search {
-            if let Some(search) = &mut self.search {
-                search.on_hidden();
+            if let Some(handle) = &self.search {
+                lock_search(handle).on_hidden();
             }
             self.apply_min_size(false);
         }
         if to == Page::Search {
-            if let Some(search) = &mut self.search {
+            if let Some(handle) = &self.search {
+                let mut search = lock_search(handle);
                 search.warm_up();
                 search.on_shown(self.search_entry.take());
             }
@@ -402,33 +439,29 @@ impl HubApp {
             .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min));
     }
 
-    /// 打开 / 收起搜索页（热键、托盘、快捷面板都走这里，§4.5）。
+    /// 打开 / 收起搜索窗口（热键、托盘、快捷面板都走这里，§4.5）。
+    ///
+    /// 搜索页是独立窗口：已经打开时热键只负责前置 / 收起，不再切换共享窗口的页面。
     fn open_search(&mut self, entry: SearchEntry) {
         self.sync_search_module();
         if !self.settings.search_enabled {
             self.show_toast("文件搜索未启用，可在设置的“文件搜索”中开启");
             return;
         }
-        if self.search.is_none() {
+        let Some(handle) = self.search.as_ref().cloned() else {
             return;
-        }
-        // 已经在前台：热键再次按下时收起。
-        if self.page == Page::Search && native_panel::is_active() {
-            self.hide_panel(true);
-            return;
-        }
-        self.search_entry = match entry {
+        };
+        let options = match entry {
             SearchEntry::Hotkey => None,
             SearchEntry::Text(text) => Some(SearchOptions {
                 query: text,
                 selected_paths: Vec::new(),
                 query_is_literal: true,
                 case_sensitive: self.settings.search_enabled
-                    && self
-                        .search
-                        .as_ref()
-                        .map(|s| s.service().settings().default_case_sensitive)
-                        .unwrap_or(false),
+                    && lock_search(&handle)
+                        .service()
+                        .settings()
+                        .default_case_sensitive,
             }),
             SearchEntry::Paths(paths) => Some(SearchOptions {
                 query: String::new(),
@@ -437,16 +470,186 @@ impl HubApp {
                 case_sensitive: false,
             }),
         };
+        if self.search_open {
+            let info = self
+                .ctx
+                .input(|i| i.raw.viewports.get(&search_window::viewport()).cloned());
+            let Some(info) = info else {
+                // 窗口已经随上一帧关闭，这里只清掉状态。
+                self.close_search();
+                return;
+            };
+            let minimized = info.minimized.unwrap_or(false);
+            let focused = info.focused.unwrap_or(false);
+            if !minimized && focused && options.is_none() {
+                self.close_search();
+                return;
+            }
+            // 打开了新入口（例如选中文件后再次唤起）：更新查询 / 范围并前置。
+            if options.is_some() {
+                lock_search(&handle).on_shown(options);
+            }
+            self.focus_search_window(minimized);
+            return;
+        }
+        // 打开搜索时先收起剪贴板 / 快捷面板：搜索是普通窗口，面板是临时浮层。
+        if native_panel::is_visible() {
+            native_panel::hide(false);
+        }
+        // 已经被主动显示，就不要再执行启动时的隐藏。
         self.startup_hide_pending = false;
-        self.on_shown(Page::Search);
-        let size = self
-            .search
-            .as_ref()
-            .map(SearchModule::window_size)
-            .unwrap_or([1100.0, 680.0]);
-        // 搜索页像普通文档窗口一样出现在屏幕正中央（横向、纵向都居中），
-        // 不跟随剪贴板面板的“鼠标附近 / 上次位置”设置。
-        native_panel::show(Anchor::Center, size);
+        self.search_open = true;
+        self.search_close_requested.store(false, Ordering::Relaxed);
+        self.search_focus_was.store(false, Ordering::Relaxed);
+        *self
+            .search_blur_grace_until
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        self.search_focus_pending = true;
+        self.search_window_size = lock_search(&handle).window_size();
+        // 出现在鼠标所在屏幕的中央；会话内保持这个位置（模式切换重建窗口也不跳）。
+        self.search_window_pos = search_window::centered_position(
+            self.search_window_size,
+            crate::platform::screen::cursor().map(|(_, display)| display.logical),
+        );
+        {
+            let mut search = lock_search(&handle);
+            search.warm_up();
+            search.on_shown(options);
+        }
+        // 面板隐藏时 eframe 只调用 logic；让面板以隐藏状态运行一帧界面，
+        // 延迟视口（搜索窗口）才能被登记并创建（见 `panel::wake`）。
+        native_panel::wake();
+        native_panel::activate_search_window();
+        self.apply_search_dock_visibility();
+        self.ctx.request_repaint();
+    }
+
+    /// 关闭搜索窗口：保存尺寸、通知模块，并按需收起为创建子视口临时唤醒的面板。
+    fn close_search(&mut self) {
+        let was_open = self.search_open;
+        self.search_open = false;
+        self.search_focus_pending = false;
+        self.search_focus_was.store(false, Ordering::Relaxed);
+        *self
+            .search_blur_grace_until
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        self.search_close_requested.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.search.as_ref() {
+            let mut search = lock_search(handle);
+            if let Some(rect) = self.ctx.input(|i| {
+                i.raw
+                    .viewports
+                    .get(&search_window::viewport())
+                    .and_then(|v| v.inner_rect)
+            }) {
+                if rect.width() > 100.0 && rect.height() > 100.0 {
+                    search.remember_size([rect.width().round(), rect.height().round()]);
+                }
+            }
+            if was_open {
+                search.on_hidden();
+            }
+        }
+        // 面板是隐藏的（可能正为创建子视口而临时唤醒）：把它真正收起来。
+        // 面板本身可见时说明用户正在用剪贴板，不要跟着隐藏。
+        if !native_panel::is_visible() {
+            native_panel::finish_wake();
+        }
+        self.apply_search_dock_visibility();
+    }
+
+    /// 把搜索窗口前置；最小化时先恢复。
+    fn focus_search_window(&mut self, minimized: bool) {
+        let id = search_window::viewport();
+        if minimized {
+            self.ctx
+                .send_viewport_cmd_to(id, egui::ViewportCommand::Minimized(false));
+        }
+        self.ctx
+            .send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+    }
+
+    /// 登记搜索窗口的延迟视口。
+    ///
+    /// 用延迟（而不是立即）视口：立即视口必须在父窗口的界面回调里同步创建原生窗口，
+    /// 而 eframe 在定时重绘隐藏窗口时不带事件循环上下文，创建会失败并 panic。
+    /// 延迟视口的窗口由 eframe 在下一轮事件里创建，搜索窗口也能独立重绘。
+    ///
+    /// 停止登记后，egui 会在下一次界面结束时移除这个子视口，eframe 随之关闭原生窗口。
+    fn show_search_viewport(&mut self) {
+        let Some(handle) = self.search.as_ref().cloned() else {
+            self.close_search();
+            return;
+        };
+        let id = search_window::viewport();
+        let mode = lock_search(&handle).window_policy().mode;
+        let builder = search_window::builder(mode, self.search_window_size, self.search_window_pos);
+        // 窗口刚创建时系统激活可能还没完成：主动聚焦一次，之后不再抢焦点。
+        if std::mem::take(&mut self.search_focus_pending) {
+            self.ctx
+                .send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+        }
+        let close_requested = Arc::clone(&self.search_close_requested);
+        let focus_was = Arc::clone(&self.search_focus_was);
+        let blur_grace = Arc::clone(&self.search_blur_grace_until);
+        let ui_handle = Arc::clone(&handle);
+        self.ctx.show_viewport_deferred(id, builder, move |ui, _class| {
+            // 搜索页画不透明底（§5.6）：普通窗口后面是桌面，玻璃/半透明会压低表格可读性。
+            let background =
+                Palette::with_alpha(ui.ctx().theme() == egui::Theme::Dark, 255).background;
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(background))
+                .show(ui, |ui| {
+                    let mut search = lock_search(&ui_handle);
+                    let output = search.ui(ui);
+                    let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(false);
+                    // 标题栏的关闭按钮：在子视口自己的输入里读取，避免事件被子视口重绘清掉。
+                    let native_close = ui.ctx().input(|i| i.viewport().close_requested());
+                    let lost_focus = focus_was.swap(focused, Ordering::Relaxed) && !focused;
+                    if focused {
+                        *blur_grace.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                    }
+                    let hide_on_blur = search.window_policy().mode.hide_on_blur();
+                    drop(search);
+                    // 切换窗口模式会临时改变应用的激活策略，可能带一次瞬时失焦：只忽略宽限期内的失焦。
+                    let transient_blur = lost_focus && {
+                        let mut grace = blur_grace.lock().unwrap_or_else(|p| p.into_inner());
+                        let within = grace.is_some_and(|until| Instant::now() < until);
+                        *grace = None;
+                        within
+                    };
+                    // Esc / 关闭按钮 / 浮动模式失焦：交给宿主在下一帧统一收起。
+                    if native_close
+                        || output.close
+                        || (lost_focus && hide_on_blur && !transient_blur && !floating::dialog_open())
+                    {
+                        close_requested.store(true, Ordering::Relaxed);
+                        // 延迟视口不会唤醒父窗口：主动让宿主跑一帧来处理关闭。
+                        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                    }
+                });
+        });
+        // 用户拖动边框缩放后，把内容区尺寸记下来（关闭窗口时统一走 RememberSize）。
+        if let Some(rect) = self
+            .ctx
+            .input(|i| i.raw.viewports.get(&id).and_then(|v| v.inner_rect))
+        {
+            if rect.width() > 100.0 && rect.height() > 100.0 {
+                lock_search(&handle)
+                    .remember_size([rect.width().round(), rect.height().round()]);
+            }
+        }
+    }
+
+    /// 普通窗口需要出现在 Dock（macOS）/ 任务栏（Windows）；浮动、固定模式保持常驻托盘。
+    fn apply_search_dock_visibility(&self) {
+        let visible = self.search_open
+            && self.search.as_ref().is_some_and(|handle| {
+                lock_search(handle).window_policy().mode.in_taskbar()
+            });
+        native_panel::set_search_dock_visible(visible);
     }
 
     /// 按开关创建 / 释放搜索模块（关闭时不再占线程，§4.4）。
@@ -455,10 +658,10 @@ impl HubApp {
             if self.search.is_none() && !self.search_stopping {
                 let mut module = SearchModule::new(&self.data_dir, self.search_host.clone());
                 module.warm_up();
-                self.search = Some(module);
+                self.search = Some(Arc::new(Mutex::new(module)));
             }
-        } else if let Some(module) = &mut self.search {
-            module.shutdown();
+        } else if let Some(handle) = &self.search {
+            lock_search(handle).shutdown();
             self.search_stopping = true;
         }
         self.apply_hotkey(crate::hotkey::HotkeyAction::Search);
@@ -466,19 +669,55 @@ impl HubApp {
 
     /// 拉取搜索模块的事件、响应策略变化、回收已停止的模块。
     fn poll_search(&mut self) {
+        // 视口回调按 Esc / 关闭按钮 / 浮动失焦时置位。
+        if self.search_close_requested.swap(false, Ordering::Relaxed) {
+            self.close_search();
+            return;
+        }
+        // 原生标题栏的关闭按钮（普通窗口）。
+        if self.search_open
+            && self.ctx.input(|i| {
+                i.raw
+                    .viewports
+                    .get(&search_window::viewport())
+                    .is_some_and(|v| v.close_requested())
+            })
+        {
+            self.close_search();
+            return;
+        }
         let mut policy_changed = false;
-        if let Some(search) = &mut self.search {
+        let mut stopped = false;
+        if let Some(handle) = &self.search {
+            let mut search = lock_search(handle);
             policy_changed = search.poll().policy_changed;
+            stopped = search.is_stopped();
         }
-        if policy_changed && self.page == Page::Search {
-            self.apply_min_size(true);
+        if policy_changed {
+            // 普通 / 浮动 / 固定之间切换时同步 Dock 显示；窗口边框与层级由下一帧的 builder 更新。
+            // 切换激活策略可能带一次瞬时失焦，浮动模式不要据此把窗口收起来。
+            *self
+                .search_blur_grace_until
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) =
+                Some(Instant::now() + Duration::from_millis(600));
+            self.apply_search_dock_visibility();
+            if self.search_open {
+                // 切换模式时窗口会重建 / 改层级，重新聚焦一次，避免切到浮动模式后停在“未聚焦”状态。
+                self.ctx
+                    .send_viewport_cmd_to(search_window::viewport(), egui::ViewportCommand::Focus);
+            }
         }
-        if self.search_stopping && self.search.as_ref().is_some_and(SearchModule::is_stopped) {
+        if self.search_stopping && stopped {
             self.search = None;
             self.search_stopping = false;
-            if self.page == Page::Search {
-                self.set_page(Page::Panel);
+            if self.search_open {
+                self.close_search();
             }
+        }
+        // 服务线程通过 ROOT 唤醒界面；延迟视口不会跟着父窗口重绘，这里转发一次。
+        if self.search_open {
+            self.ctx.request_repaint_of(search_window::viewport());
         }
     }
 
@@ -501,8 +740,8 @@ impl HubApp {
             }
             // 搜索页的尺寸由模块自己记住（§4.1 remember_size 无参，尺寸走这里）。
             if self.page == Page::Search {
-                if let Some(search) = &mut self.search {
-                    search.remember_size(size);
+                if let Some(handle) = &self.search {
+                    lock_search(handle).remember_size(size);
                 }
             }
         }
@@ -739,10 +978,9 @@ impl HubApp {
             Page::JsonEditor => self.settings.hide_on_blur && !self.json.pinned,
             Page::Ocr => self.settings.hide_on_blur && !self.ocr.pinned,
             // 搜索页按窗口策略决定（Floating 失焦收起，Pinned 保留，§5.2）。
-            Page::Search => self
-                .search
-                .as_ref()
-                .is_some_and(|search| search.window_policy().hide_on_blur),
+            Page::Search => self.search.as_ref().is_some_and(|handle| {
+                lock_search(handle).window_policy().hide_on_blur
+            }),
         };
         // 系统对话框（保存图片）开着的时候失焦是正常的，关掉之后的第一下失焦也是它收尾造成的：
         // 都不是用户点了别的应用，不能收起窗口。
@@ -804,18 +1042,33 @@ impl eframe::App for HubApp {
         self.poll_search();
     }
 
-    /// 退出前：保存搜索页尺寸并停止索引（§4.6：托盘退出、更新重启都走这里）。
+    /// 退出前：保存搜索窗口尺寸并停止索引（§4.6：托盘退出、更新重启都走这里）。
     fn on_exit(&mut self) {
-        if let Some(rect) = self.ctx.input(|i| i.viewport().inner_rect) {
-            if self.page == Page::Search {
-                if let Some(search) = &mut self.search {
-                    search.remember_size([rect.width().round(), rect.height().round()]);
+        if self.search_open {
+            let size = self
+                .ctx
+                .input(|i| {
+                    i.raw
+                        .viewports
+                        .get(&search_window::viewport())
+                        .and_then(|v| v.inner_rect)
+                })
+                .map(|rect| [rect.width().round(), rect.height().round()]);
+            if let Some(handle) = &self.search {
+                let mut search = lock_search(handle);
+                if let Some(size) = size {
+                    if size[0] > 100.0 && size[1] > 100.0 {
+                        search.remember_size(size);
+                    }
                 }
+                search.on_hidden();
             }
+            self.search_open = false;
         }
-        if let Some(mut search) = self.search.take() {
+        if let Some(handle) = self.search.take() {
             // 有界阻塞：取消后等待线程池收尾，最多 1.5 秒。
-            if !search.shutdown_blocking(Duration::from_millis(1500)) {
+            let stopped = lock_search(&handle).shutdown_blocking(Duration::from_millis(1500));
+            if !stopped {
                 tracing::warn!("搜索模块未在 1.5 秒内停止，继续退出");
             }
         }
@@ -834,23 +1087,36 @@ impl eframe::App for HubApp {
         self.handle_focus();
         // Windows 上面板显示期间定时刷新：失焦不一定产生 repaint 事件（winit 的焦点状态可能已经不一致），
         // 需要轮询才能发现焦点变化。macOS 的失焦事件可靠，不需要轮询；隐藏时不排重绘，保持空闲。
-        if cfg!(windows) && self.page != Page::Settings && native_panel::is_visible() {
+        let search_needs_focus_poll = cfg!(windows)
+            && self.search_open
+            && self.search.as_ref().is_some_and(|handle| {
+                lock_search(handle).window_policy().hide_on_blur
+            });
+        if (cfg!(windows) && self.page != Page::Settings && native_panel::is_visible())
+            || search_needs_focus_poll
+        {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
         // 截屏遮罩或贴图在显示时，面板隐藏着 eframe 也会运行界面，这时不用绘制面板。
         if native_panel::is_visible() {
             self.draw(ui);
         }
+        // 搜索页是独立窗口，每帧都要在这里登记延迟视口；停止登记后窗口随之关闭。
+        if self.search_open {
+            self.show_search_viewport();
+        }
         let ctx = ui.ctx().clone();
         self.closing_snip_ui(&ctx);
         self.snip_ui(&ctx);
         self.pins_ui(&ctx);
-        // 为创建截屏遮罩、贴图而临时摆出的面板（见 `panel::wake`）完成了任务，收起来。
+        // 为创建截屏遮罩、贴图或搜索窗口而临时摆出的面板（见 `panel::wake`）完成了任务，收起来。
         // 隐藏着创建的遮罩还没显示时除外：面板一收起，eframe 就只调用 `logic`，没有人去显示遮罩了。
-        if !self
-            .snip
-            .as_ref()
-            .is_some_and(|snip| snip.waiting_to_show())
+        // 搜索窗口打开期间保持唤醒：子视口被最小化后也要能收到父窗口的重绘与命令。
+        if !self.search_open
+            && !self
+                .snip
+                .as_ref()
+                .is_some_and(|snip| snip.waiting_to_show())
         {
             native_panel::finish_wake();
         }
@@ -912,10 +1178,10 @@ impl HubApp {
 
     /// 搜索页：模块负责内容，宿主只负责背景与窗口（§4.2）。
     fn search_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(search) = &mut self.search else {
+        let Some(handle) = &self.search else {
             return;
         };
-        let output = search.ui(ui);
+        let output = lock_search(handle).ui(ui);
         if output.close {
             self.pending_hide = true;
         }

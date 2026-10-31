@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use devtools_search_core::{RootLocation, SortColumn, SortDir, VolumeId};
 use serde::{Deserialize, Serialize};
 
-/// 当前设置格式版本（§6.2：从 version 1 开始）。
-pub const SETTINGS_VERSION: u32 = 1;
+/// 当前设置格式版本（§6.2：从 version 1 开始；version 2 起搜索页使用独立普通窗口）。
+pub const SETTINGS_VERSION: u32 = 2;
 
 /// 一个索引根（`enabled` 与运行状态分开，§7.5）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -19,13 +19,57 @@ pub struct RootConfig {
     pub enabled: bool,
 }
 
-/// 搜索窗口模式（§5.2：Floating 失焦可隐藏 / Pinned 失焦保留）。
+/// 搜索窗口模式（§5.2：Floating 失焦可隐藏 / Pinned 失焦保留 / Normal 普通窗口）。
+///
+/// 搜索页从 v2 起使用独立窗口：`Normal` 是带系统标题栏、出现在任务栏 / Dock、不置顶的
+/// 普通窗口；`Floating` / `Pinned` 保持原来的无边框置顶面板外观。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchWindowMode {
-    #[default]
     Floating,
     Pinned,
+    #[default]
+    Normal,
+}
+
+impl SearchWindowMode {
+    /// 是否使用系统标题栏与边框。
+    pub fn decorated(self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    /// 是否置顶（普通窗口不置顶，可以被其他应用盖住）。
+    pub fn always_on_top(self) -> bool {
+        !matches!(self, Self::Normal)
+    }
+
+    /// 是否在任务栏 / Dock 中显示。
+    pub fn in_taskbar(self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    /// 失焦时是否收起。
+    pub fn hide_on_blur(self) -> bool {
+        matches!(self, Self::Floating)
+    }
+
+    /// 切换到下一个模式（状态栏胶囊点击时的循环顺序）。
+    pub fn next(self) -> Self {
+        match self {
+            Self::Floating => Self::Pinned,
+            Self::Pinned => Self::Normal,
+            Self::Normal => Self::Floating,
+        }
+    }
+
+    /// 界面上显示的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Floating => "浮动",
+            Self::Pinned => "固定",
+            Self::Normal => "普通",
+        }
+    }
 }
 
 /// 窗口偏好。
@@ -127,7 +171,7 @@ pub struct SavedSearch {
     pub case_sensitive: bool,
 }
 
-/// 搜索设置（version 1）。
+/// 搜索设置（version 2）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchSettings {
@@ -291,7 +335,10 @@ impl SearchSettings {
             if let Err(conflict) =
                 devtools_search_core::volumes::validate_new_root(&root.location, &others)
             {
-                problems.push(format!("索引根 {}：{conflict}", root.location.fallback_absolute_path.display()));
+                problems.push(format!(
+                    "索引根 {}：{conflict}",
+                    root.location.fallback_absolute_path.display()
+                ));
             }
         }
         problems
@@ -305,7 +352,7 @@ mod tests {
     #[test]
     fn defaults_match_design() {
         let s = SearchSettings::default();
-        assert_eq!(s.version, 1);
+        assert_eq!(s.version, 2);
         assert_eq!(s.debounce_ms, 100);
         assert_eq!(s.max_results, 1000);
         assert_eq!(s.history_limit, 50);
@@ -323,12 +370,22 @@ mod tests {
         assert!(s.highlight);
         assert!(s.history_enabled);
         assert!(s.persist_index);
-        assert_eq!(s.ui.window.mode, SearchWindowMode::Floating);
-        assert!(s.validate().is_empty(), "默认设置必须可保存：{:?}", s.validate());
+        assert_eq!(s.ui.window.mode, SearchWindowMode::Normal);
+        assert!(
+            s.validate().is_empty(),
+            "默认设置必须可保存：{:?}",
+            s.validate()
+        );
         #[cfg(target_os = "macos")]
         assert_eq!(
             s.exclude_patterns,
-            ["node_modules/", "target/", "DerivedData/", ".git/", "Library/"]
+            [
+                "node_modules/",
+                "target/",
+                "DerivedData/",
+                ".git/",
+                "Library/"
+            ]
         );
     }
 
@@ -352,9 +409,9 @@ mod tests {
     fn enum_layout_is_snake_case() {
         let s = SearchSettings::default();
         let json = serde_json::to_string(&s).unwrap();
-        assert!(json.contains("\"mode\":\"floating\""), "{json}");
+        assert!(json.contains("\"mode\":\"normal\""), "{json}");
         assert!(json.contains("\"column\":\"path\""), "{json}");
-        assert!(json.contains("\"version\":1"));
+        assert!(json.contains("\"version\":2"));
     }
 
     #[test]
@@ -373,7 +430,10 @@ mod tests {
         let mut nested = home.clone();
         nested.relative_path = "Documents".into();
         nested.fallback_absolute_path = home.fallback_absolute_path.join("Documents");
-        s.roots.push(RootConfig { location: nested, enabled: true });
+        s.roots.push(RootConfig {
+            location: nested,
+            enabled: true,
+        });
         assert!(s.validate().iter().any(|p| p.contains("嵌套")));
     }
 }

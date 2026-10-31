@@ -994,7 +994,8 @@ fn snapshot_search_page() {
     app.sync_search_module();
     // 配置索引根并完成首次引导。
     {
-        let module = app.search.as_mut().expect("已启用搜索");
+        let handle = app.search.as_ref().expect("已启用搜索");
+        let mut module = super::lock_search(handle);
         let mut draft = module.service().settings().clone();
         draft.permission_onboarding_completed = true;
         draft.lazy_start = false;
@@ -1023,7 +1024,7 @@ fn snapshot_search_page() {
             .search
             .as_ref()
             .map(|module| {
-                module
+                super::lock_search(module)
                     .service()
                     .roots()
                     .iter()
@@ -1037,8 +1038,8 @@ fn snapshot_search_page() {
         std::thread::sleep(Duration::from_millis(10));
     }
     // 提交一次查询并等结果。
-    if let Some(module) = app.search.as_mut() {
-        module
+    if let Some(handle) = app.search.as_ref() {
+        super::lock_search(handle)
             .service_mut()
             .handle(SearchCommand::Search {
                 text: "r".into(),
@@ -1053,7 +1054,7 @@ fn snapshot_search_page() {
         let len = app
             .search
             .as_ref()
-            .map(|module| module.service().results_len())
+            .map(|module| super::lock_search(module).service().results_len())
             .unwrap_or(0);
         if len > 0 {
             break;
@@ -1061,15 +1062,17 @@ fn snapshot_search_page() {
         assert!(Instant::now() < deadline, "查询没有结果");
         std::thread::sleep(Duration::from_millis(10));
     }
-    if let Some(module) = app.search.as_mut() {
-        module.service_mut().handle(SearchCommand::LoadRows {
-            start: 0,
-            count: 128,
-        });
+    if let Some(handle) = app.search.as_ref() {
+        super::lock_search(handle)
+            .service_mut()
+            .handle(SearchCommand::LoadRows {
+                start: 0,
+                count: 128,
+            });
     }
     // 入口带来的范围胶囊（模拟快捷面板选中文件夹后打开搜索）。
-    if let Some(module) = app.search.as_mut() {
-        module.on_shown(Some(devtools_search::SearchOptions {
+    if let Some(handle) = app.search.as_ref() {
+        super::lock_search(handle).on_shown(Some(devtools_search::SearchOptions {
             query: String::new(),
             selected_paths: vec![root.path().to_path_buf()],
             query_is_literal: false,
@@ -1101,7 +1104,7 @@ fn snapshot_search_page() {
             .state()
             .search
             .as_ref()
-            .map(|module| module.service().results_len())
+            .map(|module| super::lock_search(module).service().results_len())
             .unwrap_or(0)
             > 0;
         if has_rows {
@@ -1114,8 +1117,8 @@ fn snapshot_search_page() {
     save(&mut harness, "search-page");
 
     // 模块内的设置页。
-    if let Some(module) = harness.state_mut().search.as_mut() {
-        module.show_settings();
+    if let Some(handle) = harness.state_mut().search.as_ref() {
+        super::lock_search(handle).show_settings();
     }
     harness.run_steps(4);
     save(&mut harness, "search-settings");
@@ -1186,7 +1189,8 @@ fn snapshot_search_empty() {
     app.settings.search_enabled = true;
     app.sync_search_module();
     // 完成引导但保持惰性启动：空态显示"索引尚未建立 + 立即建立索引"。
-    if let Some(module) = app.search.as_mut() {
+    if let Some(handle) = app.search.as_ref() {
+        let mut module = super::lock_search(handle);
         let mut draft = module.service().settings().clone();
         draft.permission_onboarding_completed = true;
         draft.lazy_start = true;

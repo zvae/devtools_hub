@@ -83,14 +83,10 @@ pub fn show(
     let available = ui.available_width().max(360.0);
     let widths = column_widths(view, available);
 
-    // 空态：不画表头，直接给引导（大图标 + 说明 + 主按钮）。
+    // 表头始终显示（没有结果时不抽走表头和底部状态栏，避免搜索过程中布局闪动）。
+    // 没有行时也一直显示空态（搜索中换成"搜索中…"），不要在"空白表格"和"空态"之间来回切换。
     let rows = service.results_len();
-    if view.total == 0 && !view.searching {
-        if empty_state(ui, view, service, &palette) {
-            action.start_indexing = true;
-        }
-        return action;
-    }
+    let empty = rows == 0 && view.total == 0;
 
     // 表头。
     let (head_rect, _) = ui.allocate_exact_size(
@@ -198,6 +194,13 @@ pub fn show(
         Stroke::new(1.0, palette.border.gamma_multiply(0.55)),
     );
 
+    if empty {
+        if empty_state(ui, view, service, &palette) {
+            action.start_indexing = true;
+        }
+        return action;
+    }
+
     keyboard(ui, view, service, rows, &mut action);
 
     // 结果区：行高 30、每行是一张圆角卡片。
@@ -227,18 +230,21 @@ pub fn show(
                 egui::pos2(rect.left() + 6.0, rect.top()),
                 egui::pos2(rect.right() - 6.0, rect.bottom()),
             );
-            let (fill, stroke) = if selected {
-                (
-                    palette.card,
-                    Stroke::new(1.5, palette.accent.gamma_multiply(0.85)),
-                )
-            } else if response.hovered() {
-                (palette.card_hover, Stroke::new(1.0, palette.card_stroke))
-            } else {
-                (palette.card, Stroke::new(1.0, palette.card_stroke))
-            };
-            ui.painter()
-                .add(theme::continuous_rect(card, 10.0, fill, stroke));
+            // 行数据还没加载时留空，不画只有边框的空卡片（搜索过程中会闪一下）。
+            if data.is_some() {
+                let (fill, stroke) = if selected {
+                    (
+                        palette.card,
+                        Stroke::new(1.5, palette.accent.gamma_multiply(0.85)),
+                    )
+                } else if response.hovered() {
+                    (palette.card_hover, Stroke::new(1.0, palette.card_stroke))
+                } else {
+                    (palette.card, Stroke::new(1.0, palette.card_stroke))
+                };
+                ui.painter()
+                    .add(theme::continuous_rect(card, 10.0, fill, stroke));
+            }
             match data {
                 Some(row) if !row.missing => {
                     // 原生图标：按类型缓存，取不到就画矢量图标。
@@ -664,7 +670,8 @@ fn join_paths(view: &ViewState, rows: usize) -> String {
 /// 空态：大图标 + 标题 + 说明；索引未建立时给出主按钮。返回是否点了"建立索引"。
 fn empty_state(ui: &mut Ui, view: &ViewState, service: &Service, palette: &Palette) -> bool {
     let mut start_indexing = false;
-    let height = ui.available_height().max(120.0);
+    // 给底部状态栏留出位置：空态只在结果区居中，状态栏始终可见。
+    let height = (ui.available_height() - theme::STATUS_HEIGHT - 2.0).max(120.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     let center = rect.center() - Vec2::new(0.0, 18.0);
 
@@ -682,6 +689,8 @@ fn empty_state(ui: &mut Ui, view: &ViewState, service: &Service, palette: &Palet
 
     let (title, hint) = if let Some(error) = &view.error {
         ("查询有误", error.clone())
+    } else if view.searching {
+        ("搜索中…", "正在查找匹配的文件".to_string())
     } else if view.query.trim().is_empty() {
         match view.lifecycle {
             Lifecycle::Dormant => (

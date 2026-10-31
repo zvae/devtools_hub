@@ -25,6 +25,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 
+use devtools_search::FolderPurpose;
+
 use super::{panel, workspace};
 
 /// 贴图窗口是否支持调整不透明度。
@@ -414,17 +416,17 @@ pub fn dialog_open() -> bool {
     DIALOG_OPEN.load(Ordering::Relaxed)
 }
 
-/// 选择文件夹（文件搜索模块的索引根）。取消返回 `Ok(None)`，失败返回带诊断的错误。
+/// 选择文件夹。取消返回 `Ok(None)`，失败返回带诊断的错误。
 ///
-/// 与 [`save_dialog`] 一样：先激活本应用（对话框要能接收键盘输入），弹出期间把浮层降到普通层级，
-/// 关闭后恢复，最后把焦点还给之前的应用。
-pub fn pick_folder(initial: Option<&std::path::Path>) -> Result<Option<std::path::PathBuf>, String> {
+/// 先激活本应用（对话框要能接收键盘输入），弹出期间把浮层降到普通层级，关闭后恢复。
+/// 搜索页现在是普通窗口，对话框关闭后焦点自然回到它，不再还给之前的应用。
+pub fn pick_folder(
+    initial: Option<&std::path::Path>,
+    purpose: FolderPurpose,
+) -> Result<Option<std::path::PathBuf>, String> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Err("不在主线程，无法打开文件夹选择对话框".into());
     };
-    if let Some(app) = workspace::frontmost_other_app() {
-        PREVIOUS_APP.with(|prev| *prev.borrow_mut() = Some(app));
-    }
     #[allow(deprecated)]
     NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
     let dialog = NSOpenPanel::openPanel(mtm);
@@ -433,7 +435,7 @@ pub fn pick_folder(initial: Option<&std::path::Path>) -> Result<Option<std::path
     dialog.setAllowsMultipleSelection(false);
     dialog.setCanCreateDirectories(true);
     dialog.setResolvesAliases(true);
-    dialog.setMessage(Some(&NSString::from_str("选择要建立索引的文件夹")));
+    dialog.setMessage(Some(&NSString::from_str(purpose.message())));
     dialog.setPrompt(Some(&NSString::from_str("选择")));
     if let Some(url) = initial
         .and_then(|dir| dir.to_str())
@@ -451,7 +453,6 @@ pub fn pick_folder(initial: Option<&std::path::Path>) -> Result<Option<std::path
         .flatten()
         .and_then(|url| url.path())
         .map(|path| std::path::PathBuf::from(path.to_string()));
-    restore_previous_app();
     Ok(path)
 }
 

@@ -106,6 +106,4 @@ pub enum Anchor {
     Placement(Placement),
     /// 托盘 / 菜单栏图标旁边（点击图标）。macOS 直接读取状态栏窗口的位置，可以不带区域。
     StatusItem(Option<TrayRect>),
-    /// 屏幕正中央：水平、垂直都居中（搜索页这类普通窗口用）。
-    Center,
 }

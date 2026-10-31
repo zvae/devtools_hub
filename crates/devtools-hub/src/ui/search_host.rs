@@ -33,8 +33,12 @@ impl SystemModalGuard for ModalGuard {
 }
 
 impl HostServices for HostBridge {
-    fn pick_folder(&self, initial: Option<&Path>) -> Result<Option<PathBuf>, String> {
-        floating::pick_folder(initial)
+    fn pick_folder(
+        &self,
+        initial: Option<&Path>,
+        purpose: devtools_search::FolderPurpose,
+    ) -> Result<Option<PathBuf>, String> {
+        floating::pick_folder(initial, purpose)
     }
 
     fn begin_system_modal(&self) -> Option<Box<dyn SystemModalGuard>> {
@@ -65,6 +69,8 @@ impl HostServices for HostBridge {
     }
 
     fn start_window_drag(&self) -> bool {
-        panel::start_drag()
+        // 搜索页现在是独立窗口：由模块对自己的视口发 `StartDrag`，
+        // 不能再拖隐藏着的剪贴板面板（尤其是普通窗口已经有系统标题栏）。
+        false
     }
 }

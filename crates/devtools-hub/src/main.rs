@@ -217,6 +217,18 @@ fn main() -> anyhow::Result<()> {
     // 托盘退出、更新重启都先正常结束事件循环（搜索模块已在 `on_exit` 里有界停止），
     // 更新重启在这里重新拉起新版本（§4.6）。
     update::relaunch_if_pending();
+    // macOS：输入法 / objc 的线程局部析构在进程退出时会 panic
+    // （fatal runtime error: thread local panicked on drop）。此时需要保存的状态、
+    // 搜索线程的停止和更新重启的子进程都已经处理完，直接结束进程，跳过这些析构。
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn _exit(status: i32) -> !;
+        }
+        // SAFETY: 只结束当前进程，不再执行任何析构 / atexit。
+        unsafe { _exit(0) }
+    }
+    #[cfg(not(target_os = "macos"))]
     Ok(())
 }
 
