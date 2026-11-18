@@ -29,6 +29,11 @@ pub struct CodeStyles {
 }
 
 impl CodeStyles {
+    /// 隐藏面板后释放已解析的富文本样式。
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
+
     /// 富文本条目的代码样式（只解析一次，不是代码时也缓存为 `None`）。
     pub fn get(&mut self, store: &Store, item: &ClipItem) -> Option<Arc<Vec<StyledRun>>> {
         if item.kind != ContentKind::RichText {

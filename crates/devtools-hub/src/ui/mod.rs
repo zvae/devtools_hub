@@ -162,6 +162,9 @@ pub struct HubApp {
     backdrop: Backdrop,
     /// 栏的液态玻璃效果（需要 eframe 的 wgpu 渲染器，离屏测试里没有）。
     liquid: Option<LiquidGlass>,
+    /// 隐藏满 30 秒后释放面板专属缓存；不周期唤醒已经清理的后台窗口。
+    panel_hidden_since: Option<Instant>,
+    panel_resources_released: bool,
     /// 第一帧之后需要把被 eframe 自动显示的窗口收起来。
     startup_hide_pending: bool,
     /// 在面板上关掉了提示的新版本（本次运行不再在面板上提示，菜单栏和设置页照常显示）。
@@ -311,6 +314,8 @@ impl HubApp {
             just_closed_dialog: false,
             backdrop: Backdrop::Opaque,
             liquid: None,
+            panel_hidden_since: None,
+            panel_resources_released: false,
             startup_hide_pending: false,
             update_dismissed: None,
             snip: None,
@@ -760,6 +765,45 @@ impl HubApp {
         self.cancel_hotkey_recording();
     }
 
+    /// 隐藏窗口只执行 logic，不会提交 egui 的纹理释放队列，所以 GPU 缓存也要显式释放。
+    fn release_idle_panel_resources(
+        &mut self,
+        visible: bool,
+        state: Option<&eframe::egui_wgpu::RenderState>,
+    ) {
+        if visible {
+            self.panel_hidden_since = None;
+            self.panel_resources_released = false;
+            return;
+        }
+        if self.panel_resources_released {
+            return;
+        }
+        let since = *self.panel_hidden_since.get_or_insert_with(Instant::now);
+        let remaining = Duration::from_secs(30).saturating_sub(since.elapsed());
+        if !remaining.is_zero() {
+            self.ctx.request_repaint_after(remaining);
+            return;
+        }
+        let ids = self
+            .textures
+            .clear()
+            .into_iter()
+            .chain(self.app_icons.clear());
+        if let Some(state) = state {
+            let mut renderer = state.renderer.write();
+            for id in ids {
+                renderer.free_texture(&id);
+            }
+        }
+        if let Some(liquid) = &self.liquid {
+            liquid.release_targets();
+        }
+        self.code.clear();
+        self.panel.release_preview();
+        self.panel_resources_released = true;
+    }
+
     /// 设置变化后：同步给后台线程和托盘菜单，并写入设置文件。
     fn persist_settings(&mut self) {
         self.shared.apply_settings(&self.settings);
@@ -1046,10 +1090,11 @@ impl HubApp {
 
 impl eframe::App for HubApp {
     /// 每帧绘制前先处理后台线程发来的事件。
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.check_snip_rescued();
         self.handle_events();
         self.poll_search();
+        self.release_idle_panel_resources(native_panel::is_visible(), frame.wgpu_render_state());
     }
 
     /// 退出前：保存搜索窗口尺寸并停止索引（§4.6：托盘退出、更新重启都走这里）。

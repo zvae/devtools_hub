@@ -182,14 +182,36 @@ impl Face {
     }
 }
 
-/// 字体文件只读取一次并常驻内存（字体在程序整个生命周期内都要用），多个字体族共享同一份数据。
+/// 字体文件只映射一次，多个字面共享映射；实际访问到的页才会驻留，不复制整个 TTC。
+/// egui 的 FontData 只接受静态切片或 Vec，因此映射与文件句柄保留到进程结束。
 fn read_font_file(path: &Path) -> Option<&'static [u8]> {
     static FILES: Mutex<BTreeMap<PathBuf, &'static [u8]>> = Mutex::new(BTreeMap::new());
     let mut files = FILES.lock().unwrap();
     if let Some(bytes) = files.get(path) {
         return Some(bytes);
     }
-    let bytes: &'static [u8] = Box::leak(std::fs::read(path).ok()?.into_boxed_slice());
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // 保留句柄期间只允许其他进程读取，防止映射中的字体被写入或截断。
+        const FILE_SHARE_READ: u32 = 1;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    let bytes: &'static [u8] = match options.open(path).and_then(|file| {
+        // SAFETY: macOS 的候选都是系统字体，运行期间不会修改；Windows 的文件句柄
+        // 禁止共享写入 / 删除，且与只读映射一起保留，保证切片有效期间底层数据不变。
+        let mapping = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        Ok((file, mapping))
+    }) {
+        Ok(mapped) => &Box::leak(Box::new(mapped)).1,
+        Err(err) => {
+            // 映射不可用时保持原有字体兼容性，退回一次性读取。
+            tracing::debug!("字体映射失败，退回读取 {}：{err}", path.display());
+            Box::leak(std::fs::read(path).ok()?.into_boxed_slice())
+        }
+    };
     files.insert(path.to_path_buf(), bytes);
     Some(bytes)
 }

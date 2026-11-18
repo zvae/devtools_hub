@@ -9,6 +9,7 @@ version.workspace = true
 
 [dependencies]
 egui.workspace = true
+memmap2.workspace = true
 # 液态玻璃栏（`liquid_glass`）借 eframe 的 wgpu 渲染器把内容渲染到离屏纹理再模糊。
 eframe.workspace = true
 tracing.workspace = true

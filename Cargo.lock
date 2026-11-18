@@ -997,6 +997,7 @@ version = "0.1.6"
 dependencies = [
  "eframe",
  "egui",
+ "memmap2",
  "tracing",
 ]
 

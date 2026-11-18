@@ -379,6 +379,70 @@ fn snapshot_glass_header() {
     }
 }
 
+/// 使用真实玻璃管线验证：闲置释放纹理后重新显示，画面与释放前一致。
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_glass_resources_rebuild() {
+    use eframe::egui_wgpu::RendererOptions;
+    use egui_kittest::wgpu::{create_render_state, default_wgpu_setup, WgpuTestRenderer};
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(&mut Store::open(dir.path()).unwrap());
+    let settings = Settings::default();
+    let state = create_render_state(default_wgpu_setup(), RendererOptions::PREDICTABLE);
+    let mut app = HubApp::build(
+        egui::Context::default(),
+        Shared::new(&settings),
+        Store::open(dir.path()).unwrap(),
+        dir.path().to_path_buf(),
+        settings,
+    );
+    app.liquid = Some(super::LiquidGlass::new(&state));
+    app.accessibility_ok = true;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(380.0, 640.0))
+        .with_pixels_per_point(2.0)
+        .renderer(WgpuTestRenderer::from_render_state(state.clone()))
+        .build_ui_state(|ui, app: &mut HubApp| app.draw(ui), app);
+    style::install(&harness.ctx);
+    harness.ctx.set_theme(egui::Theme::Dark);
+    harness.state_mut().ctx = harness.ctx.clone();
+    harness.state_mut().panel.reset_for_show();
+    harness.run_steps(4);
+    let before = harness.render().unwrap();
+    let app = harness.state_mut();
+    let image_id = app
+        .panel
+        .items
+        .iter()
+        .find(|item| item.kind == ContentKind::Image)
+        .unwrap()
+        .id;
+    let texture_id = app
+        .textures
+        .get(&app.ctx, &app.store, image_id)
+        .unwrap()
+        .id();
+    assert!(state.renderer.read().texture(&texture_id).is_some());
+    // 隐藏未满 30 秒应保留缓存；超过阈值后，即使没有绘制帧也要释放 GPU 纹理。
+    app.release_idle_panel_resources(false, Some(&state));
+    assert!(!app.panel_resources_released);
+    assert!(state.renderer.read().texture(&texture_id).is_some());
+    app.panel_hidden_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+    app.release_idle_panel_resources(false, Some(&state));
+    assert!(app.panel_resources_released);
+    assert!(state.renderer.read().texture(&texture_id).is_none());
+    app.release_idle_panel_resources(false, Some(&state));
+    app.release_idle_panel_resources(true, Some(&state));
+    assert!(!app.panel_resources_released);
+    harness.run_steps(4);
+    let after = harness.render().unwrap();
+    assert_eq!(before, after, "释放玻璃纹理后重建的画面应保持一致");
+    after
+        .save(output_dir().join("glass-resources-rebuilt.png"))
+        .unwrap();
+}
+
 /// 条目与分类标签的右键菜单是原生菜单，测试里不弹出，只检查菜单内容和选中后的操作。
 #[test]
 fn context_menu_entries() {

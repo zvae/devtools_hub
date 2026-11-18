@@ -186,8 +186,29 @@ fn color_pass<'a>(
 }
 
 impl LiquidGlass {
-    /// 编译着色器、创建管线，放进渲染器的回调资源。
+    /// 只保留渲染状态，首次捕获背景时才编译着色器、创建管线。
     pub fn new(state: &egui_wgpu::RenderState) -> Self {
+        Self {
+            state: state.clone(),
+        }
+    }
+
+    /// 释放大块离屏纹理及引用它们的绑定组，保留管线供下次打开时复用。
+    pub fn release_targets(&self) {
+        if let Some(resources) = self
+            .state
+            .renderer
+            .write()
+            .callback_resources
+            .get_mut::<Resources>()
+        {
+            resources.slots.clear();
+            resources.targets = None;
+        }
+    }
+
+    fn create_resources(&self) -> Resources {
+        let state = &self.state;
         let device = &state.device;
         let format = state.target_format;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -237,7 +258,7 @@ impl LiquidGlass {
                 mapped_at_creation: false,
             })
         });
-        state.renderer.write().callback_resources.insert(Resources {
+        Resources {
             glass,
             glass_layout,
             down,
@@ -247,9 +268,6 @@ impl LiquidGlass {
             blur_uniforms,
             targets: None,
             slots: Vec::new(),
-        });
-        Self {
-            state: state.clone(),
         }
     }
 
@@ -298,6 +316,9 @@ impl LiquidGlass {
         let device = &self.state.device;
         let queue = &self.state.queue;
         let mut renderer = self.state.renderer.write();
+        if renderer.callback_resources.get::<Resources>().is_none() {
+            renderer.callback_resources.insert(self.create_resources());
+        }
         // 刚启动的几帧里字体等纹理还没上传到渲染器（eframe 在这一帧画完后才上传），
         // 用到它们的图形这一帧先不画，免得渲染器报找不到纹理。
         let primitives: Vec<_> = primitives

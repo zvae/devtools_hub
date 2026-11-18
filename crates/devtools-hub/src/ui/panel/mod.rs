@@ -128,6 +128,12 @@ pub struct PanelView {
 }
 
 impl PanelView {
+    /// 隐藏面板后释放大预览；下次显示时按当前条目重新读取。
+    pub(super) fn release_preview(&mut self) {
+        self.preview = None;
+        self.preview_open = false;
+    }
+
     /// 唤起面板时回到初始状态：清空搜索、回到“全部”、选中第一条、焦点放到搜索框。
     pub fn reset_for_show(&mut self) {
         self.query.clear();
