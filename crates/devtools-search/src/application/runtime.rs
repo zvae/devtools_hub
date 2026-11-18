@@ -3,14 +3,15 @@
 //! 线程模型：Service 在 UI 线程串行处理命令；扫描与查询跑在专用 rayon 池里，结果通过
 //! 事件通道回传。live 索引用 `RwLock` 保护，扫描完成时整体替换（epoch+1），查询只在读锁下工作。
 
-use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use devtools_search_core::ports::FsSource;
 use devtools_search_core::query::{self, Ast, EvalOptions, Term};
 use devtools_search_core::scan::{self, ExcludeSet, ScanOptions, ScanStats};
 use devtools_search_core::snapshot::{config_fingerprint, EventCheckpoint, SnapshotStore};
@@ -21,6 +22,8 @@ use devtools_search_core::{
 };
 
 use super::protocol::{Event, RootStatus, RowData, SearchResult};
+use crate::platform::fs::{self, StdFs};
+use crate::platform::watcher::{FsWatcher, WatchBatch};
 
 /// 一个根的内存槽位。
 pub struct RootSlot {
@@ -29,15 +32,24 @@ pub struct RootSlot {
     /// 根对应的绝对路径（挂载点 + 相对路径）。
     pub mount: PathBuf,
     pub index: RwLock<RootIndex>,
-    pub state: Mutex<RootState>,
-    pub scan_cancel: Mutex<Option<Arc<AtomicBool>>>,
-    pub stats: Mutex<ScanStats>,
-    pub checkpoint: Mutex<EventCheckpoint>,
-    pub from_snapshot: AtomicBool,
-    /// 监听任务的取消标志（`Some` 表示正在监听）。
-    pub watch_cancel: Mutex<Option<Arc<AtomicBool>>>,
-    /// 监听启动失败（权限 / 卷不支持）：同一次索引里不再重试。
-    pub watch_disabled: AtomicBool,
+    // 状态与任务令牌用同一把锁，旧任务退出时不能清除后来启动的任务。
+    work: Mutex<RootWork>,
+}
+
+struct RootWork {
+    state: RootState,
+    scan: Option<Arc<AtomicBool>>,
+    watch: Option<Arc<AtomicBool>>,
+    prepared_watcher: Option<FsWatcher>,
+    watch_disabled: bool,
+    stats: ScanStats,
+    from_snapshot: bool,
+}
+
+fn cancel_task(task: &mut Option<Arc<AtomicBool>>) {
+    if let Some(cancel) = task.take() {
+        cancel.store(true, Ordering::Release);
+    }
 }
 
 impl RootSlot {
@@ -47,22 +59,32 @@ impl RootSlot {
             identity,
             mount,
             index: RwLock::new(RootIndex::new(id)),
-            state: Mutex::new(RootState::Dormant),
-            scan_cancel: Mutex::new(None),
-            stats: Mutex::new(ScanStats::default()),
-            checkpoint: Mutex::new(EventCheckpoint::default()),
-            from_snapshot: AtomicBool::new(false),
-            watch_cancel: Mutex::new(None),
-            watch_disabled: AtomicBool::new(false),
+            work: Mutex::new(RootWork {
+                state: RootState::Dormant,
+                scan: None,
+                watch: None,
+                prepared_watcher: None,
+                watch_disabled: false,
+                stats: ScanStats::default(),
+                from_snapshot: false,
+            }),
         }
     }
 
     pub fn state(&self) -> RootState {
-        self.state.lock().unwrap().clone()
+        self.work.lock().unwrap().state.clone()
     }
 
-    fn set_state(&self, state: RootState) {
-        *self.state.lock().unwrap() = state;
+    pub(super) fn cancel_work(&self, state: Option<RootState>) {
+        let mut work = self.work.lock().unwrap();
+        cancel_task(&mut work.scan);
+        cancel_task(&mut work.watch);
+        if let Some(state) = state {
+            work.state = state;
+        }
+        let watcher = work.prepared_watcher.take();
+        drop(work);
+        drop(watcher);
     }
 
     pub fn revision(&self) -> u64 {
@@ -99,10 +121,12 @@ pub struct QuerySpec {
 /// 运行时。
 pub struct Runtime {
     query_pool: rayon::ThreadPool,
-    scan_pool: rayon::ThreadPool,
-    snapshot_dir: PathBuf,
+    scan_pool: Arc<rayon::ThreadPool>,
+    snapshot_pool: rayon::ThreadPool,
+    snapshots: Arc<SnapshotStore>,
+    cache_generation: Arc<AtomicU64>,
     slots: RwLock<BTreeMap<RootId, Arc<RootSlot>>>,
-    events: Mutex<Sender<Event>>,
+    events: Sender<Event>,
     repaint: Arc<dyn Fn() + Send + Sync>,
     next_id: AtomicU16,
     generation: AtomicU64,
@@ -129,20 +153,24 @@ impl Runtime {
             .thread_name(|i| format!("search-scan-{i}"))
             .build()
             .expect("扫描线程池创建失败");
+        // 单独载入快照，磁盘遍历占满扫描线程时，其他根仍能先发布上次的索引。
+        let snapshot_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .thread_name(|_| "search-snapshot".to_owned())
+            .build()
+            .expect("快照线程池创建失败");
         Self {
             query_pool,
-            scan_pool,
-            snapshot_dir,
+            scan_pool: Arc::new(scan_pool),
+            snapshot_pool,
+            snapshots: Arc::new(SnapshotStore::new(snapshot_dir)),
+            cache_generation: Arc::new(AtomicU64::new(0)),
             slots: RwLock::new(BTreeMap::new()),
-            events: Mutex::new(events),
+            events,
             repaint,
             next_id: AtomicU16::new(0),
             generation: AtomicU64::new(0),
         }
-    }
-
-    fn sender(&self) -> Option<Sender<Event>> {
-        self.events.lock().ok().map(|tx| tx.clone())
     }
 
     pub fn next_generation(&self) -> u64 {
@@ -170,7 +198,25 @@ impl Runtime {
     }
 
     pub fn remove_slot(&self, id: RootId) -> Option<Arc<RootSlot>> {
-        self.slots.write().unwrap().remove(&id)
+        let removed = self.slots.write().unwrap().remove(&id);
+        if let Some(slot) = &removed {
+            slot.cancel_work(None);
+        }
+        removed
+    }
+
+    pub fn remove_snapshot(
+        &self,
+        identity: &RootLocation,
+    ) -> Result<(), devtools_search_core::snapshot::SnapshotError> {
+        self.snapshots
+            .remove(&devtools_search_core::root_key(identity))
+    }
+
+    pub fn clear_snapshots(&self) -> Result<(), devtools_search_core::snapshot::SnapshotError> {
+        // 清理之前已在执行的扫描不能重新填回旧缓存。
+        self.cache_generation.fetch_add(1, Ordering::AcqRel);
+        self.snapshots.clean_orphans(&[])
     }
 
     /// 全部根的状态（顺序稳定按 RootId）。
@@ -181,128 +227,227 @@ impl Runtime {
             .collect()
     }
 
-    /// 开始扫描一个根：先尝试载入快照（立即可查），再全量扫描替换（§7.5 PendingValidation）。
-    pub fn spawn_scan(
-        &self,
-        slot: Arc<RootSlot>,
-        config: IndexConfig,
-        persist: bool,
-    ) -> Arc<AtomicBool> {
-        slot.watch_disabled.store(false, Ordering::Relaxed);
+    /// 已有 live 索引时直接旁路重建，只有冷启动才读快照。
+    pub fn spawn_scan(&self, slot: Arc<RootSlot>, config: &IndexConfig, persist: bool) {
         let cancel = Arc::new(AtomicBool::new(false));
-        // 同一根同一时间只允许一个扫描任务。
-        if let Some(previous) = slot.scan_cancel.lock().unwrap().replace(cancel.clone()) {
-            previous.store(true, Ordering::SeqCst);
-        }
-        let fingerprint = config_fingerprint(&config);
+        let (load_snapshot, old_watcher) = {
+            let mut work = slot.work.lock().unwrap();
+            if work.state == RootState::Offline {
+                return;
+            }
+            cancel_task(&mut work.scan);
+            cancel_task(&mut work.watch);
+            work.watch_disabled = false;
+            work.scan = Some(cancel.clone());
+            let load_snapshot = persist && slot.index.read().unwrap().is_empty();
+            work.state = if load_snapshot {
+                RootState::PendingValidation
+            } else {
+                RootState::Scanning
+            };
+            (load_snapshot, work.prepared_watcher.take())
+        };
+        drop(old_watcher);
+        let fingerprint = config_fingerprint(config);
         let excludes = ExcludeSet::compile(&config.exclude_rules, config.exclude_case_sensitive)
             .unwrap_or_else(|_| ExcludeSet::compile(&[], false).expect("空规则总是可编译"));
-        let key = devtools_search_core::root_key(&slot.identity);
-        let tx = self.sender();
+        let tx = self.events.clone();
         let repaint = self.repaint.clone();
-        let snapshot_dir = self.snapshot_dir.clone();
+        let snapshots = self.snapshots.clone();
+        let cache_generation = self.cache_generation.clone();
+        let cache_at_start = cache_generation.load(Ordering::Acquire);
         let scan_app_bundles = config.scan_app_bundles;
-        self.scan_pool.spawn({
+        let key = devtools_search_core::root_key(&slot.identity);
+        #[cfg(any(target_os = "macos", windows))]
+        let watch = config.watch;
+        let scan = {
             let slot = slot.clone();
             let cancel = cancel.clone();
-            move || {
-                let emit_roots = |slot: &RootSlot| {
-                    if let Some(tx) = &tx {
-                        let _ = tx.send(Event::Roots { roots: vec![status_of(slot)] });
+            let snapshots = snapshots.clone();
+            let key = key.clone();
+            let tx = tx.clone();
+            let repaint = repaint.clone();
+            move |loaded: Option<(EventCheckpoint, u64)>| {
+                {
+                    let mut work = slot.work.lock().unwrap();
+                    if cancel.load(Ordering::Acquire) {
+                        return;
                     }
-                    repaint();
-                };
-                // 1) 快照：立即给出可查数据。
-                slot.set_state(RootState::PendingValidation);
-                emit_roots(&slot);
-                if persist {
-                    let store = SnapshotStore::new(snapshot_dir.clone());
-                    match store.load_latest(&key) {
-                        Ok(Some(snapshot))
-                            if snapshot.identity == slot.identity
-                                && snapshot.config_fingerprint == fingerprint =>
-                        {
-                            {
-                                let mut index = slot.index.write().unwrap();
-                                *index = snapshot.index;
-                            }
-                            *slot.checkpoint.lock().unwrap() = snapshot.checkpoint;
-                            slot.from_snapshot.store(true, Ordering::Relaxed);
-                            {
-                                let mut stats = slot.stats.lock().unwrap();
-                                stats.files = slot.len();
-                                stats.dirs = 0;
-                            }
-                            slot.set_state(RootState::Ready);
-                            emit_roots(&slot);
-                        }
-                        Ok(_) => {}
-                        Err(err) => {
-                            tracing::warn!("载入快照失败（{}）：{err}", slot.mount.display())
-                        }
-                    }
+                    work.state = if work.from_snapshot {
+                        RootState::Verifying
+                    } else {
+                        RootState::Scanning
+                    };
                 }
-                if cancel.load(Ordering::SeqCst) {
-                    slot.set_state(RootState::Paused);
-                    *slot.scan_cancel.lock().unwrap() = None;
-                    emit_roots(&slot);
-                    return;
-                }
-                // 2) 全量扫描到新索引（旁路构建，完成后整体替换）。
-                slot.set_state(RootState::Scanning);
-                emit_roots(&slot);
-                let mut fresh = RootIndex::new(slot.id);
-                fresh.set_identity(slot.identity.clone());
+                emit_roots(&tx, &repaint, &slot);
+
                 let opts = ScanOptions {
                     excludes,
                     scan_app_bundles,
-                    root_device: device_of(&slot.mount),
+                    root_device: StdFs.device_of(&slot.mount),
                 };
-                let outcome = scan::scan_root(
-                    &crate::platform::fs::StdFs,
-                    &slot.mount,
-                    &opts,
-                    &cancel,
-                    &mut fresh,
-                );
-                if outcome.cancelled || cancel.load(Ordering::SeqCst) {
-                    slot.set_state(RootState::Paused);
-                    *slot.scan_cancel.lock().unwrap() = None;
-                    emit_roots(&slot);
-                    return;
-                }
-                *slot.stats.lock().unwrap() = outcome.stats;
-                slot.from_snapshot.store(false, Ordering::Relaxed);
-                {
-                    // 整体替换：分配新 epoch（§7.3：旧结果全部失效）。
-                    fresh.finish_rebuild();
-                    let mut index = slot.index.write().unwrap();
-                    *index = fresh;
-                }
-                slot.set_state(RootState::Ready);
-                *slot.scan_cancel.lock().unwrap() = None;
-                // 3) 保存快照。
-                if persist {
-                    let store = SnapshotStore::new(snapshot_dir.clone());
-                    let index = slot.index.read().unwrap();
-                    let checkpoint = slot.checkpoint.lock().unwrap().clone();
-                    if let Err(err) =
-                        store.save(&key, &index, &slot.identity, fingerprint, &checkpoint)
-                    {
-                        tracing::warn!("保存快照失败：{err}");
+                let save = |index: &RootIndex, checkpoint: &EventCheckpoint| {
+                    if persist && cache_generation.load(Ordering::Acquire) == cache_at_start {
+                        let result = snapshots.save_if(
+                            &key,
+                            index,
+                            &slot.identity,
+                            fingerprint,
+                            checkpoint,
+                            || {
+                                !cancel.load(Ordering::Acquire)
+                                    && cache_generation.load(Ordering::Acquire) == cache_at_start
+                            },
+                        );
+                        if let Err(err) = result {
+                            tracing::warn!("保存快照失败：{err}");
+                        }
+                    }
+                };
+                #[cfg(any(target_os = "macos", windows))]
+                if let Some((previous, generation)) = loaded.as_ref() {
+                    if previous.last_event_id > 0 {
+                        match replay_index(&slot, &opts, &cancel, previous, watch) {
+                            Ok((changed, checkpoint, watcher)) => {
+                                if changed {
+                                    save(&slot.index.read().unwrap(), &checkpoint);
+                                } else if checkpoint.last_event_id > previous.last_event_id {
+                                    if let Err(err) = snapshots.advance_checkpoint(
+                                        &key,
+                                        *generation,
+                                        &checkpoint,
+                                        || {
+                                            !cancel.load(Ordering::Acquire)
+                                                && cache_generation.load(Ordering::Acquire)
+                                                    == cache_at_start
+                                        },
+                                    ) {
+                                        tracing::warn!("保存事件检查点失败：{err}");
+                                    }
+                                }
+                                {
+                                    let mut work = slot.work.lock().unwrap();
+                                    if cancel.load(Ordering::Acquire) {
+                                        return;
+                                    }
+                                    work.prepared_watcher = watcher;
+                                    work.from_snapshot = false;
+                                    work.state = RootState::Ready;
+                                    work.scan = None;
+                                }
+                                tracing::debug!("已增量校验索引：{}", slot.mount.display());
+                                emit_roots(&tx, &repaint, &slot);
+                                return;
+                            }
+                            Err(err) if !cancel.load(Ordering::Acquire) => {
+                                tracing::debug!(
+                                    "增量校验不可用，扫描 {}：{err}",
+                                    slot.mount.display()
+                                );
+                            }
+                            Err(_) => return,
+                        }
                     }
                 }
-                emit_roots(&slot);
+                #[cfg(not(any(target_os = "macos", windows)))]
+                let _ = loaded;
+
+                // 记录文件读取之前的检查点。扫描期间发生的变化可在下一次启动时回放。
+                #[cfg(any(target_os = "macos", windows))]
+                let journal = if persist {
+                    crate::platform::journal::Journal::capture(&slot.mount)
+                        .inspect_err(|err| {
+                            tracing::debug!("无法获取 {} 的日志检查点：{err}", slot.mount.display());
+                        })
+                        .ok()
+                } else {
+                    None
+                };
+                let mut fresh = RootIndex::new(slot.id);
+                fresh.set_identity(slot.identity.clone());
+                let outcome = scan::scan_root(&StdFs, &slot.mount, &opts, &cancel, &mut fresh);
+                if outcome.cancelled || cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                if outcome.stats.root_failed {
+                    let mut work = slot.work.lock().unwrap();
+                    if cancel.load(Ordering::Acquire) {
+                        return;
+                    }
+                    work.scan = None;
+                    work.state = RootState::Error("无法读取索引根目录".into());
+                    drop(work);
+                    emit_roots(&tx, &repaint, &slot);
+                    return;
+                }
+                fresh.prepare_replacement(slot.id, slot.index.read().unwrap().epoch());
+                #[cfg(any(target_os = "macos", windows))]
+                let checkpoint = journal
+                    .filter(|journal| journal.still_current(&slot.mount))
+                    .map_or_else(EventCheckpoint::default, |journal| journal.checkpoint);
+                #[cfg(not(any(target_os = "macos", windows)))]
+                let checkpoint = EventCheckpoint::default();
+                save(&fresh, &checkpoint);
+                {
+                    let mut work = slot.work.lock().unwrap();
+                    if cancel.load(Ordering::Acquire) {
+                        return;
+                    }
+                    *slot.index.write().unwrap() = fresh;
+                    work.stats = outcome.stats;
+                    work.from_snapshot = false;
+                    work.state = RootState::Ready;
+                    work.scan = None;
+                }
+                emit_roots(&tx, &repaint, &slot);
             }
+        };
+        if !load_snapshot {
+            self.scan_pool.spawn_fifo(move || scan(None));
+            return;
+        }
+        let scan_pool = self.scan_pool.clone();
+        self.snapshot_pool.spawn_fifo(move || {
+            if cancel.load(Ordering::Acquire) {
+                return;
+            }
+            let checkpoint = match snapshots.load_latest(&key) {
+                Ok(Some(mut snapshot))
+                    if snapshot.identity == slot.identity
+                        && snapshot.config_fingerprint == fingerprint =>
+                {
+                    let (files, dirs) = count_visible(&snapshot.index);
+                    {
+                        let mut work = slot.work.lock().unwrap();
+                        if cancel.load(Ordering::Acquire) {
+                            return;
+                        }
+                        let mut index = slot.index.write().unwrap();
+                        snapshot.index.prepare_replacement(slot.id, index.epoch());
+                        *index = snapshot.index;
+                        work.from_snapshot = true;
+                        work.stats.files = files;
+                        work.stats.dirs = dirs;
+                        work.state = RootState::Verifying;
+                    }
+                    emit_roots(&tx, &repaint, &slot);
+                    snapshot
+                        .storage_generation
+                        .map(|generation| (snapshot.checkpoint, generation))
+                }
+                Ok(_) => None,
+                Err(err) => {
+                    tracing::warn!("载入快照失败（{}）：{err}", slot.mount.display());
+                    None
+                }
+            };
+            scan_pool.spawn_fifo(move || scan(checkpoint));
         });
-        cancel
     }
 
-    /// 取消一个根的扫描。
-    pub fn cancel_scan(&self, slot: &RootSlot) {
-        if let Some(cancel) = slot.scan_cancel.lock().unwrap().take() {
-            cancel.store(true, Ordering::SeqCst);
-        }
+    #[cfg(test)]
+    pub(super) fn spawn_test_scan(&self, task: impl FnOnce() + Send + 'static) {
+        self.scan_pool.spawn_fifo(task);
     }
 
     /// 在查询池里执行查询；完成（未取消）时发送 `SearchDone`。
@@ -314,7 +459,7 @@ impl Runtime {
         generation: u64,
         cancel: Arc<AtomicBool>,
     ) {
-        let tx = self.sender();
+        let tx = self.events.clone();
         let repaint = self.repaint.clone();
         self.query_pool.spawn(move || {
             let started = Instant::now();
@@ -322,17 +467,15 @@ impl Runtime {
             if outcome.cancelled || cancel.load(Ordering::SeqCst) {
                 return;
             }
-            if let Some(tx) = &tx {
-                let _ = tx.send(Event::SearchDone(SearchResult {
-                    session,
-                    generation,
-                    total: outcome.total,
-                    took_ms: started.elapsed().as_millis() as u64,
-                    error: outcome.error,
-                    notice: outcome.notice,
-                    ids: outcome.ids,
-                }));
-            }
+            let _ = tx.send(Event::SearchDone(SearchResult {
+                session,
+                generation,
+                total: outcome.total,
+                took_ms: started.elapsed().as_millis() as u64,
+                error: outcome.error,
+                notice: outcome.notice,
+                ids: Arc::new(outcome.ids),
+            }));
             repaint();
         });
     }
@@ -353,82 +496,60 @@ impl Runtime {
         rows
     }
 
-    /// 开始监听一个根：事件批量合并后增量更新索引（§8、§7.7）。
-    ///
-    /// 监听失败（权限、卷不支持）时把 `watch_disabled` 置位并提示，不会反复重试；
-    /// 事件溢出时把根标记为 `Dirty`，由 Service 转全量重扫。
-    pub fn spawn_watch(&self, slot: Arc<RootSlot>, excludes: ExcludeSet) {
-        if slot.watch_cancel.lock().unwrap().is_some()
-            || slot.watch_disabled.load(Ordering::Relaxed)
-        {
-            return;
-        }
+    /// 单根只允许当前监听令牌提交。同一根重建期间暂停监听。
+    pub fn spawn_watch(&self, slot: Arc<RootSlot>, excludes: ExcludeSet, scan_app_bundles: bool) {
         let cancel = Arc::new(AtomicBool::new(false));
-        *slot.watch_cancel.lock().unwrap() = Some(cancel.clone());
-        let tx = self.sender();
+        let prepared = {
+            let mut work = slot.work.lock().unwrap();
+            if work.watch.is_some() || work.watch_disabled || work.state != RootState::Ready {
+                return;
+            }
+            work.watch = Some(cancel.clone());
+            work.prepared_watcher.take()
+        };
+        let tx = self.events.clone();
         let repaint = self.repaint.clone();
-        let root = slot.mount.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("search-watch-{}", slot.id.0))
             .spawn({
                 let slot = slot.clone();
+                let cancel = cancel.clone();
                 move || {
-                    let mut watcher = match crate::platform::watcher::FsWatcher::start(&root) {
-                        Ok(watcher) => watcher,
-                        Err(err) => {
-                            tracing::warn!("无法监听 {}：{err}", root.display());
-                            slot.watch_disabled.store(true, Ordering::Relaxed);
-                            *slot.watch_cancel.lock().unwrap() = None;
-                            if let Some(tx) = &tx {
-                                let _ = tx.send(Event::Notice(format!(
-                                    "无法实时监听 {}：{err}；变更后请手动重建索引",
-                                    root.display()
-                                )));
-                            }
-                            repaint();
-                            return;
-                        }
-                    };
-                    while !cancel.load(Ordering::Relaxed) {
-                        match watcher.next_batch(Duration::from_millis(350), &cancel) {
-                            None => {}
-                            Some(crate::platform::watcher::WatchBatch::Overflow) => {
-                                tracing::info!("监听事件过多，转为全量校验：{}", root.display());
-                                slot.set_state(RootState::Dirty);
-                                emit_roots(&tx, &repaint, &slot);
-                                break;
-                            }
-                            Some(crate::platform::watcher::WatchBatch::Paths(paths)) => {
-                                if apply_watch_batch(&slot, &root, &excludes, &paths) {
-                                    emit_roots(&tx, &repaint, &slot);
-                                }
-                            }
-                        }
-                    }
-                    watcher.stop(&root);
-                    *slot.watch_cancel.lock().unwrap() = None;
+                    watch_root(
+                        &slot,
+                        excludes,
+                        scan_app_bundles,
+                        prepared,
+                        &cancel,
+                        &tx,
+                        &repaint,
+                    )
                 }
             });
-        if spawned.is_err() {
-            *slot.watch_cancel.lock().unwrap() = None;
+        if let Err(err) = spawned {
+            stop_failed_watch(&slot, &cancel, &self.events, &self.repaint, &err);
         }
     }
 
-    /// 停止监听一个根（暂停索引、隐藏页面、重建索引前调用）。
     pub fn stop_watch(&self, slot: &RootSlot) {
-        if let Some(cancel) = slot.watch_cancel.lock().unwrap().take() {
-            cancel.store(true, Ordering::SeqCst);
-        }
+        let mut work = slot.work.lock().unwrap();
+        cancel_task(&mut work.watch);
+        let watcher = work.prepared_watcher.take();
+        drop(work);
+        drop(watcher);
     }
 
-    /// 关闭：取消全部扫描任务。线程池在 Service 释放时 drop（有界阻塞）。
+    /// 取消全部扫描和监听，任务在下一个取消检查点释放根。
     pub fn shutdown(&self) {
         for slot in self.slots() {
-            if let Some(cancel) = slot.scan_cancel.lock().unwrap().take() {
-                cancel.store(true, Ordering::SeqCst);
-            }
-            self.stop_watch(&slot);
+            slot.cancel_work(None);
         }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -463,6 +584,9 @@ impl QueryOutcome {
 }
 
 fn run_query(slots: &[Arc<RootSlot>], spec: &QuerySpec, cancel: &AtomicBool) -> QueryOutcome {
+    if cancel.load(Ordering::Relaxed) {
+        return QueryOutcome::cancelled();
+    }
     // 空查询：只有"列出全部"、指定了目录范围或选了具体类型时才继续
     // （范围与类型本身就是过滤条件）。
     if spec.text.trim().is_empty()
@@ -493,90 +617,100 @@ fn run_query(slots: &[Arc<RootSlot>], spec: &QuerySpec, cancel: &AtomicBool) -> 
     }
     if let Some(scope) = &spec.scope {
         // 入口带选中的文件夹时作为 infolder 过滤（§4.5）。
-        terms.push(Ast::Term(Term::InFolder(scope.to_string_lossy().into_owned())));
+        terms.push(Ast::Term(Term::InFolder(
+            scope.to_string_lossy().into_owned(),
+        )));
     }
     let ast = if terms.len() == 1 {
         terms.pop().unwrap()
     } else {
         Ast::And(terms)
     };
-    let mut per_root: Vec<(usize, Vec<NodeId>)> = Vec::new();
-    let mut total = 0usize;
-    let mut notice: Option<String> = None;
-    for (slot_index, slot) in slots.iter().enumerate() {
-        if matches!(slot.state(), RootState::Offline | RootState::Dormant) {
-            continue;
-        }
-        let index = slot.index.read().unwrap();
-        if index.is_empty() {
-            continue;
-        }
-        let opts = EvalOptions {
-            case_sensitive: spec.case_sensitive,
-            home: spec.home.clone(),
-            root_abs: slot.mount.clone(),
-        };
-        let outcome = query::eval(&index, &ast, &opts, cancel);
-        if outcome.cancelled {
-            return QueryOutcome::cancelled();
-        }
-        if let Some(query::Notice::NotIndexed { value }) = outcome.notice {
-            notice.get_or_insert(format!("{value} 不在索引范围内，可把它添加为索引根"));
-        }
-        // 索引根节点自身不作为结果：它只是遍历起点。否则搜根目录名、或按「文件夹」
-        // 筛选时，结果里会多出一条"就是搜索范围本身"的项（Everything 也只列根下的条目）。
-        let root_node = index.root_node();
-        let matches: Vec<NodeId> = outcome
-            .matches
-            .into_iter()
-            .filter(|node| Some(*node) != root_node)
-            .collect();
-        total += matches.len();
-        per_root.push((slot_index, matches));
-    }
     let limit = if spec.max_results == 0 {
         usize::MAX
     } else {
         spec.max_results as usize
     };
-    let mut ids: Vec<ResultId> = Vec::with_capacity(total.min(limit));
-    match (spec.sort_column, spec.sort_dir) {
-        (SortColumn::Path, _) | (_, SortDir::None) => {
-            // 默认路径序：根按挂载路径稳定排序，根内按 rank（§7.9）。
-            let mut roots = per_root.clone();
-            roots.sort_by(|a, b| slots[a.0].mount.cmp(&slots[b.0].mount));
-            let mut remaining = limit;
-            'outer: for (slot_index, matches) in roots {
-                let slot = &slots[slot_index];
-                let index = slot.index.read().unwrap();
-                let (sorted, _) =
-                    query::sort_matches(&index, matches, SortColumn::Path, SortDir::None, remaining);
-                for node in sorted {
-                    ids.push(ResultId::new(slot.id, node));
-                    remaining = remaining.saturating_sub(1);
-                    if remaining == 0 {
-                        break 'outer;
-                    }
-                }
-            }
+    let path_order = spec.sort_column == SortColumn::Path || spec.sort_dir == SortDir::None;
+    let mut roots: Vec<_> = slots
+        .iter()
+        .filter(|slot| !matches!(slot.state(), RootState::Offline | RootState::Dormant))
+        .collect();
+    if path_order {
+        roots.sort_by(|a, b| a.mount.cmp(&b.mount));
+    }
+    // 查找和排序共用这一批读锁，节点编号与排序键来自同一版本。
+    let guards: Vec<_> = roots
+        .iter()
+        .map(|slot| slot.index.read().unwrap())
+        .collect();
+    let mut total = 0;
+    let mut notice = None;
+    let mut ids = Vec::new();
+    let mut all = Vec::new();
+    for (position, index) in guards.iter().enumerate() {
+        if index.is_empty() {
+            continue;
         }
-        (column, dir) => {
-            // 显式排序：跨根全局排序（同时持全部读锁，保证键读取一致）。
-            let guards: Vec<_> = slots.iter().map(|s| s.index.read().unwrap()).collect();
-            let mut all: Vec<(usize, NodeId)> = Vec::new();
-            for (slot_index, matches) in &per_root {
-                for &node in matches {
-                    all.push((*slot_index, node));
-                }
+        let slot = roots[position];
+        let opts = EvalOptions {
+            case_sensitive: spec.case_sensitive,
+            home: spec.home.clone(),
+            root_abs: slot.mount.clone(),
+        };
+        let mut matches = Vec::new();
+        let remaining = limit - ids.len();
+        let root_node = index.root_node();
+        let (root_notice, cancelled) = query::visit_matches(index, &ast, &opts, cancel, |node| {
+            if Some(node) == root_node {
+                return;
             }
-            all.sort_by(|&(sa, na), &(sb, nb)| {
-                compare_across(&guards[sa], na, &guards[sb], nb, column, dir)
-            });
+            total += 1;
+            if !path_order {
+                all.push((position, node));
+            } else if remaining > 0 {
+                matches.push(node);
+            }
+        });
+        if cancelled || cancel.load(Ordering::Relaxed) {
+            return QueryOutcome::cancelled();
+        }
+        if let Some(query::Notice::NotIndexed { value }) = root_notice {
+            notice.get_or_insert(format!("{value} 不在索引范围内，可把它添加为索引根"));
+        }
+        if !matches.is_empty() {
+            let (nodes, _) =
+                query::sort_matches(index, matches, SortColumn::Path, SortDir::None, remaining);
+            ids.extend(
+                nodes
+                    .into_iter()
+                    .map(|node| ResultId::new(slot.id, node, index.epoch())),
+            );
+        }
+    }
+
+    if !path_order {
+        let compare = |&(a, na): &(usize, NodeId), &(b, nb): &(usize, NodeId)| {
+            compare_across(
+                &guards[a],
+                na,
+                &guards[b],
+                nb,
+                spec.sort_column,
+                spec.sort_dir,
+            )
+            .then_with(|| a.cmp(&b))
+        };
+        if all.len() > limit {
+            all.select_nth_unstable_by(limit, compare);
             all.truncate(limit);
-            for (slot_index, node) in all {
-                ids.push(ResultId::new(slots[slot_index].id, node));
-            }
         }
+        all.sort_unstable_by(compare);
+        ids.reserve(all.len());
+        ids.extend(
+            all.into_iter()
+                .map(|(root, node)| ResultId::new(roots[root].id, node, guards[root].epoch())),
+        );
     }
     QueryOutcome {
         ids,
@@ -597,6 +731,15 @@ fn compare_across(
     dir: SortDir,
 ) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    if column == SortColumn::Name {
+        let order = a.sort_name(na).cmp(b.sort_name(nb));
+        let order = if dir == SortDir::Desc {
+            order.reverse()
+        } else {
+            order
+        };
+        return order.then_with(|| a.rank_of(na).cmp(&b.rank_of(nb)));
+    }
     let (ma, mb) = (a.meta(na), b.meta(nb));
     let (miss_a, miss_b) = match column {
         SortColumn::Size => (ma.size.is_none(), mb.size.is_none()),
@@ -609,11 +752,10 @@ fn compare_across(
         return missing;
     }
     let ord = match column {
-        SortColumn::Name => a.sort_name(na).cmp(b.sort_name(nb)),
         SortColumn::Size => ma.size.unwrap_or(0).cmp(&mb.size.unwrap_or(0)),
         SortColumn::Modified => ma.mtime.unwrap_or(0).cmp(&mb.mtime.unwrap_or(0)),
         SortColumn::Created => ma.btime.unwrap_or(0).cmp(&mb.btime.unwrap_or(0)),
-        SortColumn::Path => Ordering::Equal,
+        SortColumn::Name | SortColumn::Path => Ordering::Equal,
     };
     let ord = if dir == SortDir::Desc {
         ord.reverse()
@@ -641,7 +783,7 @@ fn missing_row(id: ResultId, index: u32) -> RowData {
 /// 构造一行数据（路径按父链拼接；失效节点返回占位行，§7.1）。
 fn build_row(slot: &RootSlot, index: &RootIndex, id: ResultId, display_index: u32) -> RowData {
     let node = id.node();
-    if !index.node_id_valid(node) || !index.status(node).visible() {
+    if id.epoch() != index.epoch() || !index.node_id_valid(node) || !index.status(node).visible() {
         return missing_row(id, display_index);
     }
     let mut segments: Vec<String> = Vec::new();
@@ -659,7 +801,9 @@ fn build_row(slot: &RootSlot, index: &RootIndex, id: ResultId, display_index: u3
                     index
                         .raw_name_str(cur)
                         .map(str::to_string)
-                        .unwrap_or_else(|| String::from_utf8_lossy(index.raw_name(cur)).into_owned()),
+                        .unwrap_or_else(|| {
+                            String::from_utf8_lossy(index.raw_name(cur)).into_owned()
+                        }),
                 );
                 cur = parent;
             }
@@ -694,190 +838,377 @@ fn build_row(slot: &RootSlot, index: &RootIndex, id: ResultId, display_index: u3
 }
 
 fn status_of(slot: &RootSlot) -> RootStatus {
-    let stats = slot.stats.lock().unwrap();
+    let work = slot.work.lock().unwrap();
     RootStatus {
         id: slot.id,
         path: slot.mount.clone(),
-        state: slot.state(),
-        files: stats.files,
-        dirs: stats.dirs,
-        from_snapshot: slot.from_snapshot.load(Ordering::Relaxed),
+        state: work.state.clone(),
+        files: work.stats.files,
+        dirs: work.stats.dirs,
+        from_snapshot: work.from_snapshot,
     }
 }
 
-fn device_of(path: &std::path::Path) -> Option<u64> {
-    use devtools_search_core::ports::FsSource;
-    crate::platform::fs::StdFs.device_of(path)
-}
-
-
-fn emit_roots(
-    tx: &Option<std::sync::mpsc::Sender<Event>>,
-    repaint: &Arc<dyn Fn() + Send + Sync>,
-    slot: &RootSlot,
-) {
-    if let Some(tx) = tx {
-        let _ = tx.send(Event::Roots {
-            roots: vec![status_of(slot)],
-        });
-    }
+fn emit_roots(tx: &Sender<Event>, repaint: &Arc<dyn Fn() + Send + Sync>, slot: &RootSlot) {
+    let _ = tx.send(Event::Roots {
+        roots: vec![status_of(slot)],
+    });
     repaint();
 }
 
-/// 把一批监听事件应用到索引：新增 / 更新 / 删除（整棵子树）。
-///
-/// 返回是否真的有变化（没有变化的批次不需要通知 UI 重跑查询）。
-fn apply_watch_batch(
+fn stop_failed_watch(
     slot: &RootSlot,
-    root: &Path,
-    excludes: &ExcludeSet,
+    cancel: &AtomicBool,
+    tx: &Sender<Event>,
+    repaint: &Arc<dyn Fn() + Send + Sync>,
+    err: &dyn std::fmt::Display,
+) {
+    let mut work = slot.work.lock().unwrap();
+    if cancel.load(Ordering::Acquire) {
+        return;
+    }
+    work.watch_disabled = true;
+    work.watch = None;
+    drop(work);
+    tracing::warn!("无法监听 {}：{err}", slot.mount.display());
+    let _ = tx.send(Event::Notice(format!(
+        "无法实时监听 {}：{err}。变更后请手动重建索引",
+        slot.mount.display()
+    )));
+    repaint();
+}
+
+fn watch_root(
+    slot: &RootSlot,
+    excludes: ExcludeSet,
+    scan_app_bundles: bool,
+    prepared: Option<FsWatcher>,
+    cancel: &AtomicBool,
+    tx: &Sender<Event>,
+    repaint: &Arc<dyn Fn() + Send + Sync>,
+) {
+    if cancel.load(Ordering::Acquire) {
+        return;
+    }
+    let mut watcher = match prepared {
+        Some(watcher) => watcher,
+        None => match FsWatcher::start(&slot.mount) {
+            Ok(watcher) => watcher,
+            Err(err) => return stop_failed_watch(slot, cancel, tx, repaint, &err),
+        },
+    };
+    let opts = ScanOptions {
+        excludes,
+        scan_app_bundles,
+        root_device: StdFs.device_of(&slot.mount),
+    };
+    while !cancel.load(Ordering::Acquire) {
+        let changes = match watcher.next_batch(Duration::from_millis(350), cancel) {
+            None => continue,
+            Some(WatchBatch::Paths(paths)) => collect_watch_changes(slot, &opts, &paths, cancel),
+            Some(WatchBatch::Overflow) => Err(io::Error::other("监听事件需要全量校验")),
+        };
+        let mut work = slot.work.lock().unwrap();
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
+        match changes {
+            Ok(changes) => {
+                let changed =
+                    apply_watch_batch(&mut slot.index.write().unwrap(), &mut work.stats, changes);
+                drop(work);
+                if changed {
+                    emit_roots(tx, repaint, slot);
+                }
+            }
+            Err(err) => {
+                tracing::info!("索引需要重新校验（{}）：{err}", slot.mount.display());
+                work.state = RootState::Dirty;
+                work.watch = None;
+                drop(work);
+                emit_roots(tx, repaint, slot);
+                break;
+            }
+        }
+    }
+    watcher.stop(&slot.mount);
+}
+
+#[derive(Default)]
+struct WatchChanges {
+    entries: BTreeMap<PathBuf, Option<(NodeKind, NodeMeta)>>,
+    replace_dirs: BTreeSet<PathBuf>,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn replay_index(
+    slot: &RootSlot,
+    opts: &ScanOptions,
+    cancel: &AtomicBool,
+    previous: &EventCheckpoint,
+    watch: bool,
+) -> io::Result<(bool, EventCheckpoint, Option<FsWatcher>)> {
+    // 在采集检查点之前挂实时监听，覆盖检查点与切换就绪之间的事件。
+    let watcher = if watch {
+        Some(FsWatcher::start(&slot.mount).map_err(io::Error::other)?)
+    } else {
+        None
+    };
+    let journal = crate::platform::journal::Journal::capture(&slot.mount)?;
+    let paths = journal.replay(&slot.mount, previous, cancel)?;
+    let changes = collect_changes(slot, opts, paths.into_iter(), cancel)?;
+    if !journal.still_current(&slot.mount) {
+        return Err(io::Error::other("回放期间索引根已变化"));
+    }
+    let mut work = slot.work.lock().unwrap();
+    if cancel.load(Ordering::Acquire) {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
+    let changed = apply_watch_batch(&mut slot.index.write().unwrap(), &mut work.stats, changes);
+    Ok((changed, journal.checkpoint, watcher))
+}
+
+/// 在锁外查元数据，只对新出现的目录枚举其子树。
+fn collect_watch_changes(
+    slot: &RootSlot,
+    opts: &ScanOptions,
     paths: &[PathBuf],
-) -> bool {
-    let mut changed = false;
-    {
-        let mut index = slot.index.write().unwrap();
-        let mut seen = std::collections::HashSet::new();
-        for path in paths {
-            // 事件路径偶尔是符号链接展开后的真实路径，两种都试一次。
-            let relative = match path.strip_prefix(root) {
-                Ok(relative) => relative.to_path_buf(),
-                Err(_) => match std::fs::canonicalize(path) {
-                    // canonicalize 在 Windows 上会加 `\\?\` 前缀，和简化后的根对不上，先去掉。
-                    Ok(canonical) => match crate::platform::fs::simplify(canonical).strip_prefix(root) {
-                        Ok(relative) => relative.to_path_buf(),
-                        Err(_) => {
-                            tracing::debug!("忽略根外的事件：{}", path.display());
-                            continue;
-                        }
-                    },
-                    Err(_) => continue,
-                },
-            };
-            let segments: Vec<OsString> = relative
-                .components()
-                .filter_map(|component| match component {
-                    std::path::Component::Normal(name) => Some(name.to_os_string()),
-                    _ => None,
-                })
-                .collect();
-            if segments.is_empty() {
-                continue;
-            }
-            let rel: String = segments
-                .iter()
-                .map(|segment| segment.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            if !seen.insert(rel.clone()) || is_excluded(excludes, &rel) {
-                continue;
-            }
-            let lookup: Vec<&std::ffi::OsStr> =
-                segments.iter().map(|segment| segment.as_os_str()).collect();
-            match std::fs::symlink_metadata(path) {
-                Ok(metadata) => {
-                    let kind = if metadata.is_dir() {
-                        NodeKind::Dir
-                    } else {
-                        NodeKind::File
-                    };
-                    let meta = meta_of(&metadata, kind);
-                    match index.node_at_path(&lookup) {
-                        Some(node) if index.kind(node) != kind => {
-                            // 文件 / 目录互换：整棵替换。
-                            index.mark_deleted_subtree(node);
-                            ensure_node(&mut index, root, &segments, Some((kind, meta)));
-                            changed = true;
-                        }
-                        Some(node) => {
-                            index.update_meta(node, meta);
-                            changed = true;
-                        }
-                        None => {
-                            ensure_node(&mut index, root, &segments, Some((kind, meta)));
-                            changed = true;
-                        }
-                    }
-                }
-                Err(_) => {
-                    if let Some(node) = index.node_at_path(&lookup) {
-                        index.mark_deleted_subtree(node);
-                        changed = true;
-                    }
-                }
-            }
-        }
-        if changed {
-            index.commit();
-            // 墓碑太多就压缩（压缩会换 epoch，旧结果集全部失效）。
-            if index.stale_ratio() > 0.3 {
-                index.compact();
-            }
-            let (files, dirs) = count_visible(&index);
-            drop(index);
-            let mut stats = slot.stats.lock().unwrap();
-            stats.files = files;
-            stats.dirs = dirs;
-        }
-    }
-    changed
+    cancel: &AtomicBool,
+) -> io::Result<WatchChanges> {
+    collect_changes(
+        slot,
+        opts,
+        paths.iter().cloned().map(|path| (path, false)),
+        cancel,
+    )
 }
 
-/// 路径本身或任一祖先目录被排除。
-fn is_excluded(excludes: &ExcludeSet, rel: &str) -> bool {
-    if excludes.is_excluded_path(rel) {
-        return true;
-    }
-    let mut prefix = rel;
-    while let Some(index) = prefix.rfind('/') {
-        prefix = &prefix[..index];
-        if excludes.is_excluded_dir(prefix) {
-            return true;
+fn collect_changes(
+    slot: &RootSlot,
+    opts: &ScanOptions,
+    paths: impl IntoIterator<Item = (PathBuf, bool)>,
+    cancel: &AtomicBool,
+) -> io::Result<WatchChanges> {
+    let mut relative_paths = BTreeMap::new();
+    for (path, subtree) in paths {
+        let relative = path
+            .strip_prefix(&slot.mount)
+            .ok()
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                let simple = fs::simplify(path.clone());
+                if let Ok(relative) = simple.strip_prefix(&slot.mount) {
+                    return Some(relative.to_path_buf());
+                }
+                fs::simplify(std::fs::canonicalize(simple).ok()?)
+                    .strip_prefix(&slot.mount)
+                    .ok()
+                    .map(Path::to_path_buf)
+            });
+        if let Some(relative) = relative {
+            *relative_paths.entry(relative).or_default() |= subtree;
         }
     }
-    false
-}
-
-/// 找到（必要时创建）路径对应的节点；中间的目录缺失时按磁盘元数据补齐。
-fn ensure_node(
-    index: &mut RootIndex,
-    root: &Path,
-    segments: &[OsString],
-    leaf: Option<(NodeKind, NodeMeta)>,
-) -> Option<NodeId> {
-    let mut node = index.root_node()?;
-    let mut absolute = root.to_path_buf();
-    for (position, segment) in segments.iter().enumerate() {
-        absolute.push(segment);
-        if let Some(child) = index.child_by_name(node, segment) {
-            node = child;
+    let mut changes = WatchChanges::default();
+    let mut visited_subtrees: BTreeSet<PathBuf> = BTreeSet::new();
+    for (path, recheck_subtree) in relative_paths {
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
+        if path.as_os_str().is_empty() {
+            if !slot.mount.is_dir() {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "索引根已移除"));
+            }
             continue;
         }
-        let last = position + 1 == segments.len();
-        let (kind, meta) = if last {
-            leaf.unwrap_or((NodeKind::File, NodeMeta::default()))
-        } else {
-            let meta = std::fs::symlink_metadata(&absolute)
-                .map(|metadata| meta_of(&metadata, NodeKind::Dir))
-                .unwrap_or_default();
-            (NodeKind::Dir, meta)
+        if path
+            .ancestors()
+            .any(|ancestor| visited_subtrees.contains(ancestor))
+        {
+            continue;
+        }
+        // 平台只报告子项时，从第一个未知祖先开始补齐，已有祖先不用重新 stat。
+        let candidate = {
+            let index = slot.index.read().unwrap();
+            let mut candidate = Some(path.as_path());
+            for parent in path.ancestors().skip(1) {
+                match watch_node(&index, parent) {
+                    Some(node)
+                        if index.kind(node) == NodeKind::Dir && index.status(node).visible() =>
+                    {
+                        break
+                    }
+                    Some(node) if !index.status(node).visible() => {
+                        candidate = None;
+                        break;
+                    }
+                    Some(_) => {
+                        // 交给已索引的祖先自身重新分类，避免经过符号链接或包目录。
+                        candidate = Some(parent);
+                        break;
+                    }
+                    None => candidate = Some(parent),
+                }
+            }
+            candidate.map(Path::to_path_buf)
         };
-        node = index.insert(Some(node), segment, kind, meta);
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        if changes.entries.contains_key(&candidate) || visited_subtrees.contains(&candidate) {
+            continue;
+        }
+        let absolute = slot.mount.join(&candidate);
+        let entry = match fs::entry_at(&absolute) {
+            Ok(entry) => entry,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                changes.entries.insert(candidate, None);
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        let (kind, excluded, descend) = opts.classify(&entry, &relative_text(&candidate));
+        if excluded {
+            changes.entries.insert(candidate, None);
+            continue;
+        }
+        if entry.device.is_some() && opts.root_device.is_some() && entry.device != opts.root_device
+        {
+            continue;
+        }
+        let existing_dir = descend && {
+            let index = slot.index.read().unwrap();
+            watch_node(&index, &candidate).is_some_and(|node| index.kind(node) == NodeKind::Dir)
+        };
+        let replace = existing_dir && recheck_subtree && path == candidate;
+        changes
+            .entries
+            .insert(candidate.clone(), Some((kind, entry.meta)));
+        if descend && (!existing_dir || replace) {
+            if replace {
+                changes.replace_dirs.insert(candidate.clone());
+            }
+            collect_subtree(&slot.mount, &candidate, opts, cancel, &mut changes.entries)?;
+            visited_subtrees.insert(candidate);
+        }
     }
-    Some(node)
+    Ok(changes)
 }
 
-/// 磁盘元数据 → 索引元数据（目录不记录大小）。
-fn meta_of(metadata: &std::fs::Metadata, kind: NodeKind) -> NodeMeta {
-    let to_unix = |time: std::io::Result<std::time::SystemTime>| {
-        time.ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs() as i64)
-    };
-    NodeMeta {
-        size: (kind == NodeKind::File).then(|| metadata.len()),
-        mtime: to_unix(metadata.modified()),
-        btime: to_unix(metadata.created()),
+fn relative_text(path: &Path) -> String {
+    path.iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn collect_subtree(
+    root: &Path,
+    start: &Path,
+    opts: &ScanOptions,
+    cancel: &AtomicBool,
+    changes: &mut BTreeMap<PathBuf, Option<(NodeKind, NodeMeta)>>,
+) -> io::Result<()> {
+    let mut stack = vec![start.to_path_buf()];
+    let mut entries = Vec::new();
+    while let Some(dir) = stack.pop() {
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
+        match StdFs.list_dir(&root.join(&dir), &mut entries) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                changes.insert(dir, None);
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+        for entry in &entries {
+            let path = dir.join(&entry.name);
+            let (kind, excluded, descend) = opts.classify(entry, &relative_text(&path));
+            if excluded {
+                continue;
+            }
+            changes.insert(path.clone(), Some((kind, entry.meta)));
+            if descend {
+                stack.push(path);
+            }
+        }
     }
+    Ok(())
+}
+
+fn watch_node(index: &RootIndex, path: &Path) -> Option<NodeId> {
+    path.iter().try_fold(index.root_node()?, |parent, name| {
+        index.child_by_exact_name(parent, name)
+    })
+}
+
+/// 先删除，再按父节点到子节点的顺序应用插入。批内新增目录由本地表解析。
+fn apply_watch_batch(index: &mut RootIndex, stats: &mut ScanStats, changes: WatchChanges) -> bool {
+    let mut structure_changed = false;
+    let mut metadata_changed = false;
+    for (path, entry) in &changes.entries {
+        let Some(node) = watch_node(index, path) else {
+            continue;
+        };
+        if entry.is_some_and(|(kind, _)| kind == index.kind(node))
+            && !changes.replace_dirs.contains(path)
+        {
+            continue;
+        }
+        for node in index.subtree_nodes(node) {
+            if index.status(node).visible() {
+                match index.kind(node) {
+                    NodeKind::File => stats.files -= 1,
+                    NodeKind::Dir => stats.dirs -= 1,
+                }
+            }
+            index.mark_deleted(node);
+        }
+        structure_changed = true;
+    }
+    let mut new_dirs = BTreeMap::new();
+    for (path, entry) in changes.entries {
+        let Some((kind, meta)) = entry else {
+            continue;
+        };
+        let Some(parent_path) = path.parent() else {
+            continue;
+        };
+        let Some(parent) = new_dirs
+            .get(parent_path)
+            .copied()
+            .or_else(|| watch_node(index, parent_path))
+            .filter(|&id| index.kind(id) == NodeKind::Dir && index.status(id).visible())
+        else {
+            continue;
+        };
+        if let Some(node) = index.child_by_exact_name(parent, path.file_name().unwrap()) {
+            if index.meta(node) != meta {
+                index.update_meta(node, meta);
+                metadata_changed = true;
+            }
+            continue;
+        }
+        let node = index.insert(Some(parent), path.file_name().unwrap(), kind, meta);
+        match kind {
+            NodeKind::File => stats.files += 1,
+            NodeKind::Dir => {
+                stats.dirs += 1;
+                new_dirs.insert(path, node);
+            }
+        }
+        structure_changed = true;
+    }
+    if structure_changed {
+        if index.stale_ratio() <= 0.3 || !index.compact() {
+            index.commit();
+        }
+    } else if metadata_changed {
+        index.commit_metadata();
+    }
+    structure_changed || metadata_changed
 }
 
 /// 统计可见的文件 / 目录数量（状态栏显示用）。
@@ -895,4 +1226,138 @@ fn count_visible(index: &RootIndex) -> (u32, u32) {
         }
     }
     (files, dirs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devtools_search_core::VolumeId;
+    use std::ffi::OsStr;
+
+    fn root(id: u16, mount: PathBuf) -> RootSlot {
+        let identity = RootLocation {
+            volume_id: VolumeId::fallback_absolute(&mount),
+            relative_path: String::new(),
+            fallback_absolute_path: mount.clone(),
+        };
+        RootSlot::new(RootId(id), identity, mount)
+    }
+
+    #[test]
+    fn watcher_batch_updates_siblings_and_preserves_structure_for_metadata_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("nested");
+        std::fs::create_dir(&folder).unwrap();
+        let slot = root(0, dir.path().to_path_buf());
+        let opts = ScanOptions {
+            excludes: ExcludeSet::compile(&[], false).unwrap(),
+            scan_app_bundles: false,
+            root_device: StdFs.device_of(dir.path()),
+        };
+        let cancel = AtomicBool::new(false);
+        let mut stats = scan::scan_root(
+            &StdFs,
+            dir.path(),
+            &opts,
+            &cancel,
+            &mut slot.index.write().unwrap(),
+        )
+        .stats;
+        assert_eq!(stats.dirs, 1);
+
+        let paths: Vec<_> = (0..6)
+            .map(|i| folder.join(format!("file-{i}.txt")))
+            .collect();
+        for path in &paths {
+            std::fs::write(path, "x").unwrap();
+        }
+        let changes = collect_watch_changes(&slot, &opts, &paths, &cancel).unwrap();
+        assert!(apply_watch_batch(
+            &mut slot.index.write().unwrap(),
+            &mut stats,
+            changes
+        ));
+        let (epoch, revision, len) = slot.fingerprint();
+        assert_eq!((stats.dirs, stats.files, len), (1, 6, 8));
+
+        std::fs::write(&paths[0], "changed size").unwrap();
+        let changes = collect_watch_changes(&slot, &opts, &paths[..1], &cancel).unwrap();
+        assert!(apply_watch_batch(
+            &mut slot.index.write().unwrap(),
+            &mut stats,
+            changes
+        ));
+        assert_eq!(slot.fingerprint(), (epoch, revision + 1, len));
+
+        // 只报告移入的目录路径时，也能补上它已存在的文件。
+        let incoming = dir.path().join("incoming");
+        std::fs::create_dir(&incoming).unwrap();
+        std::fs::write(incoming.join("new.txt"), "x").unwrap();
+        let changes = collect_watch_changes(&slot, &opts, &[incoming], &cancel).unwrap();
+        assert!(apply_watch_batch(
+            &mut slot.index.write().unwrap(),
+            &mut stats,
+            changes
+        ));
+        assert_eq!((stats.dirs, stats.files), (2, 7));
+    }
+
+    #[test]
+    fn explicit_top_k_is_global_and_puts_unknown_sizes_last() {
+        let roots: Vec<_> = [
+            (0, Some(3)),
+            (1, Some(5)),
+            (2, Some(5)),
+            (3, None),
+            (4, Some(1)),
+        ]
+        .into_iter()
+        .map(|(id, size)| {
+            let slot = root(id, PathBuf::from(format!("root-{id}")));
+            {
+                let mut index = slot.index.write().unwrap();
+                let root =
+                    index.insert(None, OsStr::new("root"), NodeKind::Dir, NodeMeta::default());
+                index.insert(
+                    Some(root),
+                    OsStr::new("file"),
+                    NodeKind::File,
+                    NodeMeta {
+                        size,
+                        ..NodeMeta::default()
+                    },
+                );
+                index.commit();
+            }
+            slot.work.lock().unwrap().state = RootState::Ready;
+            Arc::new(slot)
+        })
+        .collect();
+        let mut spec = QuerySpec {
+            text: "file".into(),
+            literal: true,
+            case_sensitive: false,
+            scope: None,
+            kind: FileKind::All,
+            max_results: 3,
+            show_all_on_empty: true,
+            sort_column: SortColumn::Size,
+            sort_dir: SortDir::Desc,
+            home: None,
+        };
+        let cancel = AtomicBool::new(false);
+        let result = run_query(&roots, &spec, &cancel);
+        assert_eq!(result.total, 5);
+        assert_eq!(
+            result.ids.iter().map(|id| id.root().0).collect::<Vec<_>>(),
+            [1, 2, 0]
+        );
+        spec.sort_dir = SortDir::Asc;
+        spec.max_results = 0;
+        let result = run_query(&roots, &spec, &cancel);
+        assert_eq!(
+            result.ids.iter().map(|id| id.root().0).collect::<Vec<_>>(),
+            [4, 0, 1, 2, 3]
+        );
+    }
 }

@@ -6,7 +6,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, TrySendError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -28,20 +29,29 @@ pub enum WatchBatch {
 pub struct FsWatcher {
     watcher: RecommendedWatcher,
     rx: Receiver<notify::Result<notify::Event>>,
+    overflow: Arc<AtomicBool>,
 }
 
 impl FsWatcher {
     /// 开始递归监听一个目录。失败时返回原因（权限、卷已拔出等）。
     pub fn start(root: &Path) -> notify::Result<Self> {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(MAX_BATCH);
+        let overflow = Arc::new(AtomicBool::new(false));
+        let overflow_in_callback = overflow.clone();
         let mut watcher = RecommendedWatcher::new(
             move |result| {
-                let _ = tx.send(result);
+                if let Err(TrySendError::Full(_)) = tx.try_send(result) {
+                    overflow_in_callback.store(true, Ordering::Release);
+                }
             },
-            Config::default(),
+            Config::default().with_follow_symlinks(false),
         )?;
         watcher.watch(root, RecursiveMode::Recursive)?;
-        Ok(Self { watcher, rx })
+        Ok(Self {
+            watcher,
+            rx,
+            overflow,
+        })
     }
 
     /// 停止监听（卷拔出 / 重建索引前调用）。
@@ -57,9 +67,16 @@ impl FsWatcher {
     ) -> Option<WatchBatch> {
         let mut paths = Vec::new();
         match self.rx.recv_timeout(IDLE_POLL) {
-            Ok(Ok(event)) => collect(event, &mut paths),
+            Ok(Ok(event)) => {
+                if !collect(event, &mut paths) {
+                    return Some(WatchBatch::Overflow);
+                }
+            }
             Ok(Err(err)) => {
                 tracing::warn!("文件监听出错：{err}");
+                return Some(WatchBatch::Overflow);
+            }
+            Err(RecvTimeoutError::Timeout) if self.overflow.load(Ordering::Acquire) => {
                 return Some(WatchBatch::Overflow);
             }
             Err(RecvTimeoutError::Timeout) => return None,
@@ -69,8 +86,7 @@ impl FsWatcher {
         while !cancel.load(Ordering::Relaxed) && Instant::now() < deadline {
             match self.rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(Ok(event)) => {
-                    collect(event, &mut paths);
-                    if paths.len() > MAX_BATCH {
+                    if !collect(event, &mut paths) || self.overflow.load(Ordering::Acquire) {
                         return Some(WatchBatch::Overflow);
                     }
                 }
@@ -82,7 +98,9 @@ impl FsWatcher {
                 Err(RecvTimeoutError::Disconnected) => return Some(WatchBatch::Overflow),
             }
         }
-        if paths.is_empty() {
+        if self.overflow.load(Ordering::Acquire) {
+            Some(WatchBatch::Overflow)
+        } else if paths.is_empty() || cancel.load(Ordering::Acquire) {
             None
         } else {
             Some(WatchBatch::Paths(paths))
@@ -91,11 +109,15 @@ impl FsWatcher {
 }
 
 /// 只关心"内容/结构变化"，忽略纯访问事件（读取文件不应该触发重建）。
-fn collect(event: notify::Event, out: &mut Vec<PathBuf>) {
+fn collect(event: notify::Event, out: &mut Vec<PathBuf>) -> bool {
+    if event.need_rescan() {
+        return false;
+    }
     match event.kind {
         EventKind::Access(_) => {}
         _ => out.extend(event.paths),
     }
+    out.len() <= MAX_BATCH
 }
 
 #[cfg(test)]

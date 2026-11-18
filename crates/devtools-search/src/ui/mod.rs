@@ -50,6 +50,7 @@ pub struct SearchOptions {
 pub struct SearchPoll {
     /// 窗口策略变化（切回 `Floating` 时宿主需要恢复最小尺寸与失焦策略）。
     pub policy_changed: bool,
+    pub repaint_after: Option<Duration>,
 }
 
 /// `ui()` 的结果。
@@ -258,6 +259,7 @@ pub struct SearchModule {
     last_size: [f32; 2],
     /// 第一次 `warm_up` 之后不再重复。
     warmed: bool,
+    hidden: bool,
 }
 
 impl SearchModule {
@@ -323,6 +325,7 @@ impl SearchModule {
             host,
             last_size,
             warmed: false,
+            hidden: false,
         }
     }
 
@@ -337,6 +340,7 @@ impl SearchModule {
 
     /// 窗口在宿主中显示时调用。
     pub fn on_shown(&mut self, options: Option<SearchOptions>) {
+        self.hidden = false;
         self.view.composing = false;
         self.view.focus_pending = true;
         self.host.set_search_space_behavior(true);
@@ -345,10 +349,20 @@ impl SearchModule {
         if let Some(options) = options {
             self.apply_entry(options);
         }
+        if self.service.lifecycle() != Lifecycle::AwaitingConsent
+            && self.service.settings().show_all_on_empty
+            && !self.service.has_query()
+        {
+            self.submit();
+        }
     }
 
     /// 窗口隐藏时调用。
     pub fn on_hidden(&mut self) {
+        self.hidden = true;
+        self.view.cache.release_rows();
+        self.view.icons = IconCache::default();
+        self.view.thumbs = ThumbnailCache::default();
         self.view.composing = false;
         self.view.history_open = false;
         self.host.set_search_space_behavior(false);
@@ -429,7 +443,7 @@ impl SearchModule {
                     self.view.results_stale = false;
                     // 增量应用结果集：索引更新导致的重跑只补/删变化的那几行，
                     // 不整表清空重填（否则建立索引期间表格会一直闪）。
-                    let reused = self.view.cache.apply_results(&result.ids);
+                    let reused = self.view.cache.apply_results(result.ids.clone());
                     if reused == 0 {
                         // 全新的结果集（换了查询）：选中回到第一行。
                         self.view.selected.clear();
@@ -440,10 +454,14 @@ impl SearchModule {
                         self.view.clamp_selection(result.ids.len());
                     }
                 }
-                Event::Rows { rows, .. } => {
+                Event::Rows { rows, .. } if !self.hidden => {
                     for row in rows {
                         self.view.cache.insert(row);
                     }
+                }
+                Event::Rows { .. } => {}
+                Event::RowsInvalidated { roots } => {
+                    self.view.cache.invalidate_roots(&roots);
                 }
                 Event::ResultsStale => {
                     self.view.results_stale = true;
@@ -466,6 +484,7 @@ impl SearchModule {
         }
         SearchPoll {
             policy_changed: poll.policy_changed,
+            repaint_after: poll.repaint_after,
         }
     }
 

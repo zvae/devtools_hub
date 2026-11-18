@@ -171,25 +171,42 @@ pub fn eval_compiled(
     notice: Option<Notice>,
 ) -> EvalOutcome {
     let mut matches = Vec::new();
-    let mut cancelled = false;
-    for node in 0..index.len() {
-        if (node & 0x3FF) == 0 && cancel.load(Ordering::Relaxed) {
-            cancelled = true;
-            break;
-        }
-        let node = NodeId(node);
-        if !index.status(node).visible() {
-            continue;
-        }
-        if matches_compiled(index, compiled, node) {
-            matches.push(node);
-        }
-    }
+    let cancelled = visit_compiled(index, compiled, cancel, |node| matches.push(node));
     EvalOutcome {
         matches,
         notice,
         cancelled,
     }
+}
+
+/// 逐个交付命中，调用方可按结果上限决定是否保存节点。
+pub fn visit_matches(
+    index: &RootIndex,
+    ast: &Ast,
+    opts: &EvalOptions,
+    cancel: &AtomicBool,
+    visit: impl FnMut(NodeId),
+) -> (Option<Notice>, bool) {
+    let (compiled, notice) = compile(index, ast, opts);
+    (notice, visit_compiled(index, &compiled, cancel, visit))
+}
+
+fn visit_compiled(
+    index: &RootIndex,
+    compiled: &Compiled,
+    cancel: &AtomicBool,
+    mut visit: impl FnMut(NodeId),
+) -> bool {
+    for node in 0..index.len() {
+        if (node & 0x3FF) == 0 && cancel.load(Ordering::Relaxed) {
+            return true;
+        }
+        let node = NodeId(node);
+        if index.status(node).visible() && matches_compiled(index, compiled, node) {
+            visit(node);
+        }
+    }
+    false
 }
 
 fn matches_compiled(index: &RootIndex, compiled: &Compiled, node: NodeId) -> bool {
@@ -243,14 +260,14 @@ fn matches_term(index: &RootIndex, term: &CompiledTerm, node: NodeId) -> bool {
                 return false;
             }
             let ext = file_ext(index, node);
-            ext.is_some_and(|e| exts.contains(&e))
+            ext.is_some_and(|e| exts.iter().any(|ext| ext == e))
         }
         CompiledTerm::Type(exts) => {
             if index.kind(node) != NodeKind::File {
                 return false;
             }
             let ext = file_ext(index, node);
-            ext.is_some_and(|e| exts.contains(&e))
+            ext.is_some_and(|e| exts.iter().any(|ext| ext == e))
         }
         CompiledTerm::File => index.kind(node) == NodeKind::File,
         CompiledTerm::Folder => index.kind(node) == NodeKind::Dir,
@@ -294,15 +311,15 @@ fn seg_matches(index: &RootIndex, node: NodeId, seg: &(String, bool), case: bool
 }
 
 /// 扩展名（小写、不含点）。
-fn file_ext(index: &RootIndex, node: NodeId) -> Option<String> {
+fn file_ext(index: &RootIndex, node: NodeId) -> Option<&str> {
     let name = index.match_text(node, false)?;
     let dot = name.rfind('.')?;
     let ext = &name[dot + 1..];
-    if ext.is_empty() || name.starts_with('.') && name.rfind('.') == Some(0) {
+    if ext.is_empty() || dot == 0 {
         // 隐藏文件没有扩展名（".git" 的 ext 是 None）。
         return None;
     }
-    Some(ext.to_string())
+    Some(ext)
 }
 
 /// 解析 `infolder:` / `parent:` 的目录值到索引节点。

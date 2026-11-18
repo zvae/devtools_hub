@@ -133,15 +133,28 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, service: &Service) -> StatusActio
             );
         }
         if view.total > 0 {
-            ui.label(
-                RichText::new(format!(
-                    "{} 个结果 · {} ms",
-                    theme::thousands(view.total),
-                    view.took_ms
-                ))
-                .size(theme::TEXT_HINT)
-                .color(palette.weak),
+            let count = theme::thousands(view.total);
+            let checking_snapshot = view
+                .roots
+                .iter()
+                .any(|root| root.from_snapshot && matches!(root.state, RootState::Verifying));
+            let summary = if checking_snapshot {
+                format!("{count} 个结果 · 校验中")
+            } else {
+                format!("{count} 个结果 · {} ms", view.took_ms)
+            };
+            let label = ui.label(
+                RichText::new(summary)
+                    .size(theme::TEXT_HINT)
+                    .color(palette.weak),
             );
+            if checking_snapshot {
+                label.on_hover_text(if service.settings().auto_refresh {
+                    "正在使用上次的索引，后台校验后会更新"
+                } else {
+                    "正在使用上次的索引，校验后可重新搜索"
+                });
+            }
         } else if view.searching {
             ui.label(
                 RichText::new("搜索中…")
@@ -194,6 +207,9 @@ fn aggregate(
             _ => ("没有索引根".into(), palette.faint),
         };
     }
+    if view.lifecycle == Lifecycle::Dormant {
+        return ("索引尚未载入".into(), palette.faint);
+    }
     let mut files = 0u32;
     let mut dirs = 0u32;
     let mut scanning = false;
@@ -214,6 +230,9 @@ fn aggregate(
             RootState::Paused | RootState::Dirty => paused = true,
             _ => {}
         }
+    }
+    if snapshot && (scanning || verifying) {
+        return ("使用上次索引 · 后台校验中".into(), palette.accent);
     }
     if scanning {
         return ("正在建立索引…".into(), palette.accent);

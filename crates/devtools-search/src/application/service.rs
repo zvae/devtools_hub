@@ -13,12 +13,14 @@ use std::time::{Duration, Instant};
 
 use devtools_search_core::scan::ExcludeSet;
 use devtools_search_core::volumes::{validate_new_root, RootState};
-use devtools_search_core::{root_key, RootId, RootLocation, SortColumn, VolumeId};
+use devtools_search_core::{RootId, RootLocation, SortColumn, VolumeId};
 
 use super::config;
 use super::protocol::{Command, Event, RootStatus};
 use super::runtime::{QuerySpec, RootSlot, Runtime};
-use crate::settings::{SearchSettings, SearchSettingsStore, SearchWindowMode, SETTINGS_VERSION};
+use crate::settings::{
+    SearchSettings, SearchSettingsStore, SearchWindowMode, SettingsWriter, SETTINGS_VERSION,
+};
 use crate::{FolderPurpose, HostServices};
 
 /// 索引变化之后等这么久再重跑查询。
@@ -61,12 +63,13 @@ pub struct ServicePoll {
     pub events: Vec<Event>,
     /// 窗口策略变化（UI 需要重新应用最小尺寸/失焦策略）。
     pub policy_changed: bool,
+    pub repaint_after: Option<Duration>,
 }
 
 /// 搜索服务。
 pub struct Service {
     host: Arc<dyn HostServices>,
-    store: SearchSettingsStore,
+    writer: SettingsWriter,
     settings: SearchSettings,
     read_only: bool,
     runtime: Runtime,
@@ -75,24 +78,25 @@ pub struct Service {
     session: u64,
     generation: u64,
     cancel: Arc<AtomicBool>,
-    results: Vec<devtools_search_core::ResultId>,
+    results: Arc<Vec<devtools_search_core::ResultId>>,
     last_query: Option<LastQuery>,
+    query_in_flight: bool,
     last_total: usize,
     last_took_ms: u64,
     last_error: Option<String>,
     last_notice: Option<String>,
     lifecycle: Lifecycle,
     indexed_fingerprints: BTreeMap<RootId, (u32, u64, u32)>,
+    observed_fingerprints: BTreeMap<RootId, (u32, u64, u32)>,
     /// 第一次发现索引变化的时间（用来等索引稳定下来再重查）。
     stale_since: Option<Instant>,
     /// 上一次因为索引变化重跑查询的时间（限流用）。
     last_rerun: Option<Instant>,
     /// 上次同步监听时的（排除规则, 各根状态）。没变就不要再编译一遍 glob、也不要重复挂监听。
-    watcher_sync: Option<(Vec<String>, bool, Vec<(RootId, RootState)>)>,
-    visible: bool,
+    watcher_sync: Option<(Vec<String>, bool, Vec<(RootId, RootState, u32)>)>,
+    visible: Option<bool>,
     policy_dirty: bool,
     stopped: bool,
-    started: bool,
 }
 
 impl Service {
@@ -125,7 +129,7 @@ impl Service {
         // 先装好根槽位（不扫描），让空态能显示根的形态。
         let mut service = Self {
             host,
-            store,
+            writer: SettingsWriter::new(store, settings.clone()),
             settings,
             read_only,
             runtime,
@@ -134,23 +138,25 @@ impl Service {
             session: 0,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
-            results: Vec::new(),
+            results: Arc::default(),
             last_query: None,
+            query_in_flight: false,
             last_total: 0,
             last_took_ms: 0,
             last_error: None,
             last_notice: None,
             lifecycle,
             indexed_fingerprints: BTreeMap::new(),
+            observed_fingerprints: BTreeMap::new(),
             stale_since: None,
             last_rerun: None,
             watcher_sync: None,
-            visible: false,
+            visible: None,
             policy_dirty: false,
             stopped: false,
-            started: false,
         };
-        service.sync_roots(false);
+        service.sync_roots();
+        service.emit_roots();
         let settings = service.settings.clone();
         let _ = service.tx.send(Event::SettingsLoaded {
             settings: Box::new(settings),
@@ -170,6 +176,10 @@ impl Service {
 
     pub fn lifecycle(&self) -> Lifecycle {
         self.lifecycle
+    }
+
+    pub(crate) fn has_query(&self) -> bool {
+        self.last_query.is_some()
     }
 
     pub fn results_len(&self) -> usize {
@@ -210,6 +220,11 @@ impl Service {
     /// 是否可以开始建索引（生命周期就绪且未暂停）。
     fn indexing_allowed(&self) -> bool {
         self.settings.permission_onboarding_completed && !self.settings.index_paused
+    }
+
+    fn work_allowed(&self) -> bool {
+        self.indexing_allowed()
+            && (self.visible != Some(false) || self.settings.continue_when_hidden)
     }
 
     /// 处理一条命令（串行）。
@@ -262,7 +277,12 @@ impl Service {
                 self.notice("已清空搜索历史");
             }
             Command::RememberSize { size } => {
-                if size[0] >= 800.0 && size[1] >= 480.0 && size[0] < 20_000.0 && size[1] < 20_000.0 {
+                if size != self.settings.ui.window.size
+                    && size[0] >= 800.0
+                    && size[1] >= 480.0
+                    && size[0] < 20_000.0
+                    && size[1] < 20_000.0
+                {
                     self.settings.ui.window.size = size;
                     self.persist();
                 }
@@ -276,7 +296,11 @@ impl Service {
             }
             Command::VisibilityChanged { visible } => self.set_visible(visible),
             Command::Shutdown => {
+                self.cancel.store(true, Ordering::Release);
                 self.runtime.shutdown();
+                if let Err(err) = self.writer.flush() {
+                    tracing::warn!("退出时保存搜索历史失败：{err}");
+                }
                 self.stopped = true;
                 let _ = self.tx.send(Event::Stopped);
             }
@@ -285,7 +309,6 @@ impl Service {
 
     /// 预热（§7.5）：未完成引导时只显示根状态；lazy_start 时等首次搜索再建索引。
     fn warm_up(&mut self) {
-        self.started = true;
         if self.lifecycle == Lifecycle::AwaitingConsent {
             self.emit_roots();
             return;
@@ -299,11 +322,10 @@ impl Service {
 
     /// 开始建立索引（生命周期 → Indexing，扫描全部 Dormant 的根）。
     fn start_indexing(&mut self) {
-        if !self.indexing_allowed() || self.lifecycle == Lifecycle::Indexing {
+        if !self.work_allowed() || self.lifecycle == Lifecycle::Indexing {
             return;
         }
         self.lifecycle = Lifecycle::Indexing;
-        self.sync_roots(true);
         self.rescan_all();
     }
 
@@ -322,9 +344,13 @@ impl Service {
         // 范围路径规范化（与根一致）：macOS 的 /var、/tmp 是符号链接，
         // 不规范化会和索引根的绝对路径对不上，导致"不在索引范围内"；
         // Windows 的 canonicalize 会加 `\\?\` 前缀，展示前去掉。
-        let scope = scope.map(|path| {
-            crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path))
-        });
+        let scope = if record {
+            scope.map(|path| {
+                crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path))
+            })
+        } else {
+            scope
+        };
         // 取消上一次查询（§7.10：新查询使旧任务尽快退出）。
         self.cancel.store(true, Ordering::SeqCst);
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -354,8 +380,15 @@ impl Service {
         if record {
             self.record_history(&text, scope, case_sensitive);
         }
+        let slots = self.runtime.slots();
+        self.indexed_fingerprints = slots
+            .iter()
+            .map(|slot| (slot.id, slot.fingerprint()))
+            .collect();
+        self.stale_since = None;
+        self.query_in_flight = true;
         self.runtime.spawn_query(
-            self.runtime.slots(),
+            slots,
             spec,
             self.session,
             self.generation,
@@ -365,7 +398,11 @@ impl Service {
 
     /// 历史记录（§5.4：去重、上限、开关）。
     fn record_history(&mut self, text: &str, scope: Option<PathBuf>, case_sensitive: bool) {
-        if !self.settings.history_enabled || text.trim().is_empty() {
+        if self.read_only
+            || !self.settings.history_enabled
+            || self.settings.history_limit == 0
+            || text.trim().is_empty()
+        {
             return;
         }
         let entry = crate::settings::HistoryEntry {
@@ -374,10 +411,14 @@ impl Service {
             case_sensitive,
             at: chrono::Local::now().timestamp(),
         };
-        self.settings.history.retain(|h| !(h.query == entry.query && h.scope == entry.scope));
+        self.settings
+            .history
+            .retain(|h| !(h.query == entry.query && h.scope == entry.scope));
         self.settings.history.insert(0, entry);
-        self.settings.history.truncate(self.settings.history_limit as usize);
-        self.persist();
+        self.settings
+            .history
+            .truncate(self.settings.history_limit as usize);
+        self.writer.history(&self.settings.history);
     }
 
     fn set_sort(&mut self, column: SortColumn, dir: devtools_search_core::SortDir) {
@@ -392,7 +433,13 @@ impl Service {
         self.persist();
         // 跨根排序需要按新的键重新求值（§7.9：排序状态统一归 Service）。
         if let Some(last) = self.last_query.clone() {
-            self.search(last.text, last.literal, last.case_sensitive, last.scope, false);
+            self.search(
+                last.text,
+                last.literal,
+                last.case_sensitive,
+                last.scope,
+                false,
+            );
         }
     }
 
@@ -413,7 +460,13 @@ impl Service {
         self.settings.ui.kind = kind;
         self.persist();
         match self.last_query.clone() {
-            Some(last) => self.search(last.text, last.literal, last.case_sensitive, last.scope, false),
+            Some(last) => self.search(
+                last.text,
+                last.literal,
+                last.case_sensitive,
+                last.scope,
+                false,
+            ),
             // 还没搜索过（例如刚打开就选了「图片」）：按"空关键词 + 该类型"查一次，
             // 首次搜索也会顺带把索引建起来。
             None => self.search(
@@ -426,18 +479,20 @@ impl Service {
         }
     }
 
-    fn apply_settings(&mut self, mut draft: SearchSettings) {        draft.version = SETTINGS_VERSION;
+    fn apply_settings(&mut self, mut draft: SearchSettings) {
+        draft.version = SETTINGS_VERSION;
         if self.read_only {
             let _ = self.tx.send(Event::SettingsApplied(Err(
-                "当前设置文件来自更高版本，只读模式不能修改".into()
+                "当前设置文件来自更高版本，只读模式不能修改".into(),
             )));
             return;
         }
-        if let Err(problems) = self.store.save(&draft) {
+        if let Err(problems) = self.writer.save(&draft) {
             let _ = self.tx.send(Event::SettingsApplied(Err(problems)));
             return;
         }
         let old_config = config::index_config(&self.settings);
+        let old_paused = self.settings.index_paused;
         let old_mode = self.settings.ui.window.mode;
         let old_sort = self.settings.ui.sort;
         let old_kind = self.settings.ui.kind;
@@ -447,19 +502,43 @@ impl Service {
             self.lifecycle = Lifecycle::Dormant;
         }
         let new_config = config::index_config(&self.settings);
-        let index_changed = old_config != new_config;
-        self.sync_roots(false);
-        if index_changed && self.indexing_allowed() {
+        let rules_changed = old_config.exclude_rules != new_config.exclude_rules
+            || old_config.exclude_case_sensitive != new_config.exclude_case_sensitive
+            || old_config.ignore_paths != new_config.ignore_paths
+            || old_config.scan_app_bundles != new_config.scan_app_bundles;
+        let watch_enabled = !old_config.watch && new_config.watch;
+        let roots_changed = old_config.roots != new_config.roots;
+        let new_slots = self.sync_roots();
+        if !self.indexing_allowed() {
+            if self.lifecycle == Lifecycle::Indexing {
+                self.pause_all_scans();
+            }
+        } else if !self.work_allowed() {
+            self.suspend_hidden_roots(rules_changed || watch_enabled);
+        } else if self.lifecycle == Lifecycle::Indexing {
+            if rules_changed || watch_enabled || old_paused {
+                self.rescan_all();
+            } else {
+                self.scan_slots(new_slots);
+                self.rescan_dirty();
+            }
+        } else if !self.settings.lazy_start
+            && (rules_changed || roots_changed || was_consent || old_paused)
+        {
             self.start_indexing();
-        } else if self.lifecycle == Lifecycle::Indexing && self.settings.index_paused {
-            self.pause_all_scans();
         }
         if old_mode != self.settings.ui.window.mode {
             self.policy_dirty = true;
         }
         if old_sort != self.settings.ui.sort || old_kind != self.settings.ui.kind {
             if let Some(last) = self.last_query.clone() {
-                self.search(last.text, last.literal, last.case_sensitive, last.scope, false);
+                self.search(
+                    last.text,
+                    last.literal,
+                    last.case_sensitive,
+                    last.scope,
+                    false,
+                );
             }
         }
         let settings = self.settings.clone();
@@ -493,7 +572,8 @@ impl Service {
         match result {
             Ok(Some(path)) => {
                 // 与 search() 的规范化一致：展示与匹配用同一个形式。
-                let path = crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path));
+                let path =
+                    crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path));
                 let _ = self.tx.send(Event::ScopePicked(path));
             }
             Ok(None) => {}
@@ -527,17 +607,17 @@ impl Service {
             location: location.clone(),
             enabled: true,
         });
-        if let Err(problems) = self.store.save(&draft) {
+        if let Err(problems) = self.writer.save(&draft) {
             self.notice(format!("保存设置失败：{problems}"));
             return;
         }
         self.settings = draft;
-        self.sync_roots(false);
-        if self.indexing_allowed() {
+        let new_slots = self.sync_roots();
+        if self.work_allowed() {
             if self.lifecycle == Lifecycle::Dormant {
                 self.start_indexing();
             } else {
-                self.rescan_all();
+                self.scan_slots(new_slots);
             }
         }
         self.emit_roots();
@@ -587,34 +667,31 @@ impl Service {
         let identity = slot.identity.clone();
         let mut draft = self.settings.clone();
         draft.roots.retain(|r| r.location != identity);
-        if let Err(problems) = self.store.save(&draft) {
+        if let Err(problems) = self.writer.save(&draft) {
             self.notice(format!("保存设置失败：{problems}"));
             return;
         }
         self.settings = draft;
-        self.runtime.cancel_scan(&slot);
         self.runtime.remove_slot(root);
-        let store = devtools_search_core::snapshot::SnapshotStore::new(
-            self.store.path().parent().unwrap_or(Path::new(".")).join("snapshots"),
-        );
-        let _ = store.remove(&root_key(&identity));
+        if let Err(err) = self.runtime.remove_snapshot(&identity) {
+            self.notice(format!("清理索引缓存失败：{err}"));
+        }
         self.emit_roots();
         let settings = self.settings.clone();
         let _ = self.tx.send(Event::SettingsApplied(Ok(Box::new(settings))));
     }
 
     fn rebuild_root(&mut self, root: Option<RootId>) {
-        if !self.indexing_allowed() {
-            return;
-        }
-        let config = config::index_config(&self.settings);
-        let slots = self.runtime.slots();
-        for slot in slots {
-            if root.is_some_and(|id| id != slot.id) {
-                continue;
+        if self.work_allowed() {
+            if self.lifecycle == Lifecycle::Dormant {
+                self.lifecycle = Lifecycle::Indexing;
             }
-            self.runtime
-                .spawn_scan(slot, config.clone(), self.settings.persist_index);
+            let slots = self
+                .runtime
+                .slots()
+                .into_iter()
+                .filter(|slot| root.is_none_or(|id| id == slot.id));
+            self.scan_slots(slots);
         }
     }
 
@@ -626,185 +703,131 @@ impl Service {
         self.persist();
         if paused {
             self.pause_all_scans();
-        } else {
-            self.start_indexing();
-            self.rescan_all();
-        }
-        self.emit_roots();
-    }
-
-    fn pause_all_scans(&mut self) {
-        for slot in self.runtime.slots() {
-            self.runtime.cancel_scan(&slot);
-            self.runtime.stop_watch(&slot);
-            *slot.state.lock().unwrap() = RootState::Paused;
-        }
-        self.emit_roots();
-    }
-
-    /// 维护每个根的监听：就绪的根在允许建索引且开启监听时挂上，其它情况停掉。
-    fn sync_watchers(&mut self) {
-        let wants = self.settings.watch
-            && self.indexing_allowed()
-            && self.lifecycle == Lifecycle::Indexing;
-        if !wants {
-            for slot in self.runtime.slots() {
-                self.runtime.stop_watch(&slot);
+        } else if self.work_allowed() {
+            if self.lifecycle == Lifecycle::Indexing {
+                self.rescan_all();
+            } else {
+                self.start_indexing();
             }
-            self.watcher_sync = None;
+        }
+        self.emit_roots();
+    }
+
+    fn pause_all_scans(&self) {
+        for slot in self.runtime.slots() {
+            if slot.state() != RootState::Offline {
+                slot.cancel_work(Some(RootState::Paused));
+            }
+        }
+        self.emit_roots();
+    }
+
+    /// 维护就绪根的监听；已隐藏且关闭后台索引时不会被 poll 再启动。
+    fn sync_watchers(&mut self) {
+        let wants =
+            self.settings.watch && self.work_allowed() && self.lifecycle == Lifecycle::Indexing;
+        if !wants {
+            if self.watcher_sync.take().is_some() {
+                for slot in self.runtime.slots() {
+                    self.runtime.stop_watch(&slot);
+                }
+            }
             return;
         }
-        // 每帧都重新编译一边 glob 规则是白烧 CPU：配置和根状态没变就直接跳过。
         let signature = (
             self.settings.exclude_patterns.clone(),
             self.settings.exclude_case_sensitive,
             self.runtime
                 .slots()
                 .iter()
-                .map(|slot| (slot.id, slot.state()))
+                .map(|slot| (slot.id, slot.state(), slot.fingerprint().0))
                 .collect::<Vec<_>>(),
         );
         if self.watcher_sync.as_ref() == Some(&signature) {
             return;
         }
-        let config = config::index_config(&self.settings);
         let Ok(excludes) = ExcludeSet::compile(
-            &config.exclude_rules,
-            config.exclude_case_sensitive,
+            &self.settings.exclude_patterns,
+            self.settings.exclude_case_sensitive,
         ) else {
             return;
         };
         for slot in self.runtime.slots() {
-            if matches!(slot.state(), RootState::Ready | RootState::Dirty) {
-                self.runtime.spawn_watch(slot, excludes.clone());
-            }
+            self.runtime
+                .spawn_watch(slot, excludes.clone(), self.settings.scan_app_bundles);
         }
         self.watcher_sync = Some(signature);
     }
 
-    /// 监听溢出的根转为全量重扫（`Dirty`）。
-    fn rescan_dirty(&mut self) {
-        if !self.indexing_allowed() || self.lifecycle != Lifecycle::Indexing {
-            return;
-        }
-        let dirty: Vec<_> = self
-            .runtime
-            .slots()
-            .into_iter()
-            .filter(|slot| slot.state() == RootState::Dirty)
-            .collect();
-        if dirty.is_empty() {
-            return;
-        }
-        let config = config::index_config(&self.settings);
-        for slot in dirty {
-            tracing::info!("索引需要重新校验：{}", slot.mount.display());
-            self.runtime.stop_watch(&slot);
-            self.runtime
-                .spawn_scan(slot, config.clone(), self.settings.persist_index);
+    fn rescan_dirty(&self) {
+        if self.work_allowed() && self.lifecycle == Lifecycle::Indexing {
+            let dirty = self
+                .runtime
+                .slots()
+                .into_iter()
+                .filter(|slot| slot.state() == RootState::Dirty);
+            self.scan_slots(dirty);
         }
     }
 
-    fn rescan_all(&mut self) {
+    fn rescan_all(&self) {
+        self.scan_slots(self.runtime.slots());
+    }
+
+    fn scan_slots(&self, slots: impl IntoIterator<Item = Arc<RootSlot>>) {
+        let mut slots = slots.into_iter().peekable();
+        if slots.peek().is_none() {
+            return;
+        }
         let config = config::index_config(&self.settings);
-        let slots = self.runtime.slots();
         for slot in slots {
             self.runtime
-                .spawn_scan(slot, config.clone(), self.settings.persist_index);
+                .spawn_scan(slot, &config, self.settings.persist_index);
         }
     }
 
     fn clear_cache(&mut self) {
-        let dir = self
-            .store
-            .path()
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("snapshots");
-        let store = devtools_search_core::snapshot::SnapshotStore::new(dir);
-        let keys: Vec<String> = self
-            .runtime
-            .slots()
-            .iter()
-            .map(|s| root_key(&s.identity))
-            .collect();
-        for key in keys {
-            let _ = store.remove(&key);
+        match self.runtime.clear_snapshots() {
+            Ok(()) => self.notice("已清理索引缓存（下次扫描重新建立）"),
+            Err(err) => self.notice(format!("清理索引缓存失败：{err}")),
         }
-        self.notice("已清理索引缓存（下次扫描重新建立）");
     }
 
-    /// 按当前设置同步根槽位：新增的根建槽位；删除的根取消并移除。
-    fn sync_roots(&mut self, start_indexing: bool) {
+    /// 同步已配置的根，仅返回本次新增且在线的根。
+    fn sync_roots(&mut self) -> Vec<Arc<RootSlot>> {
         use devtools_search_core::ports::VolumeSource;
-        let config = config::index_config(&self.settings);
-        let desired: Vec<RootLocation> = config.roots.iter().map(|r| r.location.clone()).collect();
-        // 移除不再需要的根。
+        let mut desired: Vec<_> = self
+            .settings
+            .roots
+            .iter()
+            .filter(|root| root.enabled)
+            .map(|root| root.location.clone())
+            .collect();
         for slot in self.runtime.slots() {
-            if !desired.contains(&slot.identity) {
-                self.runtime.cancel_scan(&slot);
+            if let Some(position) = desired.iter().position(|root| root == &slot.identity) {
+                desired.swap_remove(position);
+            } else {
                 self.runtime.remove_slot(slot.id);
             }
         }
-        let volumes = crate::platform::volumes::StdVolumes;
-        let mounts = volumes.current_mounts();
-        let existing: Vec<RootId> = self.runtime.slots().iter().map(|s| s.id).collect();
+        if desired.is_empty() {
+            return Vec::new();
+        }
+        let mounts = crate::platform::volumes::StdVolumes.current_mounts();
         let mut pending = Vec::new();
         for location in desired {
-            if self
-                .runtime
-                .slots()
-                .iter()
-                .any(|s| s.identity == location)
-            {
-                continue;
-            }
-            let resolved = resolve_root_path(&location, &mounts)
-                // 规范化：macOS 的 /var、/tmp 是指向 /private/... 的符号链接，
-                // 监听事件给出的是真实路径，不规范化会和 strip_prefix 对不上；
-                // Windows 再去掉 canonicalize 加的 `\\?\`（旧设置里可能存了带前缀的路径）。
-                .map(|path| crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path)));
-            match resolved {
-                Some(path) => {
-                    let slot = self.runtime.add_slot(location, path);
-                    pending.push(slot);
-                }
-                None => {
-                    // 卷未挂载：保留槽位并标记 Offline，UI 显示"卷未挂载"。
-                    let slot = self.runtime.add_slot(
-                        location.clone(),
-                        crate::platform::fs::simplify(location.fallback_absolute_path.clone()),
-                    );
-                    *slot.state.lock().unwrap() = RootState::Offline;
-                }
-            }
-        }
-        if start_indexing && self.indexing_allowed() {
-            for slot in pending {
-                // 只扫描还没被扫描过的根。
-                if slot.state() == RootState::Dormant {
-                    self.runtime.spawn_scan(
-                        slot,
-                        config.clone(),
-                        self.settings.persist_index,
-                    );
-                }
-            }
-        } else if !self.indexing_allowed() {
-            let state = if self.lifecycle == Lifecycle::AwaitingConsent {
-                RootState::AwaitingConsent
+            if let Some(path) = resolve_root_path(&location, &mounts) {
+                // 规范化根路径，与平台的监听路径保持一致。
+                let path =
+                    crate::platform::fs::simplify(std::fs::canonicalize(&path).unwrap_or(path));
+                pending.push(self.runtime.add_slot(location, path));
             } else {
-                RootState::Dormant
-            };
-            for id in existing {
-                if let Some(slot) = self.runtime.slot(id) {
-                    if slot.state() == RootState::Dormant {
-                        *slot.state.lock().unwrap() = state.clone();
-                    }
-                }
+                let path = crate::platform::fs::simplify(location.fallback_absolute_path.clone());
+                let slot = self.runtime.add_slot(location, path);
+                slot.cancel_work(Some(RootState::Offline));
             }
         }
-        self.emit_roots();
+        pending
     }
 
     fn emit_roots(&self) {
@@ -821,21 +844,22 @@ impl Service {
         if self.read_only {
             return;
         }
-        if let Err(err) = self.store.save(&self.settings) {
+        if let Err(err) = self.writer.save(&self.settings) {
             tracing::warn!("保存搜索设置失败：{err}");
         }
     }
 
-    /// 拉取事件；顺带处理会话过滤与索引变化后的自动重跑（§7.7）。
+    /// 拉取事件，合并根状态更新并按当前索引版本失效行缓存。
     pub fn poll(&mut self) -> ServicePoll {
         let mut events = Vec::new();
+        let mut roots_changed = false;
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 Event::SearchDone(result) => {
                     if result.session != self.session {
-                        // 过期查询：丢弃（§7.10）。
                         continue;
                     }
+                    self.query_in_flight = false;
                     self.results = result.ids.clone();
                     self.last_total = result.total;
                     self.last_took_ms = result.took_ms;
@@ -843,122 +867,148 @@ impl Service {
                     self.last_notice = result.notice.clone();
                     events.push(Event::SearchDone(result));
                 }
+                Event::Roots { .. } => roots_changed = true,
                 other => events.push(other),
             }
         }
-        // 监听溢出 / 监听不可用之后需要全量校验的根。
-        self.rescan_dirty();
-        // 按开关与状态维护监听（只在索引就绪、允许建索引时监听）。
-        self.sync_watchers();
-        // 索引变化后重跑当前查询（避免结果集与排序长期空白/过期）。
-        if self.rerun_if_stale() {
-            events.push(Event::ResultsStale);
+        if roots_changed {
+            let current: BTreeMap<_, _> = self
+                .runtime
+                .slots()
+                .iter()
+                .map(|slot| (slot.id, slot.fingerprint()))
+                .collect();
+            let roots: Vec<_> = self
+                .observed_fingerprints
+                .iter()
+                .filter(|(root, previous)| current.get(root) != Some(*previous))
+                .map(|(&root, _)| root)
+                .collect();
+            self.observed_fingerprints = current;
+            if !roots.is_empty() {
+                events.push(Event::RowsInvalidated { roots });
+            }
+            if !self.stopped {
+                self.rescan_dirty();
+                self.sync_watchers();
+            }
+            events.push(Event::Roots {
+                roots: self.runtime.roots_status(),
+            });
         }
+        let repaint_after = if self.stopped {
+            None
+        } else {
+            self.rerun_if_stale(&mut events)
+        };
         ServicePoll {
             events,
             policy_changed: std::mem::take(&mut self.policy_dirty),
+            repaint_after,
         }
     }
 
-    /// 根的 (epoch, revision, 节点数) 变化时，用当前查询参数重跑一次。
-    ///
-    /// 扫描完成会替换整个索引并递增 epoch，只比较 revision 发现不了（新索引从 0 开始）。
-    fn rerun_if_stale(&mut self) -> bool {
-        // 关掉自动刷新：索引怎么变都不重跑，用户重新搜一次才更新（省掉反复重查的开销）。
-        if !self.settings.auto_refresh {
-            return false;
-        }
-        let current: BTreeMap<RootId, (u32, u64, u32)> = self
-            .runtime
-            .slots()
-            .iter()
-            .map(|slot| (slot.id, slot.fingerprint()))
-            .collect();
-        if current == self.indexed_fingerprints {
-            // 索引稳定了：清掉等待状态，下次变化重新计时。
+    /// 索引变化合并后重查。等待时告诉宿主下一次唤醒的时间。
+    fn rerun_if_stale(&mut self, events: &mut Vec<Event>) -> Option<Duration> {
+        if self.visible == Some(false)
+            || self.observed_fingerprints == self.indexed_fingerprints
+            || self.last_query.is_none()
+        {
             self.stale_since = None;
-            return false;
+            return None;
         }
-        // 正在扫描 / 校验的根：等它扫完再查。边扫边查最费 CPU——索引一直在变，
-        // 每帧都会发现"过期"，结果就是一条查询接一条查询地跑，界面直接卡住。
-        if self.runtime.slots().iter().any(|slot| {
-            matches!(
-                slot.state(),
-                RootState::Scanning | RootState::PendingValidation | RootState::Verifying
-            )
-        }) {
+
+        // 首次有可查索引，即使关了自动刷新，也会补全之前在空索引上提交的查询。
+        let first_index = self
+            .observed_fingerprints
+            .values()
+            .any(|&(_, _, len)| len > 0)
+            && self
+                .indexed_fingerprints
+                .values()
+                .all(|&(_, _, len)| len == 0);
+        if !self.settings.auto_refresh && !first_index {
             self.stale_since = None;
-            return false;
+            return None;
         }
+        // 正在执行的查询完成后会唤醒界面，届时一并处理期间发布的索引。
+        if self.query_in_flight {
+            return None;
+        }
+
+        let generation_changed =
+            self.observed_fingerprints
+                .iter()
+                .any(|(root, &(epoch, _, len))| {
+                    len > 0
+                        && self
+                            .indexed_fingerprints
+                            .get(root)
+                            .is_none_or(|&(old_epoch, _, _)| epoch != old_epoch)
+                });
         let now = Instant::now();
-        // 第一次发现变化时开始计时，等索引安静 `RERUN_SETTLE` 再重跑。
-        let first_seen = *self.stale_since.get_or_insert(now);
-        if now.duration_since(first_seen) < RERUN_SETTLE {
-            return false;
+        if !first_index && !generation_changed {
+            // 监听产生的同代际更新仍做防抖；快照和完整扫描发布时立即更新。
+            let first_seen = *self.stale_since.get_or_insert(now);
+            let mut due = first_seen + RERUN_SETTLE;
+            if let Some(last) = self.last_rerun {
+                let gap = RERUN_MIN_GAP.max(Duration::from_millis(
+                    self.last_took_ms.saturating_mul(3) / 2,
+                ));
+                due = due.max(last + gap);
+            }
+            if due > now {
+                return Some(due - now);
+            }
         }
-        // 再稳一稳：两次重跑之间至少隔 `RERUN_MIN_GAP`。
-        // 间隔还要跟上次查询的耗时走——查询本身要一秒时，固定 600ms 会让新查询
-        // 每次都把上一次取消掉，结果永远出不来、CPU 还一直满着。
-        let gap = RERUN_MIN_GAP.max(Duration::from_millis(self.last_took_ms.saturating_mul(3) / 2));
-        if self.last_rerun.is_some_and(|last| now.duration_since(last) < gap) {
-            return false;
-        }
-        self.stale_since = None;
+        let last = self.last_query.clone().unwrap();
         self.last_rerun = Some(now);
-        self.indexed_fingerprints = current;
-        let Some(last) = self.last_query.clone() else {
-            return false;
-        };
-        if !self.started {
-            return false;
-        }
-        self.search(last.text, last.literal, last.case_sensitive, last.scope, false);
-        true
+        self.search(
+            last.text,
+            last.literal,
+            last.case_sensitive,
+            last.scope,
+            false,
+        );
+        events.push(Event::ResultsStale);
+        None
     }
 
-    /// 搜索页显示/隐藏：`continue_when_hidden` 为 false 时隐藏即暂停扫描，显示时恢复（§6.1）。
+    /// 关闭期间停止监听的根需要在重新打开后补齐这段变化。
     fn set_visible(&mut self, visible: bool) {
-        self.visible = visible;
-        if visible {
-            if self.lifecycle == Lifecycle::Indexing && self.indexing_allowed() {
-                let config = config::index_config(&self.settings);
-                let mut resumed = false;
-                for slot in self.runtime.slots() {
-                    if matches!(
+        self.visible = Some(visible);
+        if visible && self.work_allowed() {
+            if self.lifecycle == Lifecycle::Indexing {
+                let pending = self.runtime.slots().into_iter().filter(|slot| {
+                    matches!(
                         slot.state(),
-                        RootState::Dirty | RootState::Paused
-                    ) {
-                        self.runtime
-                            .spawn_scan(slot, config.clone(), self.settings.persist_index);
-                        resumed = true;
-                    }
-                }
-                if resumed {
-                    self.emit_roots();
-                }
+                        RootState::Dirty | RootState::Paused | RootState::Dormant
+                    )
+                });
+                self.scan_slots(pending);
+            } else if !self.settings.lazy_start || self.last_query.is_some() {
+                self.start_indexing();
             }
+        } else if !visible && !self.settings.continue_when_hidden {
+            self.suspend_hidden_roots(false);
+        }
+        self.emit_roots();
+    }
+
+    fn suspend_hidden_roots(&mut self, force_rebuild: bool) {
+        if self.lifecycle != Lifecycle::Indexing {
             return;
         }
-        if self.settings.continue_when_hidden || self.lifecycle != Lifecycle::Indexing {
-            return;
-        }
-        let mut paused = false;
         for slot in self.runtime.slots() {
-            // 不继续建索引时，监听也一起停（重新显示后由 sync_watchers 恢复）。
-            self.runtime.stop_watch(&slot);
-            if matches!(
-                slot.state(),
-                RootState::Scanning | RootState::PendingValidation
-            ) {
-                self.runtime.cancel_scan(&slot);
-                *slot.state.lock().unwrap() = RootState::Dirty;
-                paused = true;
-            }
+            let state = slot.state();
+            let dirty = match state {
+                RootState::Ready => self.settings.watch || force_rebuild,
+                RootState::Scanning | RootState::PendingValidation | RootState::Verifying => true,
+                _ => false,
+            };
+            slot.cancel_work(dirty.then_some(RootState::Dirty));
         }
-        if paused {
-            tracing::debug!("搜索页隐藏：按设置暂停索引扫描");
-            self.emit_roots();
-        }
+        self.watcher_sync = None;
     }
 
     /// 关闭（取消全部任务）。
@@ -971,6 +1021,12 @@ impl Service {
     /// 槽位（调试/测试用）。
     pub fn slot_snapshot(&self) -> Vec<Arc<RootSlot>> {
         self.runtime.slots()
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
     }
 }
 
@@ -1030,4 +1086,162 @@ fn simplify_saved_paths(settings: &mut SearchSettings) -> bool {
         }
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::protocol::SearchResult;
+    use crate::{settings::RootConfig, SystemModalGuard};
+    use devtools_search_core::snapshot::{config_fingerprint, EventCheckpoint, SnapshotStore};
+    use devtools_search_core::{root_key, NodeKind, NodeMeta, RootIndex};
+    use std::ffi::OsStr;
+    use std::fs;
+
+    struct TestHost;
+
+    impl HostServices for TestHost {
+        fn pick_folder(
+            &self,
+            _: Option<&Path>,
+            _: FolderPurpose,
+        ) -> Result<Option<PathBuf>, String> {
+            Ok(None)
+        }
+        fn begin_system_modal(&self) -> Option<Box<dyn SystemModalGuard>> {
+            None
+        }
+        fn open(&self, _: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn reveal(&self, _: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn icon(&self, _: &Path) -> Option<(u32, u32, Vec<u8>)> {
+            None
+        }
+        fn set_search_space_behavior(&self, _: bool) {}
+        fn request_repaint(&self) {}
+        fn start_window_drag(&self) -> bool {
+            false
+        }
+    }
+
+    fn wait_for_results(
+        service: &mut Service,
+        mut matches: impl FnMut(&SearchResult) -> bool,
+    ) -> SearchResult {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            for event in service.poll().events {
+                if let Event::SearchDone(result) = event {
+                    if matches(&result) {
+                        return result;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("没有收到预期的启动查询结果：{:?}", service.roots());
+    }
+
+    #[test]
+    fn startup_search_shows_snapshots_before_busy_scan_workers_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let search_dir = data.join("search");
+        let mut settings = SearchSettings {
+            roots: Vec::new(),
+            lazy_start: true,
+            watch: false,
+            permission_onboarding_completed: true,
+            history_enabled: false,
+            ..SearchSettings::default()
+        };
+        for i in 0..3 {
+            let path = dir.path().join(format!("root-{i}"));
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("current.txt"), "live").unwrap();
+            settings.roots.push(RootConfig {
+                location: RootLocation {
+                    volume_id: VolumeId::fallback_absolute(&path),
+                    relative_path: String::new(),
+                    fallback_absolute_path: path,
+                },
+                enabled: true,
+            });
+        }
+        SearchSettingsStore::new(&search_dir)
+            .save(&settings)
+            .unwrap();
+        let store = SnapshotStore::new(search_dir.join("snapshots"));
+        let fingerprint = config_fingerprint(&config::index_config(&settings));
+        for root in &settings.roots {
+            let mut old = RootIndex::new(RootId(0));
+            let dir = old.insert(None, OsStr::new("root"), NodeKind::Dir, NodeMeta::default());
+            old.insert(
+                Some(dir),
+                OsStr::new("previous.txt"),
+                NodeKind::File,
+                NodeMeta::default(),
+            );
+            old.commit();
+            store
+                .save(
+                    &root_key(&root.location),
+                    &old,
+                    &root.location,
+                    fingerprint,
+                    &EventCheckpoint::default(),
+                )
+                .unwrap();
+        }
+        let mut service = Service::new(&data, Arc::new(TestHost));
+
+        // 占满扫描池，确保即使三个根都需要全量扫描，也能先读到第三个根的快照。
+        let mut releases = Vec::new();
+        for _ in 0..2 {
+            let (release, unblock) = std::sync::mpsc::channel::<()>();
+            let (entered, ready) = std::sync::mpsc::channel();
+            service.runtime.spawn_test_scan(move || {
+                entered.send(()).unwrap();
+                let _ = unblock.recv();
+            });
+            releases.push(release);
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let manifest = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.dir().join("manifest.lock"))
+            .unwrap();
+        manifest.lock().unwrap();
+        service.handle(Command::Search {
+            text: ".txt".into(),
+            scope: None,
+            literal: true,
+            case_sensitive: false,
+        });
+        wait_for_results(&mut service, |result| result.total == 0);
+        drop(manifest);
+
+        let cached = wait_for_results(&mut service, |result| result.ids.len() == 3);
+        assert!(service
+            .roots()
+            .iter()
+            .all(|root| root.from_snapshot && root.state == RootState::Verifying));
+        let rows = service.runtime.load_rows(&cached.ids, 0, 3);
+        assert!(rows.iter().all(|row| row.name == "previous.txt"));
+
+        drop(releases);
+        let fresh = wait_for_results(&mut service, |result| {
+            result.ids.len() == 3 && result.ids.iter().all(|id| id.epoch() == 2)
+        });
+        let rows = service.runtime.load_rows(&fresh.ids, 0, 3);
+        assert!(rows.iter().all(|row| row.name == "current.txt"));
+        assert!(service
+            .roots()
+            .iter()
+            .all(|root| !root.from_snapshot && root.state == RootState::Ready));
+    }
 }

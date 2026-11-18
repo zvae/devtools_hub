@@ -1,10 +1,12 @@
 //! 搜索设置存储：原子 JSON 保存、损坏隔离、版本检查（§6.2）。
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use super::model::{SearchSettings, SearchWindowMode, SETTINGS_VERSION};
+use super::model::{HistoryEntry, SearchSettings, SearchWindowMode, SETTINGS_VERSION};
 
 /// 加载结果。
 pub struct LoadOutcome {
@@ -101,13 +103,128 @@ impl SearchSettingsStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let tmp = self.path.with_extension("json.tmp");
-        {
-            let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
-            io::Write::write_all(&mut file, &bytes).map_err(|e| e.to_string())?;
-            file.sync_all().map_err(|e| e.to_string())?;
+        devtools_search_core::snapshot::atomic_write(&self.path, &bytes)
+            .map_err(|e| format!("保存搜索设置失败：{e}"))
+    }
+}
+
+const HISTORY_WRITE_DELAY: Duration = Duration::from_millis(500);
+
+enum WriteSettings {
+    History,
+    Save(Box<SearchSettings>, Sender<Result<(), String>>),
+    Flush(Sender<Result<(), String>>),
+}
+
+/// 串行写设置。历史记录合并到后台写入，显式保存仍向调用方报告结果。
+pub(crate) struct SettingsWriter {
+    tx: Sender<WriteSettings>,
+    pending_history: Arc<Mutex<Option<Vec<HistoryEntry>>>>,
+}
+
+impl SettingsWriter {
+    pub fn new(store: SearchSettingsStore, mut settings: SearchSettings) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let pending_history = Arc::new(Mutex::new(None));
+        let history_in_worker = pending_history.clone();
+        std::thread::Builder::new()
+            .name("search-settings".into())
+            .spawn(move || {
+                let mut deadline: Option<Instant> = None;
+                loop {
+                    let command = match deadline {
+                        Some(until) => {
+                            rx.recv_timeout(until.saturating_duration_since(Instant::now()))
+                        }
+                        None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                    };
+                    match command {
+                        Ok(WriteSettings::History) => {
+                            settings.history = history_in_worker
+                                .lock()
+                                .unwrap()
+                                .take()
+                                .expect("待保存的历史");
+                            deadline.get_or_insert_with(|| Instant::now() + HISTORY_WRITE_DELAY);
+                        }
+                        Ok(WriteSettings::Save(next, reply)) => {
+                            let result = store.save(&next);
+                            if result.is_ok() {
+                                settings = *next;
+                                deadline = None;
+                            }
+                            let _ = reply.send(result);
+                        }
+                        Ok(WriteSettings::Flush(reply)) => {
+                            let result = flush_history(&store, &settings, &mut deadline);
+                            let _ = reply.send(result);
+                        }
+                        Err(err) => {
+                            if let Err(error) = flush_history(&store, &settings, &mut deadline) {
+                                tracing::warn!("保存搜索历史失败：{error}");
+                                if err != RecvTimeoutError::Disconnected {
+                                    deadline = Some(Instant::now() + HISTORY_WRITE_DELAY);
+                                }
+                            }
+                            if err == RecvTimeoutError::Disconnected {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("搜索设置线程创建失败");
+        Self {
+            tx,
+            pending_history,
         }
-        fs::rename(&tmp, &self.path).map_err(|e| format!("保存搜索设置失败：{e}"))
+    }
+
+    pub fn history(&self, history: &[HistoryEntry]) {
+        let mut pending = self.pending_history.lock().unwrap();
+        // 写盘慢时只留最后一份历史，避免排队保存多个快照。
+        if pending.replace(history.to_vec()).is_none() {
+            let _ = self.tx.send(WriteSettings::History);
+        }
+    }
+
+    pub fn save(&self, settings: &SearchSettings) -> Result<(), String> {
+        self.request(|reply| WriteSettings::Save(Box::new(settings.clone()), reply))
+    }
+
+    pub fn flush(&self) -> Result<(), String> {
+        self.request(WriteSettings::Flush)
+    }
+
+    fn request(
+        &self,
+        command: impl FnOnce(Sender<Result<(), String>>) -> WriteSettings,
+    ) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(command(tx))
+            .map_err(|_| "搜索设置线程已停止".to_string())?;
+        rx.recv().map_err(|_| "搜索设置线程已停止".to_string())?
+    }
+}
+
+fn flush_history(
+    store: &SearchSettingsStore,
+    settings: &SearchSettings,
+    deadline: &mut Option<Instant>,
+) -> Result<(), String> {
+    if deadline.is_some() {
+        store.save(settings)?;
+        *deadline = None;
+    }
+    Ok(())
+}
+
+impl Drop for SettingsWriter {
+    fn drop(&mut self) {
+        if let Err(err) = self.flush() {
+            tracing::warn!("退出时保存搜索历史失败：{err}");
+        }
     }
 }
 

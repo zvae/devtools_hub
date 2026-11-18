@@ -140,10 +140,12 @@ crates/
   `image` 自己解码（只覆盖 png/jpeg/gif/bmp/webp/tiff）→ 矢量图标。
   第二级很关键：图标视图以前回退到 `SHGetFileInfoW` 的 32×32 小图标，放大到 96 全是糊的；
   `ICONONLY` 由 shell 直接按目标尺寸出图（大图标会给高分辨率资源），和资源管理器的图标一样清楚。
-  macOS 对应 `NSWorkspace::iconForFile`（支持任意尺寸）。
+  macOS 走 `QuickLookThumbnailing` 的 `QLThumbnailGenerator`，请求文件内容缩略图，超时取消。
+  系统取不到时先尝试图片解码，再用 `NSWorkspace::iconForFile` 取文件图标。
 - **解码在后台线程**（`ui/thumb_cache.rs`）：两个 STA 线程，每个线程一个队列，投递时轮流分配；
   解完在后台线程直接 `Context::load_texture` 并回传句柄，UI 每帧 `try_recv` 收。
-  缓存键是 (路径, 目标尺寸)，上限 200 张，取不到也记 `None`（否则每帧重试）。
+  缓存键是 (路径, 目标尺寸)，上限 160 项和 24 MiB 预览纹理。单文件预览失败也记录，
+  同类型图标只作占位，其他同后缀文件仍会尝试预览。关闭搜索窗口时丢弃待处理预览并释放行和纹理缓存。
   请求尺寸按 `pixels_per_point` 放大到 2× 以内，Retina 下不发虚。
 - 目录也走同一条路：`platform::thumbnail` 先看 `metadata`，目录直接跳过预览、要 `ICONONLY`
   的文件夹图标（省一次 shell 调用）；否则图标视图里的文件夹会退回矢量图，和资源管理器不一致。
@@ -178,8 +180,8 @@ crates/
   `ViewState::search_focused` 由顶栏每帧写入，结果区在键盘处理里读取。
 
 **依赖代价**：`windows` crate 增加 `Win32_Foundation`、`Win32_Graphics_Gdi`、
-`Win32_System_Com`、`Win32_UI_Shell` 四个特性（缩略图与右键菜单共用）。macOS 侧没有新增依赖，
-QuickLook 缩略图（`QLThumbnailGenerator`）还没接，macOS 目前靠 `image` 解码兜底。
+`Win32_System_Com`、`Win32_UI_Shell` 四个特性（缩略图与右键菜单共用）。
+macOS 链接系统的 `QuickLookThumbnailing`，直接使用已在锁文件中的 `block2` 接收回调。
 
 ### 2.4 结果区的选中、排序与状态栏（2026-10-31）
 
@@ -261,36 +263,33 @@ QuickLook 缩略图（`QLThumbnailGenerator`）还没接，macOS 目前靠 `imag
 
 | 项 | 说明 |
 | --- | --- |
-| 快照事件流 catch-up | 启动仍是"快照 → 全量校验"：先给出可查的旧数据，再后台重扫替换 |
 | 监听能力受系统限制 | 网络盘 / 某些虚拟文件系统不支持 FSEvents 或 `ReadDirectoryChangesW`，此时提示"无法实时监听"，只能手动重建 |
 | 关窗期间的增量补齐 | 关窗已经停监听，但下次打开是全量重扫；能不能改成增量见 §3.1 |
 
-### 3.1 关窗期间的增量补齐（评估，2026-10-31）
+### 3.1 冷启动校验与关窗
 
-**现状**
+冷启动的快照读取使用独立队列。查询可以在其他根扫描或回放时使用已载入的快照，
+纯冷启动没有可用快照时需要先建索引。状态栏在快照可用时显示「校验中」。
 
-| 项 | 行为 |
-| --- | --- |
-| 关闭搜索窗口 | `VisibilityChanged { visible: false }` → `set_visible(false)`。`continue_when_hidden = false`（默认）时：停监听 → 取消扫描 → 根标记 `Dirty` |
-| 重新打开 | `set_visible(true)` → 对 `Dirty` / `Paused` 的根 `spawn_scan` → **全量重扫**。快照先顶上（结果不会是空的），但校验是全量的 |
+macOS 在读取目录前记录卷的 FSEvents UUID、根 inode、事件 ID 和时间。下次启动先核验
+检查点和日志历史，再用按卷的 `FSEventStreamCreateRelativeToDevice` 回放变更，
+直到收到 `HistoryDone` 并排空事件。
 
-所以「关窗后不再后台监听、不更新索引」这条**已经是现状**，缺的只是「下次打开别全量重扫」。
+Windows 在读取目录前记录 NTFS 卷 GUID、根目录 File ID、日志 ID 和 Next USN。下次启动
+确认这些身份信息以及检查点仍在日志保留范围内后，通过 `FSCTL_READ_USN_JOURNAL`
+读取检查点与本次 Next USN 之间的 V2 记录。按父目录 File ID 查找实际路径，目录移动、
+删除或权限变化时校验相关子树。读取卷设备需要相应权限，应用仅使用已存在的日志。
 
-**能不能拿到关窗期间的增量事件**
+两个平台都只重新读取事件涉及的路径和需要校验的子树。启用实时监听时，在采集回放
+终点前挂监听，回放结束后继续处理缓存的实时事件。索引有变化时原子更新快照，
+只有检查点推进时仅更新 manifest。
 
-| 平台 | 能力 | 结论 |
-| --- | --- | --- |
-| macOS | FSEvents `FSEventStreamCreate` 的 `sinceWhen` 就是为这个设计的：存下最后一次的事件 id，下次建流时传进去，系统把期间的变更回放出来 | 可行，改动不大 |
-| Windows | `ReadDirectoryChangesW` 是实时流，句柄一关就没有历史；要回溯只能用 **NTFS USN Journal**（`FSCTL_QUERY_USN_JOURNAL` 拿 journal id，`FSCTL_READ_USN_JOURNAL` 从上次的 USN 往后读） | 可行，但只覆盖 NTFS；journal 被删 / 重置、卷不支持时要回退全扫 |
-| 通用兜底 | 先载入快照（秒开）+ 按 mtime/size「快速校验」：目录没变就整棵子树跳过 | 不是真增量，但比全扫快一个数量级 |
+旧快照缺少检查点、索引配置或卷身份变化、日志过期或有丢失、路径不明确或回放失败时，
+全量扫描受影响的索引根。Windows 的非本地 NTFS 路径、日志读取权限不足、硬链接路径
+无法确认或回放超过预算时，也走此兜底。
 
-**建议顺序**
-
-1. 先做通用兜底（收益 / 成本比最高，体感是"打开即出结果、几秒后静默更新"）；
-2. macOS 上接 FSEvents `sinceWhen`（事件 id 存进快照检查点）；
-3. Windows 上接 USN Journal，并做好"journal 不可用 → 回退全量"的兜底。
-
-`snapshot.rs` 的 `EventCheckpoint` 已经预留了事件 id 的位置，这三步都不用改快照格式。
+默认关闭窗口时会暂停监听和扫描，重新打开后后台补扫脏根。关窗保留内存索引和结果 ID，
+释放列表行、图标与缩略图缓存。开启「搜索页隐藏后继续建立索引」可保持后台监听。
 
 ## 4. 与设计文档的偏差（需要在评审时确认）
 
@@ -301,9 +300,8 @@ QuickLook 缩略图（`QLThumbnailGenerator`）还没接，macOS 目前靠 `imag
    结尾 `/` 只表示"只匹配目录"。默认排除表因此回到文档字面写法
    （macOS：`node_modules/`、`target/`、`DerivedData/`、`.git/`、`Library/`），
    它们会剪掉任意层级的同名目录；只想排除顶层时写成 `/Library/`。
-2. **Windows 卷身份**：用盘符根（`win-drive:C:\`）而非卷 GUID——`windows-sys 0.61` 没有导出
-   `GetVolumeNameForVolumeMountPointW`。macOS 用 `st_dev`（跨重新挂载可能变化），
-   稳定 UUID 需要 DiskArbitration，属于 M0 待验证项。
+2. **卷身份**：根配置的 Windows 卷键使用盘符根（`win-drive:C:\`），macOS 使用 `st_dev`。
+   用于启动回放的持久检查点另外记录 NTFS 卷 GUID 或 FSEvents 卷 UUID。
 3. **创建时间**：macOS 的 `st_birthtime` 没有 std 接口，`btime` 为 Unknown（列显示「—」、排序置后）；
    Windows 用 `Metadata::created()`。
 4. **窗口空格行为**：`set_search_space_behavior` 在两端均为空实现——宿主没有全局绑定空格，
@@ -316,6 +314,8 @@ QuickLook 缩略图（`QLThumbnailGenerator`）还没接，macOS 目前靠 `imag
 cargo check --workspace                                   # 无警告
 cargo test --workspace                                    # 231 个测试
 cargo test -p devtools-search --test service_integration   # 扫描→索引→查询→取行→快照
+cargo test -p devtools-search --test service_integration restart_replays_macos -- --ignored  # macOS 原生回放及全量兜底
+cargo test -p devtools-search --test service_integration restart_replays_windows_usn -- --ignored  # 管理员终端，本地 NTFS 临时目录所在卷已启用日志
 cargo test -p devtools-hub snapshot -- --ignored           # 含 search-page(-dark) 快照
 cargo check -p devtools-hub --features windows-typecheck   # Windows 实现类型检查
 ```

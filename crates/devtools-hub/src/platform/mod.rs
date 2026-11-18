@@ -32,8 +32,7 @@ use serde::{Deserialize, Serialize};
 /// - **图标**：没有预览时由 shell 按目标尺寸出图（不是 `SHGetFileInfoW` 的 32×32 小图标，
 ///   放大到 96 也不会糊）。
 ///
-/// Windows 走 `IShellItemImageFactory`（先 `THUMBNAILONLY` 再 `ICONONLY`）；macOS 的
-/// QuickLook 还没接，先用 `NSWorkspace` 按尺寸取图标。最后才用 `image` 自己解码兜底。
+/// Windows 走 `IShellItemImageFactory`，macOS 走 Quick Look。取不到内容预览时回退到文件图标。
 ///
 /// **调用很慢**（几十毫秒到几百毫秒，取决于格式），必须在后台线程里调用。
 pub fn thumbnail(path: &std::path::Path, size: u32) -> Option<Thumbnail> {
@@ -61,17 +60,19 @@ pub fn thumbnail(path: &std::path::Path, size: u32) -> Option<Thumbnail> {
             });
         }
     }
-    // macOS：没有预览接口时按尺寸取系统图标（`iconForFile` 支持任意尺寸）。
     #[cfg(target_os = "macos")]
-    if let Some((width, height, rgba)) = icons::file_icon_rgba(path, size) {
-        return Some(Thumbnail {
-            width,
-            height,
-            rgba,
-            preview: false,
-        });
+    {
+        if let Some((width, height, rgba)) = macos::quick_look::thumbnail(path, size)
+            .or_else(|| thumbnails::image_thumbnail(path, size))
+        {
+            return Some(Thumbnail { width, height, rgba, preview: true });
+        }
+        icons::file_icon_rgba(path, size).map(|(width, height, rgba)| Thumbnail {
+            width, height, rgba, preview: false,
+        })
     }
     // 最后的兜底：图片至少还能自己解码出来。
+    #[cfg(not(target_os = "macos"))]
     thumbnails::image_thumbnail(path, size).map(|(width, height, rgba)| Thumbnail {
         width,
         height,
@@ -89,6 +90,7 @@ use devtools_search::Thumbnail;
 
 /// 系统右键菜单里用户选了什么（宿主自己处理，模块据此执行）。
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum MenuChoice {
     /// 点了外面 / 按 Esc 取消，或者根本没弹出来。
     Dismissed,

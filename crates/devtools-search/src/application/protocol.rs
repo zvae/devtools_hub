@@ -4,6 +4,7 @@
 //! 后台任务发回，UI 每帧 `poll()` 拉取。事件带会话/查询代际，过期结果直接丢弃。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use devtools_search_core::{FileKind, NodeKind, ResultId, RootId, SortColumn, SortDir};
 use devtools_search_core::volumes::RootState;
@@ -52,7 +53,7 @@ pub struct SearchResult {
     pub error: Option<String>,
     /// 提示（例如 infolder 指向未配置索引的目录）。
     pub notice: Option<String>,
-    pub ids: Vec<ResultId>,
+    pub ids: Arc<Vec<ResultId>>,
 }
 
 /// UI → Service 的命令。
@@ -117,12 +118,14 @@ pub enum Event {
     SearchDone(SearchResult),
     /// 一屏行数据。
     Rows { start: u32, rows: Vec<RowData> },
+    /// 对应根的索引版本有变化，已缓存的行需要重读。
+    RowsInvalidated { roots: Vec<RootId> },
     /// 结果集失效（revision 变化但不需要重跑查询，§7.7）。
     ResultsStale,
     /// 一次性提示（toast）。
     Notice(String),
     /// 用户在原生对话框里选好了"在目录中搜索"的范围。
     ScopePicked(PathBuf),
-    /// Service 已停止（线程退出/资源释放完成）。
+    /// Service 已停止接收命令、提交取消信号并刷新待写历史。
     Stopped,
 }

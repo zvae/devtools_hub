@@ -3,3 +3,7 @@
 pub mod fs;
 pub mod volumes;
 pub mod watcher;
+#[cfg(any(target_os = "macos", windows))]
+#[cfg_attr(target_os = "macos", path = "fsevents.rs")]
+#[cfg_attr(windows, path = "usn.rs")]
+pub(crate) mod journal;

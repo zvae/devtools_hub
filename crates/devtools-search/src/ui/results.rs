@@ -1103,13 +1103,21 @@ fn empty_state(ui: &mut Ui, view: &ViewState, service: &Service, palette: &Palet
         ("查询有误", error.clone())
     } else if view.searching {
         ("搜索中…", "正在查找匹配的文件".to_string())
+    } else if view.roots.iter().any(|root| {
+        use devtools_search_core::volumes::RootState;
+        matches!(
+            root.state,
+            RootState::PendingValidation | RootState::Scanning | RootState::Verifying
+        )
+    }) {
+        ("正在准备索引…", "索引可用后会自动显示匹配结果".to_string())
     } else if view.query.trim().is_empty() {
         match view.lifecycle {
             // `lazy_start` 下启动时不加载索引（省内存和启动时间），第一次搜索才载入：
             // 有快照就先出结果再后台校验，没快照就是首次建立。文案要同时覆盖这两种情况。
             Lifecycle::Dormant => (
                 "索引尚未载入",
-                "输入关键词开始搜索：会先载入上次的索引，再在后台校验变化".to_string(),
+                "输入关键词开始搜索，有快照时会先载入上次的索引".to_string(),
             ),
             Lifecycle::AwaitingConsent => ("等待授权", "完成首次引导后即可搜索文件".to_string()),
             _ => (

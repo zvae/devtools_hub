@@ -696,7 +696,11 @@ impl HubApp {
         let mut stopped = false;
         if let Some(handle) = &self.search {
             let mut search = lock_search(handle);
-            policy_changed = search.poll().policy_changed;
+            let poll = search.poll();
+            policy_changed = poll.policy_changed;
+            if let Some(delay) = poll.repaint_after {
+                self.ctx.request_repaint_after_for(delay, egui::ViewportId::ROOT);
+            }
             stopped = search.is_stopped();
         }
         if policy_changed {

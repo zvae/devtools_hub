@@ -7,6 +7,7 @@ pub use model::{
     ColumnWidths, HistoryEntry, ResultView, RootConfig, SavedSearch, SearchSettings,
     SearchWindowMode, UiPrefs, UiSort, WindowPrefs, SETTINGS_VERSION,
 };
+pub(crate) use store::SettingsWriter;
 pub use store::{LoadOutcome, SearchSettingsStore};
 
 // 设置的公开数据模型里用到的 core 纯类型，一起导出，宿主构造索引根时不必单独依赖 core。

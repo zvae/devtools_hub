@@ -18,7 +18,10 @@ pub mod pasteboard;
 mod resize;
 pub mod screen;
 mod scroll_mask;
+// 这两个 Shell COM 模块依赖只在 Windows 上生成绑定的 windows crate。
+#[cfg(windows)]
 pub mod shell_menu;
+#[cfg(windows)]
 pub mod shell_thumbnail;
 pub mod updater;
 pub mod workspace;

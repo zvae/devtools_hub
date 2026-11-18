@@ -12,7 +12,7 @@ mod sort;
 mod types;
 
 pub use ast::{Ast, DateFilter, PathSegment, SizeFilter, Term};
-pub use eval::{compile, eval, EvalOptions, EvalOutcome, Notice};
+pub use eval::{compile, eval, visit_matches, EvalOptions, EvalOutcome, Notice};
 pub use parse::{parse, ParseError};
 pub use sort::sort_matches;
 pub use types::{extensions_for, FileKind};

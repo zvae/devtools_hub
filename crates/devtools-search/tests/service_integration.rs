@@ -16,6 +16,7 @@ use devtools_search::{HostServices, SystemModalGuard};
 struct FakeHost {
     opened: Mutex<Vec<PathBuf>>,
     revealed: Mutex<Vec<PathBuf>>,
+    picked: Mutex<Option<PathBuf>>,
 }
 
 impl HostServices for FakeHost {
@@ -24,7 +25,7 @@ impl HostServices for FakeHost {
         _initial: Option<&Path>,
         _purpose: devtools_search::FolderPurpose,
     ) -> Result<Option<PathBuf>, String> {
-        Ok(None)
+        Ok(self.picked.lock().unwrap().take())
     }
     fn begin_system_modal(&self) -> Option<Box<dyn SystemModalGuard>> {
         None
@@ -255,6 +256,213 @@ fn manual_rebuild_picks_up_new_files() {
     service.shutdown();
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "需要支持持久 FSEvents 的 macOS 本机卷，手动运行"]
+fn restart_replays_macos_file_changes_from_persisted_checkpoint() {
+    restart_replays_file_changes("macOS FSEvents");
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "需要临时目录位于已启用 USN Journal 的本地 NTFS 卷，并以管理员身份运行"]
+fn restart_replays_windows_usn_changes_from_persisted_checkpoint() {
+    restart_replays_file_changes("Windows USN Journal");
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn restart_replays_file_changes(journal: &str) {
+    use devtools_search_core::snapshot::SnapshotStore;
+    use devtools_search_core::root_key;
+
+    let root = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let settings = settings_for(root.path());
+    let key = root_key(&settings.roots[0].location);
+    let store = SnapshotStore::new(data.path().join("search/snapshots"));
+    let mut first = Service::new(data.path(), Arc::new(FakeHost::default()));
+    first.handle(Command::ApplySettings { draft: Box::new(settings) });
+    wait_ready(&mut first);
+    let saved = store.load_latest(&key).unwrap().unwrap();
+    assert!(saved.checkpoint.last_event_id > 0, "全扫应保存 {journal} 检查点");
+    #[cfg(windows)]
+    assert!(saved.checkpoint.stream_id.starts_with("ntfs-usn-v1:"));
+    first.shutdown();
+    drop(first);
+
+    std::fs::rename(root.path().join("beta.PDF"), root.path().join("renamed.PDF")).unwrap();
+    std::fs::rename(root.path().join("sub"), root.path().join("moved")).unwrap();
+    std::fs::write(root.path().join("moved/new.txt"), "new while closed").unwrap();
+    std::fs::write(root.path().join("alpha.txt"), "updated while closed").unwrap();
+
+    let mut next = Service::new(data.path(), Arc::new(FakeHost::default()));
+    next.handle(Command::WarmUp);
+    wait_ready(&mut next);
+    assert_eq!(names(&search(&mut next, "renamed")), ["renamed.PDF"]);
+    assert!(search(&mut next, "beta").is_empty());
+    assert_eq!(names(&search(&mut next, "new")), ["new.txt"]);
+    assert_eq!(names(&search(&mut next, "moved/delta")), ["delta.txt"]);
+    assert!(search(&mut next, "sub/delta").is_empty());
+    assert_eq!(search(&mut next, "alpha")[0].size, Some(20));
+    let updated = store.load_latest(&key).unwrap().unwrap();
+    assert!(updated.checkpoint.last_event_id >= saved.checkpoint.last_event_id);
+    assert!(updated.index.revision() > saved.index.revision(), "应增量更新快照，整根扫描会重置修订号");
+    std::fs::write(root.path().join("after-replay.log"), "live").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while search(&mut next, "after-replay").is_empty() {
+        assert!(Instant::now() < deadline, "回放后应继续实时监听");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    next.shutdown();
+    drop(next);
+
+    let mut invalid = updated.checkpoint.clone();
+    invalid.stream_id = "另一个卷的日志".into();
+    store.save(&key, &updated.index, &updated.identity, updated.config_fingerprint, &invalid).unwrap();
+    std::fs::write(root.path().join("needs-scan.log"), "fallback").unwrap();
+    let mut fallback = Service::new(data.path(), Arc::new(FakeHost::default()));
+    fallback.handle(Command::WarmUp);
+    wait_ready(&mut fallback);
+    assert_eq!(names(&search(&mut fallback, "needs-scan")), ["needs-scan.log"]);
+    let rebuilt = store.load_latest(&key).unwrap().unwrap();
+    assert_eq!(rebuilt.index.revision(), 1);
+    assert_ne!(rebuilt.checkpoint.stream_id, invalid.stream_id);
+}
+
+#[test]
+fn equal_size_rebuild_invalidates_previous_rows_without_auto_refresh() {
+    let root = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let alpha = root.path().join("alpha.txt");
+    std::fs::write(&alpha, "old").unwrap();
+    let mut settings = settings_for(root.path());
+    settings.auto_refresh = false;
+    settings.watch = false;
+    let mut service = Service::new(data.path(), Arc::new(FakeHost::default()));
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+    let old = search(&mut service, "alpha").pop().unwrap();
+
+    std::fs::rename(alpha, root.path().join("beta.txt")).unwrap();
+    service.handle(Command::RebuildAll);
+    wait_ready(&mut service);
+    assert!(wait_for(&mut service, Duration::from_secs(2), |event| {
+        matches!(event, Event::RowsInvalidated { roots } if roots.contains(&old.result.root()))
+    }));
+    service.handle(Command::LoadRows { start: 0, count: 1 });
+    assert!(wait_for(&mut service, Duration::from_secs(2), |event| {
+        matches!(event, Event::Rows { rows, .. } if rows.len() == 1 && rows[0].missing)
+    }));
+    let new = search(&mut service, "beta").pop().unwrap();
+    assert!(new.result.epoch() > old.result.epoch());
+}
+
+#[test]
+fn apply_rules_rebuilds_existing_roots_but_adding_root_does_not() {
+    let parent = tempfile::tempdir().unwrap();
+    let first = parent.path().join("first");
+    let second = parent.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    std::fs::write(first.join("keep.txt"), "first").unwrap();
+    std::fs::write(second.join("added.md"), "second").unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    let mut service = Service::new(data.path(), host.clone());
+    let mut settings = settings_for(&first);
+    settings.watch = false;
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+    assert_eq!(names(&search(&mut service, "keep")), ["keep.txt"]);
+
+    let original = service.slot_snapshot().pop().unwrap();
+    let before = original.fingerprint();
+    *host.picked.lock().unwrap() = Some(second);
+    service.handle(Command::PickFolder);
+    wait_ready(&mut service);
+    assert_eq!(original.fingerprint(), before);
+    assert_eq!(names(&search(&mut service, "added")), ["added.md"]);
+
+    let mut settings = service.settings().clone();
+    settings.exclude_patterns.push("*.txt".into());
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+    assert!(original.fingerprint().0 > before.0);
+    assert!(search(&mut service, "keep").is_empty());
+    assert_eq!(names(&search(&mut service, "added")), ["added.md"]);
+}
+
+#[test]
+fn hidden_roots_resume_and_reconcile_changes_when_reopened() {
+    let root = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut settings = settings_for(root.path());
+    settings.watch = true;
+    let mut service = Service::new(data.path(), Arc::new(FakeHost::default()));
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    service.handle(Command::VisibilityChanged { visible: true });
+    wait_ready(&mut service);
+    service.handle(Command::VisibilityChanged { visible: false });
+    std::fs::write(root.path().join("hidden.md"), "hidden").unwrap();
+    assert!(search(&mut service, "hidden").is_empty());
+
+    service.handle(Command::VisibilityChanged { visible: true });
+    wait_ready(&mut service);
+    assert_eq!(names(&search(&mut service, "hidden")), ["hidden.md"]);
+}
+
+#[test]
+fn shutdown_flushes_history_without_overwriting_new_settings() {
+    let data = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = settings_for(root.path());
+    settings.history_enabled = true;
+    settings.watch = false;
+    let mut service = Service::new(data.path(), Arc::new(FakeHost::default()));
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    for text in ["first", "second", "third"] {
+        service.handle(Command::Search {
+            text: text.into(),
+            literal: true,
+            case_sensitive: false,
+            scope: None,
+        });
+    }
+    service.handle(Command::SetView {
+        view: devtools_search::settings::ResultView::Large,
+    });
+    service.handle(Command::Search {
+        text: "last".into(),
+        literal: true,
+        case_sensitive: false,
+        scope: None,
+    });
+    service.shutdown();
+    let saved =
+        devtools_search::settings::SearchSettingsStore::new(&data.path().join("search")).load();
+    assert_eq!(
+        saved.settings.ui.view,
+        devtools_search::settings::ResultView::Large
+    );
+    let history: Vec<_> = saved
+        .settings
+        .history
+        .into_iter()
+        .map(|entry| entry.query)
+        .collect();
+    assert_eq!(history, ["last", "third", "second", "first"]);
+}
+
 #[test]
 fn not_indexed_folder_reports_notice() {
     let fixture = fixture();
@@ -342,6 +550,16 @@ fn watch_updates_index_without_rebuild() {
         let _ = service.poll();
         std::thread::sleep(Duration::from_millis(100));
     }
+    let slot = service.slot_snapshot().pop().unwrap();
+    let root = slot.id;
+    let weak = Arc::downgrade(&slot);
+    drop(slot);
+    service.handle(Command::RemoveRoot { root });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while weak.upgrade().is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(weak.upgrade().is_none(), "移除根后应停止监听并释放索引");
     service.shutdown();
 }
 

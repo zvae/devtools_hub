@@ -909,6 +909,7 @@ name = "devtools-hub"
 version = "0.1.6"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
  "chrono",
  "devtools-clipboard",
  "devtools-json",
@@ -958,14 +959,19 @@ dependencies = [
  "devtools-search-core",
  "devtools-ui",
  "directories",
+ "dispatch2",
  "egui",
+ "libc",
  "notify",
+ "objc2-core-foundation",
+ "objc2-core-services",
  "rayon",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tracing",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 
@@ -2953,6 +2959,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "583300ad934cba24ff5292aee751ecc070f7ca6b39a574cc21b7b5e588e06a0b"
 dependencies = [
+ "dispatch2",
  "libc",
  "objc2-core-foundation",
 ]

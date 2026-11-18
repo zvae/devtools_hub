@@ -2,10 +2,7 @@
 //!
 //! 扫描时一次 `read_dir` + `DirEntry::metadata`（lstat 语义，不跟随符号链接），
 //! 大小/修改时间/创建时间在列表项里带出，查询阶段不再 stat。
-//! 已知限制（v1）：
-//! - 创建时间：macOS 的 `st_birthtime` 没有 std 接口，为 `Unknown`（排序置后、显示"—"）；
-//!   Windows 用 `Metadata::created()`；
-//! - 设备号：Unix 用 `MetadataExt::dev()`；Windows 依赖卷 GUID 判卷（见 `volumes`）。
+//! Unix 用同一次元数据读取的设备号判断是否跨卷。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -37,26 +34,12 @@ impl FsSource for StdFs {
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            let kind = if file_type.is_symlink() {
-                EntryKind::Symlink
-            } else if file_type.is_dir() {
-                EntryKind::Dir
-            } else if file_type.is_file() {
-                EntryKind::File
+            let metadata = if file_type.is_symlink() {
+                None
             } else {
-                EntryKind::Other
+                item.metadata().ok()
             };
-            let mut meta = NodeMeta::default();
-            if !file_type.is_symlink() {
-                if let Ok(metadata) = item.metadata() {
-                    if kind == EntryKind::File {
-                        meta.size = Some(metadata.len());
-                    }
-                    meta.mtime = metadata.modified().ok().and_then(to_unix);
-                    meta.btime = metadata.created().ok().and_then(to_unix);
-                }
-            }
-            out.push(Entry { name, kind, meta });
+            out.push(entry_from_type(name, file_type, metadata.as_ref()));
         }
         Ok(())
     }
@@ -64,9 +47,8 @@ impl FsSource for StdFs {
     fn device_of(&self, path: &Path) -> Option<u64> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            // 用 symlink_metadata（lstat），避免跟随符号链接到别的卷。
-            std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+            let metadata = std::fs::symlink_metadata(path).ok()?;
+            metadata_device(&metadata)
         }
         #[cfg(not(unix))]
         {
@@ -74,6 +56,54 @@ impl FsSource for StdFs {
             None
         }
     }
+}
+
+/// 读取监听事件的目录项，和初扫共享类型及元数据语义。
+pub fn entry_at(path: &Path) -> io::Result<Entry> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    let name = path.file_name().unwrap_or(path.as_os_str()).to_os_string();
+    Ok(entry_from_type(name, metadata.file_type(), Some(&metadata)))
+}
+
+fn entry_from_type(
+    name: std::ffi::OsString,
+    ty: std::fs::FileType,
+    metadata: Option<&std::fs::Metadata>,
+) -> Entry {
+    let kind = if ty.is_symlink() {
+        EntryKind::Symlink
+    } else if ty.is_dir() {
+        EntryKind::Dir
+    } else if ty.is_file() {
+        EntryKind::File
+    } else {
+        EntryKind::Other
+    };
+    let mut meta = NodeMeta::default();
+    let mut device = None;
+    if let Some(metadata) = metadata.filter(|_| kind != EntryKind::Symlink) {
+        meta.size = (kind == EntryKind::File).then(|| metadata.len());
+        meta.mtime = metadata.modified().ok().and_then(to_unix);
+        meta.btime = metadata.created().ok().and_then(to_unix);
+        device = metadata_device(metadata);
+    }
+    Entry {
+        name,
+        kind,
+        meta,
+        device,
+    }
+}
+
+#[cfg(unix)]
+fn metadata_device(metadata: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(metadata.dev())
+}
+
+#[cfg(not(unix))]
+fn metadata_device(_: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 fn to_unix(time: std::time::SystemTime) -> Option<i64> {

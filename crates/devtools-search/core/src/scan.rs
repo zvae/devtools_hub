@@ -127,6 +127,30 @@ pub struct ScanOptions {
     pub root_device: Option<u64>,
 }
 
+impl ScanOptions {
+    /// 返回节点类型、是否排除、是否递归。全扫和监听使用相同规则。
+    pub fn classify(&self, entry: &Entry, relative: &str) -> (NodeKind, bool, bool) {
+        if entry.kind == EntryKind::Dir {
+            let excluded = self.excludes.is_excluded_dir(relative);
+            if !self.scan_app_bundles && is_app_bundle(&entry.name) {
+                return (
+                    NodeKind::File,
+                    excluded || self.excludes.is_excluded_file(relative),
+                    false,
+                );
+            }
+            let same_device = self.root_device.is_none() || self.root_device == entry.device;
+            (NodeKind::Dir, excluded, !excluded && same_device)
+        } else {
+            (
+                NodeKind::File,
+                self.excludes.is_excluded_file(relative),
+                false,
+            )
+        }
+    }
+}
+
 /// 扫描统计。
 #[derive(Default, Debug)]
 pub struct ScanStats {
@@ -134,6 +158,7 @@ pub struct ScanStats {
     pub dirs: u32,
     /// 权限拒绝 / IO 错误的目录数（§7.3）。
     pub denied: u32,
+    pub root_failed: bool,
     pub excluded: u32,
     pub symlinks: u32,
 }
@@ -159,13 +184,12 @@ pub fn scan_root(
         .unwrap_or_else(|| root_path.as_os_str())
         .to_os_string();
     let root = index.insert(None, &root_name, NodeKind::Dir, NodeMeta::default());
-    stats.dirs = 1;
 
     // 工作栈：(绝对路径, 节点, 根相对路径)。
     let mut stack: Vec<(PathBuf, crate::model::NodeId, String)> =
         vec![(root_path.to_path_buf(), root, String::new())];
     let mut entries: Vec<Entry> = Vec::new();
-    let mut scanned_dirs = 0u32;
+    let mut visited = 0u32;
 
     while let Some((dir_path, dir_node, rel)) = stack.pop() {
         if cancel.load(Ordering::Relaxed) {
@@ -174,74 +198,50 @@ pub fn scan_root(
         entries.clear();
         if source.list_dir(&dir_path, &mut entries).is_err() {
             stats.denied += 1;
+            stats.root_failed |= dir_node == root;
             continue;
         }
-        scanned_dirs += 1;
         for entry in &entries {
-            if (stats.files + stats.dirs) % 2048 == 0 && cancel.load(Ordering::Relaxed) {
-                return ScanOutcome { stats, cancelled: true };
+            visited = visited.wrapping_add(1);
+            if visited % 2048 == 0 && cancel.load(Ordering::Relaxed) {
+                return ScanOutcome {
+                    stats,
+                    cancelled: true,
+                };
             }
             let rel_path = if rel.is_empty() {
                 entry.name.to_string_lossy().into_owned()
             } else {
                 format!("{rel}/{}", entry.name.to_string_lossy())
             };
-            let abs_path = dir_path.join(&entry.name);
-            match entry.kind {
-                EntryKind::Dir => {
-                    let excluded = opts.excludes.is_excluded_dir(&rel_path);
-                    let is_bundle = !opts.scan_app_bundles && is_app_bundle(&entry.name);
-                    // 交叉卷：设备号不同则不递归（§7.3）。
-                    let cross_volume = opts
-                        .root_device
-                        .is_some_and(|root_dev| source.device_of(&abs_path) != Some(root_dev));
-                    if is_bundle {
-                        // 包整体作为文件节点（§7.3）。
-                        index.insert(
-                            Some(dir_node),
-                            &entry.name,
-                            NodeKind::File,
-                            entry.meta,
-                        );
-                        stats.files += 1;
-                        continue;
-                    }
-                    let node = index.insert(Some(dir_node), &entry.name, NodeKind::Dir, entry.meta);
-                    stats.dirs += 1;
-                    if excluded {
-                        index.set_excluded(node, true);
-                        stats.excluded += 1;
-                        // 命中排除项不 walk 内部（§7.4）。
-                    } else if !cross_volume {
-                        stack.push((abs_path, node, rel_path));
-                    }
-                }
-                EntryKind::File | EntryKind::Other => {
-                    let node = index.insert(Some(dir_node), &entry.name, NodeKind::File, entry.meta);
-                    stats.files += 1;
-                    if opts.excludes.is_excluded_file(&rel_path) {
-                        index.set_excluded(node, true);
-                        stats.excluded += 1;
-                    }
-                }
-                EntryKind::Symlink => {
-                    // 符号链接/reparse 目录不递归（避免环与交叉卷，§7.3）。
-                    let node = index.insert(Some(dir_node), &entry.name, NodeKind::File, entry.meta);
-                    stats.files += 1;
-                    stats.symlinks += 1;
-                    let _ = node;
-                }
+            let (kind, excluded, descend) = opts.classify(entry, &rel_path);
+            let node = index.insert(Some(dir_node), &entry.name, kind, entry.meta);
+            if excluded {
+                index.set_excluded(node, true);
+                stats.excluded += 1;
+                continue;
+            }
+            match kind {
+                NodeKind::Dir => stats.dirs += 1,
+                NodeKind::File => stats.files += 1,
+            }
+            if entry.kind == EntryKind::Symlink {
+                stats.symlinks += 1;
+            }
+            if descend {
+                stack.push((dir_path.join(&entry.name), node, rel_path));
             }
         }
     }
-    let _ = scanned_dirs;
     index.commit();
     ScanOutcome { stats, cancelled: false }
 }
 
 /// `.app` 包名（大小写不敏感；§7.3）。
 fn is_app_bundle(name: &OsStr) -> bool {
-    name.to_string_lossy().to_ascii_lowercase().ends_with(".app")
+    name.to_str()
+        .and_then(|name| name.as_bytes().get(name.len().saturating_sub(4)..))
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".app"))
 }
 
 #[cfg(test)]

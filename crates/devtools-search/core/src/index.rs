@@ -120,6 +120,7 @@ impl NameArena {
     fn index_insert(&mut self, bytes: &[u8], slot: u32) {
         if self.dedup.len() < self.entries.len() * 2 {
             self.rebuild_index();
+            return;
         }
         let mask = self.dedup.len() - 1;
         let mut probe = hash_bytes(bytes) as usize & mask;
@@ -155,9 +156,8 @@ impl NameArena {
         }
         self.dedup = vec![u32::MAX; capacity];
         for slot in 0..self.entries.len() {
-            let bytes = self.raw_slice(&self.entries[slot]).to_vec();
             let mask = self.dedup.len() - 1;
-            let mut probe = hash_bytes(&bytes) as usize & mask;
+            let mut probe = hash_bytes(self.raw_slice(&self.entries[slot])) as usize & mask;
             while self.dedup[probe] != u32::MAX {
                 probe = (probe + 1) & mask;
             }
@@ -170,6 +170,36 @@ impl NameArena {
         if self.dedup.is_empty() && !self.entries.is_empty() {
             self.rebuild_index();
         }
+    }
+
+    /// 原样搬运仍被节点引用的名字，保留原始字节及已计算的匹配文本。
+    fn retain_used(&mut self, names: &mut [u32]) {
+        let mut remap = vec![u32::MAX; self.entries.len()];
+        let mut retained = Self::default();
+        for name in names {
+            let slot = &mut remap[*name as usize];
+            if *slot == u32::MAX {
+                let mut entry = self.entries[*name as usize];
+                let raw = self.raw_slice(&entry);
+                let nfc = self.nfc_slice(&entry);
+                let lower = self.lower_slice(&entry);
+                entry.raw_off = retained.raw.len() as u32;
+                retained.raw.extend_from_slice(raw);
+                if entry.has_nfc {
+                    entry.nfc_off = retained.nfc.len() as u32;
+                    retained.nfc.extend_from_slice(nfc);
+                }
+                if entry.has_lower {
+                    entry.lower_off = retained.lower.len() as u32;
+                    retained.lower.extend_from_slice(lower);
+                }
+                *slot = retained.entries.len() as u32;
+                retained.entries.push(entry);
+            }
+            *name = *slot;
+        }
+        retained.ensure_index();
+        *self = retained;
     }
 }
 
@@ -204,9 +234,7 @@ pub(crate) struct Derived {
     child_range: Vec<(u32, u32)>,
     /// 按父节点分桶、桶内按名字顺序的孩子列表。
     child_list: Vec<u32>,
-    /// DFS 先序序号（默认路径序；NodeId 顺序绝不能作路径顺序，§7.9）。
-    rank: Vec<u32>,
-    /// 欧拉进入时间。
+    /// 欧拉进入时间，同时是默认路径序使用的 DFS 先序序号。
     tin: Vec<u32>,
     /// 欧拉离开时间（区间 [tin, tout) 覆盖全部后代）。
     tout: Vec<u32>,
@@ -335,7 +363,7 @@ impl RootIndex {
     /// 默认路径序（rank）。派生数据失效时调用方应先 [`Self::rebuild_derived`]。
     pub fn rank_of(&self, node: NodeId) -> u32 {
         if self.derived.built_for == self.columns.parent.len() {
-            self.derived.rank[node.as_usize()]
+            self.derived.tin[node.as_usize()]
         } else {
             node.0
         }
@@ -358,9 +386,9 @@ impl RootIndex {
         self.derived.built_for == self.columns.parent.len()
     }
 
-    /// 孩子列表（桶内已按名字不区分大小写顺序）。
+    /// 上次提交的孩子列表（桶内已按名字不区分大小写顺序）。
     pub fn children(&self, node: NodeId) -> &[NodeId] {
-        if !self.derived_valid() {
+        if node.as_usize() >= self.derived.built_for {
             return &[];
         }
         let (start, end) = self.derived.child_range[node.as_usize()];
@@ -400,10 +428,13 @@ impl RootIndex {
     /// 标记删除（同一 epoch 内 NodeId 不复用，§7.1）。
     pub fn mark_deleted(&mut self, node: NodeId) {
         let i = node.as_usize();
-        if self.columns.status[i] == NodeStatus::Live as u8 {
-            self.columns.status[i] = NodeStatus::Deleted as u8;
-            self.deleted += 1;
+        match self.status(node) {
+            NodeStatus::Deleted => return,
+            NodeStatus::Excluded => self.excluded -= 1,
+            _ => {}
         }
+        self.columns.status[i] = NodeStatus::Deleted as u8;
+        self.deleted += 1;
     }
 
     /// 批量删除中的临时隐藏（提交后转为 deleted，§7.1）。
@@ -450,6 +481,12 @@ impl RootIndex {
         let folded = std::str::from_utf8(target).ok().map(crate::text::fold);
         let mut fallback = None;
         for &child in self.children(parent) {
+            if matches!(
+                self.status(child),
+                NodeStatus::Deleted | NodeStatus::PendingRemove
+            ) {
+                continue;
+            }
             if self.raw_name(child) == target {
                 return Some(child);
             }
@@ -462,6 +499,17 @@ impl RootIndex {
             }
         }
         fallback
+    }
+
+    /// 监听的磁盘路径按原始字节查找，区分仅大小写不同的两个节点。
+    pub fn child_by_exact_name(&self, parent: NodeId, name: &OsStr) -> Option<NodeId> {
+        let raw = os_bytes(name);
+        self.children(parent).iter().copied().find(|&child| {
+            !matches!(
+                self.status(child),
+                NodeStatus::Deleted | NodeStatus::PendingRemove
+            ) && self.raw_name(child) == raw.as_ref()
+        })
     }
 
     /// 按根相对路径查找节点（空路径返回根节点）。
@@ -549,9 +597,10 @@ impl RootIndex {
             columns.btime.push(self.columns.btime[i]);
         }
         self.columns = columns;
+        self.names.retain_used(&mut self.columns.name);
         self.next_node = next;
         self.deleted = 0;
-        self.epoch += 1;
+        self.epoch = self.epoch.checked_add(1).expect("索引代际耗尽");
         self.revision += 1;
         self.rebuild_derived();
         true
@@ -559,17 +608,22 @@ impl RootIndex {
 
     /// 提交一批变更：递增 revision、重建派生数据。
     pub fn commit(&mut self) {
-        self.revision += 1;
+        self.commit_metadata();
         self.rebuild_derived();
+    }
+
+    /// 元数据变更不影响路径序和父子关系。
+    pub fn commit_metadata(&mut self) {
+        self.revision += 1;
     }
 
     /// 重建子节点表、rank 与欧拉区间（孩子按名字不区分大小写顺序，§7.9）。
     pub fn rebuild_derived(&mut self) {
+        self.derived = Derived::default();
         let n = self.columns.parent.len();
         let mut derived = Derived {
             child_range: vec![(0, 0); n],
             child_list: Vec::new(),
-            rank: vec![0; n],
             tin: vec![0; n],
             tout: vec![u32::MAX; n],
             built_for: n,
@@ -609,7 +663,7 @@ impl RootIndex {
             let start = starts[v] as usize;
             let end = start + counts[v] as usize;
             if end - start > 1 {
-                child_list[start..end].sort_by(|&a, &b| {
+                child_list[start..end].sort_unstable_by(|&a, &b| {
                     self.sort_name(NodeId(a))
                         .cmp(self.sort_name(NodeId(b)))
                         .then_with(|| a.cmp(&b))
@@ -619,23 +673,18 @@ impl RootIndex {
         }
         // 从根 DFS（先序），生成 rank 与 tin/tout。
         if root != u32::MAX {
-            let mut cursors = starts.clone();
+            cursor.copy_from_slice(&starts);
             let mut stack = vec![root];
             let mut tin = 0u32;
-            let mut rank = 0u32;
             derived.tin[root as usize] = tin;
             tin += 1;
-            derived.rank[root as usize] = rank;
-            rank += 1;
             while let Some(&top) = stack.last() {
                 let (_, end) = derived.child_range[top as usize];
-                if cursors[top as usize] < end {
-                    let child = child_list[cursors[top as usize] as usize];
-                    cursors[top as usize] += 1;
+                if cursor[top as usize] < end {
+                    let child = child_list[cursor[top as usize] as usize];
+                    cursor[top as usize] += 1;
                     derived.tin[child as usize] = tin;
                     tin += 1;
-                    derived.rank[child as usize] = rank;
-                    rank += 1;
                     stack.push(child);
                 } else {
                     derived.tout[top as usize] = tin;
@@ -647,24 +696,16 @@ impl RootIndex {
         self.derived = derived;
     }
 
-    /// 墓碑/排除占比（压缩启发式，§7.7：超过约 20% 时后台压缩）。
+    /// 仅计算可由压缩回收的墓碑。排除节点需保留。
     pub fn stale_ratio(&self) -> f64 {
         let total = self.next_node.max(1);
-        f64::from(self.deleted + self.excluded) / f64::from(total)
+        f64::from(self.deleted) / f64::from(total)
     }
 
-    /// 重建索引（旁路建新根后替换；分配新 epoch，旧结果全部失效，§7.3）。
-    pub fn finish_rebuild(&mut self) {
-        self.epoch += 1;
-        self.deleted = 0;
-        self.excluded = self
-            .columns
-            .status
-            .iter()
-            .filter(|&&s| s == NodeStatus::Excluded as u8)
-            .count() as u32;
-        self.names.ensure_index();
-        self.rebuild_derived();
+    /// 赋予待发布的索引当前会话的根 ID 和新代际。扫描和解码已构建派生表。
+    pub fn prepare_replacement(&mut self, root: RootId, previous_epoch: u32) {
+        self.root = root;
+        self.epoch = previous_epoch.checked_add(1).expect("索引代际耗尽");
     }
 
     pub(crate) fn parts(&self) -> (&Columns, &NameArena, u32) {
@@ -861,6 +902,8 @@ mod tests {
         assert_eq!(index.len() as usize, before as usize - 3);
         assert!(index.derived_valid());
         assert!(index.child_by_name(root, os("docs")).is_none());
+        assert!(index.names.lookup(b"a.md").is_none());
+        assert!(index.names.lookup(b"B.md").is_none());
         // 压缩后还能继续插入。
         let fresh = index.insert(Some(root), os("new.txt"), NodeKind::File, NodeMeta::default());
         index.commit();

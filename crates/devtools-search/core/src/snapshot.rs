@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -32,15 +32,15 @@ pub struct EventCheckpoint {
 
 /// 快照载荷（postcard 序列化）。
 #[derive(Serialize, Deserialize)]
-struct SnapshotBody {
-    identity: RootLocation,
+struct SnapshotBody<I = RootLocation, C = Columns, N = NameArena, E = EventCheckpoint> {
+    identity: I,
     config_fingerprint: u64,
     epoch: u32,
     revision: u64,
-    checkpoint: EventCheckpoint,
+    checkpoint: E,
     next_node: u32,
-    columns: Columns,
-    names: NameArena,
+    columns: C,
+    names: N,
 }
 
 /// 快照解码结果。
@@ -49,6 +49,8 @@ pub struct DecodedSnapshot {
     pub identity: RootLocation,
     pub config_fingerprint: u64,
     pub checkpoint: EventCheckpoint,
+    /// 通过存储加载时的快照文件代数。内存解码时没有 manifest。
+    pub storage_generation: Option<u64>,
 }
 
 /// 快照错误。
@@ -83,27 +85,62 @@ pub fn encode(
     config_fingerprint: u64,
     checkpoint: &EventCheckpoint,
 ) -> Result<Vec<u8>, SnapshotError> {
+    let mut out = Cursor::new(Vec::new());
+    write_snapshot(&mut out, index, identity, config_fingerprint, checkpoint)?;
+    Ok(out.into_inner())
+}
+
+/// 压缩产物直接进目标文件，哈希与写入同步计算。留出头部，压缩结束后回填校验和。
+fn write_snapshot(
+    mut out: impl Write + Seek,
+    index: &RootIndex,
+    identity: &RootLocation,
+    config_fingerprint: u64,
+    checkpoint: &EventCheckpoint,
+) -> Result<(), SnapshotError> {
     let (columns, names, next_node) = index.parts();
     let body = SnapshotBody {
-        identity: identity.clone(),
+        identity,
         config_fingerprint,
         epoch: index.epoch(),
         revision: index.revision(),
-        checkpoint: checkpoint.clone(),
+        checkpoint,
         next_node,
-        columns: columns.clone(),
-        // NameArena 含 `#[serde(skip)]` 的去重索引，不随快照保存。
-        names: names.clone(),
+        columns,
+        names,
     };
-    let payload = postcard::to_allocvec(&body).map_err(|e| SnapshotError::Decode(e.to_string()))?;
-    let compressed = zstd::encode_all(&payload[..], 3)?;
-    let checksum = Sha256::digest(&compressed);
-    let mut out = Vec::with_capacity(HEADER_LEN + compressed.len());
-    out.extend_from_slice(&SNAPSHOT_MAGIC);
-    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-    out.extend_from_slice(&checksum);
-    out.extend_from_slice(&compressed);
-    Ok(out)
+    out.write_all(&SNAPSHOT_MAGIC)?;
+    out.write_all(&FORMAT_VERSION.to_le_bytes())?;
+    out.write_all(&[0; 32])?;
+    let mut compressed = HashWriter {
+        out: &mut out,
+        hash: Sha256::new(),
+    };
+    let encoder = zstd::stream::write::Encoder::new(&mut compressed, 3)?;
+    let mut writer = BufWriter::with_capacity(64 * 1024, encoder);
+    postcard::to_io(&body, &mut writer).map_err(|e| SnapshotError::Decode(e.to_string()))?;
+    writer.into_inner().map_err(|e| e.into_error())?.finish()?;
+    let checksum = compressed.hash.finalize();
+    out.seek(SeekFrom::Start(8))?;
+    out.write_all(&checksum)?;
+    Ok(())
+}
+
+struct HashWriter<W> {
+    out: W,
+    hash: Sha256,
+}
+
+impl<W: Write> Write for HashWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.out.write(bytes)?;
+        self.hash.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
 }
 
 /// 解码并校验快照；成功后派生表已重建。
@@ -126,19 +163,21 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedSnapshot, SnapshotError> {
     let payload = zstd::decode_all(compressed)?;
     let body: SnapshotBody =
         postcard::from_bytes(&payload).map_err(|e| SnapshotError::Decode(e.to_string()))?;
-    let identity = body.identity.clone();
-    let index = RootIndex::from_parts(
+    drop(payload);
+    let mut index = RootIndex::from_parts(
         body.columns,
         body.names,
         body.next_node,
         body.epoch,
         body.revision,
     );
+    index.set_identity(body.identity.clone());
     Ok(DecodedSnapshot {
         index,
-        identity,
+        identity: body.identity,
         config_fingerprint: body.config_fingerprint,
         checkpoint: body.checkpoint,
+        storage_generation: None,
     })
 }
 
@@ -162,6 +201,8 @@ pub struct ManifestEntry {
     pub generation: u64,
     pub epoch: u32,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<EventCheckpoint>,
 }
 
 /// manifest 文件结构。
@@ -201,106 +242,208 @@ impl SnapshotStore {
         fingerprint: u64,
         checkpoint: &EventCheckpoint,
     ) -> Result<u64, SnapshotError> {
+        self.save_if(root_key, index, identity, fingerprint, checkpoint, || true)
+            .map(|generation| generation.expect("无条件保存"))
+    }
+
+    /// 先在锁外编码，再在发布前检查扫描是否已取消或缓存是否已清理。
+    pub fn save_if(
+        &self,
+        root_key: &str,
+        index: &RootIndex,
+        identity: &RootLocation,
+        fingerprint: u64,
+        checkpoint: &EventCheckpoint,
+        current: impl FnOnce() -> bool,
+    ) -> Result<Option<u64>, SnapshotError> {
         fs::create_dir_all(&self.dir)?;
-        let bytes = encode(index, identity, fingerprint, checkpoint)?;
-        let generation = std::time::SystemTime::now()
+        let mut pending = tempfile::NamedTempFile::new_in(&self.dir)?;
+        write_snapshot(
+            pending.as_file_mut(),
+            index,
+            identity,
+            fingerprint,
+            checkpoint,
+        )?;
+        pending.as_file().sync_all()?;
+        let _lock = self.lock_manifest()?;
+        if !current() {
+            return Ok(None);
+        }
+
+        let mut manifest = self.read_manifest()?;
+        let previous = manifest.roots.get(root_key);
+        let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let file = self.dir.join(format!("{root_key}.{generation}.bin"));
-        atomic_write(&file, &bytes)?;
-        // 更新 manifest。
-        let mut manifest = self.read_manifest();
-        manifest.roots.insert(
+            .map_or(0, |d| d.as_millis() as u64);
+        let generation = match previous {
+            Some(entry) => now.max(
+                entry
+                    .generation
+                    .checked_add(1)
+                    .ok_or(SnapshotError::Invalid("快照代数耗尽"))?,
+            ),
+            None => now,
+        };
+        let path = self.snapshot_path(root_key, generation);
+        pending.persist(&path).map_err(|err| err.error)?;
+
+        let previous = manifest.roots.insert(
             root_key.to_string(),
             ManifestEntry {
                 generation,
                 epoch: index.epoch(),
                 revision: index.revision(),
+                checkpoint: None,
             },
         );
-        let manifest_bytes =
-            serde_json::to_vec_pretty(&manifest).map_err(|e| SnapshotError::Decode(e.to_string()))?;
-        atomic_write(&self.dir.join("manifest.json"), &manifest_bytes)?;
-        // 清理同根的旧代数。
-        if let Ok(entries) = fs::read_dir(&self.dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with(&format!("{root_key}."))
-                    && name.ends_with(".bin")
-                    && entry.path() != file
-                {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
+        if let Err(err) = self.write_manifest(&manifest) {
+            let _ = fs::remove_file(&path);
+            return Err(err);
         }
-        Ok(generation)
+        if let Some(previous) = previous {
+            let _ = fs::remove_file(self.snapshot_path(root_key, previous.generation));
+        }
+        Ok(Some(generation))
     }
 
-    /// 读取一根的最新快照（manifest 指向的代数）。不存在返回 `Ok(None)`。
+    /// 读取一根的最新快照。只在解析指针和打开文件时持锁。
     pub fn load_latest(&self, root_key: &str) -> Result<Option<DecodedSnapshot>, SnapshotError> {
-        let manifest = self.read_manifest();
+        let lock = match self.lock_manifest() {
+            Ok(lock) => lock,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let manifest = self.read_manifest()?;
         let Some(entry) = manifest.roots.get(root_key) else {
             return Ok(None);
         };
-        let file = self.dir.join(format!("{root_key}.{}.bin", entry.generation));
-        let bytes = match fs::read(&file) {
-            Ok(bytes) => bytes,
+        let mut file = match fs::File::open(self.snapshot_path(root_key, entry.generation)) {
+            Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(SnapshotError::Io(e)),
         };
-        decode(&bytes).map(Some)
+        drop(lock);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let mut snapshot = decode(&bytes)?;
+        snapshot.storage_generation = Some(entry.generation);
+        if let Some(checkpoint) = &entry.checkpoint {
+            snapshot.checkpoint = checkpoint.clone();
+        }
+        Ok(Some(snapshot))
     }
 
-    /// 移除一根的快照与 manifest 记录。
+    /// 回放未改变索引时只推进该快照的检查点。其他任务已经替换快照时放弃提交。
+    pub fn advance_checkpoint(
+        &self,
+        root_key: &str,
+        generation: u64,
+        checkpoint: &EventCheckpoint,
+        current: impl FnOnce() -> bool,
+    ) -> Result<(), SnapshotError> {
+        let _lock = self.lock_manifest()?;
+        if !current() {
+            return Ok(());
+        }
+        let mut manifest = self.read_manifest()?;
+        let Some(entry) = manifest.roots.get_mut(root_key) else {
+            return Ok(());
+        };
+        if entry.generation == generation
+            && entry.checkpoint.as_ref().is_none_or(|previous| previous.last_event_id < checkpoint.last_event_id)
+        {
+            entry.checkpoint = Some(checkpoint.clone());
+            self.write_manifest(&manifest)?;
+        }
+        Ok(())
+    }
+
     pub fn remove(&self, root_key: &str) -> Result<(), SnapshotError> {
-        let mut manifest = self.read_manifest();
-        if let Some(entry) = manifest.roots.remove(root_key) {
-            let file = self.dir.join(format!("{root_key}.{}.bin", entry.generation));
-            let _ = fs::remove_file(file);
-            let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-                .map_err(|e| SnapshotError::Decode(e.to_string()))?;
-            atomic_write(&self.dir.join("manifest.json"), &manifest_bytes)?;
-        }
-        Ok(())
+        self.remove_matching(|key| key == root_key)
     }
 
-    /// 清理不再存在的根的快照文件。
+    /// 同一事务清理一组根，也包含先前损坏的 manifest 遗留的文件。
+    pub fn remove_roots(&self, keys: &[String]) -> Result<(), SnapshotError> {
+        self.remove_matching(|key| keys.iter().any(|known| known == key))
+    }
+
     pub fn clean_orphans(&self, known: &[String]) -> Result<(), SnapshotError> {
-        let manifest = self.read_manifest();
-        let orphans: Vec<String> = manifest
-            .roots
-            .keys()
-            .filter(|k| !known.contains(k))
-            .cloned()
-            .collect();
-        for key in orphans {
-            self.remove(&key)?;
+        self.remove_matching(|key| !known.iter().any(|known| known == key))
+    }
+
+    fn remove_matching(&self, remove: impl Fn(&str) -> bool) -> Result<(), SnapshotError> {
+        let _lock = match self.lock_manifest() {
+            Ok(lock) => lock,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut manifest = self.read_manifest()?;
+        let old_len = manifest.roots.len();
+        manifest.roots.retain(|key, _| !remove(key));
+        if manifest.roots.len() != old_len {
+            self.write_manifest(&manifest)?;
+        }
+        for entry in fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let key = name.to_str().and_then(|name| {
+                let (key, generation) = name.strip_suffix(".bin")?.rsplit_once('.')?;
+                generation.parse::<u64>().ok().map(|_| key)
+            });
+            if key.is_some_and(&remove) {
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
         }
         Ok(())
     }
 
-    fn read_manifest(&self) -> Manifest {
-        fs::read(self.dir.join("manifest.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+    fn snapshot_path(&self, root_key: &str, generation: u64) -> PathBuf {
+        self.dir.join(format!("{root_key}.{generation}.bin"))
+    }
+
+    fn lock_manifest(&self) -> io::Result<fs::File> {
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.dir.join("manifest.lock"))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    fn read_manifest(&self) -> Result<Manifest, SnapshotError> {
+        match fs::read(self.dir.join("manifest.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Manifest::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn write_manifest(&self, manifest: &Manifest) -> Result<(), SnapshotError> {
+        let bytes = serde_json::to_vec_pretty(manifest)
+            .map_err(|e| SnapshotError::Decode(e.to_string()))?;
+        atomic_write(&self.dir.join("manifest.json"), &bytes)?;
+        Ok(())
     }
 }
 
-/// 原子写：临时文件 → fsync → 原子替换（§7.6）。
+/// 原子写：唯一临时文件 → fsync → 原子替换。
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "snapshot".into());
-    let tmp = path.with_file_name(format!(".{file_name}.tmp"));
-    {
-        let mut file = fs::File::create(&tmp)?;
-        io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp, path)
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    pending.write_all(bytes)?;
+    pending.as_file().sync_all()?;
+    pending.persist(path).map_err(|err| err.error)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -308,6 +451,84 @@ mod tests {
     use super::*;
     use crate::model::{NodeKind, NodeMeta, RootId, VolumeId};
     use std::ffi::OsStr;
+
+    #[test]
+    fn concurrent_root_writes_keep_both_manifest_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for key in ["first", "second"] {
+                let path = dir.path().to_owned();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let store = SnapshotStore::new(path);
+                    let mut index = RootIndex::new(RootId(0));
+                    index.insert(None, OsStr::new(key), NodeKind::Dir, NodeMeta::default());
+                    index.commit();
+                    barrier.wait();
+                    store
+                        .save(key, &index, &identity(), 7, &EventCheckpoint::default())
+                        .unwrap();
+                });
+            }
+        });
+        let store = SnapshotStore::new(dir.path().to_owned());
+        for key in ["first", "second"] {
+            let snapshot = store.load_latest(key).unwrap().unwrap();
+            assert_eq!(snapshot.index.raw_name_str(crate::NodeId::ROOT), Some(key));
+        }
+    }
+
+    #[test]
+    fn cancelled_publish_does_not_replace_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(dir.path().to_owned());
+        let mut index = RootIndex::new(RootId(0));
+        index.insert(None, OsStr::new("root"), NodeKind::Dir, NodeMeta::default());
+        index.commit();
+        store
+            .save("root", &index, &identity(), 7, &EventCheckpoint::default())
+            .unwrap();
+        let result = store.save_if(
+            "root",
+            &index,
+            &identity(),
+            8,
+            &EventCheckpoint::default(),
+            || false,
+        );
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            store
+                .load_latest("root")
+                .unwrap()
+                .unwrap()
+                .config_fingerprint,
+            7
+        );
+    }
+
+    #[test]
+    fn an_unchanged_snapshot_advances_its_checkpoint_without_rewriting_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(dir.path().to_owned());
+        let mut index = RootIndex::new(RootId(0));
+        index.insert(None, OsStr::new("root"), NodeKind::Dir, NodeMeta::default());
+        index.commit();
+        let generation = store.save("root", &index, &identity(), 7, &EventCheckpoint::default()).unwrap();
+        let path = store.snapshot_path("root", generation);
+        let original = fs::read(&path).unwrap();
+        let checkpoint = EventCheckpoint { last_event_id: 10, stream_id: "stream".into() };
+        store.advance_checkpoint("root", generation, &checkpoint, || true).unwrap();
+        let loaded = store.load_latest("root").unwrap().unwrap();
+        assert_eq!(loaded.storage_generation, Some(generation));
+        assert_eq!(loaded.checkpoint, checkpoint);
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        store.save("root", &index, &identity(), 7, &EventCheckpoint::default()).unwrap();
+        store.advance_checkpoint("root", generation, &checkpoint, || true).unwrap();
+        assert_eq!(store.load_latest("root").unwrap().unwrap().checkpoint, EventCheckpoint::default());
+    }
 
     fn identity() -> RootLocation {
         RootLocation {

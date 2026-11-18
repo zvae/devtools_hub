@@ -23,5 +23,14 @@ sha2.workspace = true
 tracing.workspace = true
 zstd.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
+libc = "0.2"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFString", "CFUUID"] }
+objc2-core-services = { version = "0.3", default-features = false, features = ["std", "FSEvents", "libc", "dispatch2"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
+
 [dev-dependencies]
 tempfile.workspace = true

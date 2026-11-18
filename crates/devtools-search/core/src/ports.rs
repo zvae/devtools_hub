@@ -25,6 +25,8 @@ pub struct Entry {
     pub name: OsString,
     pub kind: EntryKind,
     pub meta: NodeMeta,
+    /// 从同一次元数据读取取得的设备号（平台支持时）。
+    pub device: Option<u64>,
 }
 
 /// 文件系统来源（core 测试用 fake source；生产用平台的预取实现）。

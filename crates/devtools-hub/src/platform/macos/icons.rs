@@ -5,6 +5,7 @@ use std::path::Path;
 use objc2::rc::autoreleasepool;
 use objc2::AnyThread;
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
 /// 返回应用图标的 PNG 数据，边长约为 `size` 像素。找不到应用时返回 `None`。
@@ -19,12 +20,7 @@ pub fn app_icon_png(bundle_id: &str, size: f64) -> Option<Vec<u8>> {
         // SAFETY: rect 指向有效的栈变量；不传上下文和 hints 时系统选用最接近该尺寸的表示。
         let cg_image =
             unsafe { image.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
-        let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg_image);
-        // SAFETY: 空属性字典是合法参数。
-        let png = unsafe {
-            rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
-        }?;
-        Some(png.to_vec())
+        cg_image_png(&cg_image)
     })
 }
 
@@ -42,12 +38,7 @@ pub fn file_icon_rgba(path: &Path, size: u32) -> Option<(u32, u32, Vec<u8>)> {
         // SAFETY: rect 指向有效的栈变量；不传上下文和 hints 时系统选用最接近该尺寸的表示。
         let cg_image =
             unsafe { image.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
-        let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg_image);
-        // SAFETY: 空属性字典是合法参数。
-        let png = unsafe {
-            rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
-        }?;
-        let decoded = image::load_from_memory(&png.to_vec()).ok()?.into_rgba8();
+        let decoded = image::load_from_memory(&cg_image_png(&cg_image)?).ok()?.into_rgba8();
         let resized = image::imageops::resize(
             &decoded,
             size,
@@ -56,6 +47,15 @@ pub fn file_icon_rgba(path: &Path, size: u32) -> Option<(u32, u32, Vec<u8>)> {
         );
         Some((size, size, resized.into_raw()))
     })
+}
+
+pub(super) fn cg_image_png(image: &CGImage) -> Option<Vec<u8>> {
+    let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), image);
+    // SAFETY: 空属性字典是合法参数。
+    let png = unsafe {
+        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+    }?;
+    Some(png.to_vec())
 }
 
 #[cfg(test)]

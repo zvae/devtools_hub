@@ -34,26 +34,30 @@ impl RootId {
     }
 }
 
-/// 打包 RootId 与 NodeId 的结果行 ID（§7.1：`ResultId=u64` 打包 RootId/NodeId）。
+/// 结果行只在对应根的索引代际内有效。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ResultId(pub u64);
+pub struct ResultId {
+    node: NodeId,
+    epoch: u32,
+    root: RootId,
+}
 
 impl ResultId {
-    pub fn new(root: RootId, node: NodeId) -> Self {
-        Self(((root.0 as u64) << 32) | u64::from(self_node(node)))
+    pub fn new(root: RootId, node: NodeId, epoch: u32) -> Self {
+        Self { node, epoch, root }
     }
 
     pub fn root(self) -> RootId {
-        RootId((self.0 >> 32) as u16)
+        self.root
     }
 
     pub fn node(self) -> NodeId {
-        NodeId(self.0 as u32)
+        self.node
     }
-}
 
-fn self_node(node: NodeId) -> u64 {
-    u64::from(node.0)
+    pub fn epoch(self) -> u32 {
+        self.epoch
+    }
 }
 
 /// 卷身份：稳定标识（Windows 卷 GUID / macOS 磁盘 UUID 等）。
@@ -234,15 +238,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn result_id_packs_root_and_node() {
-        let id = ResultId::new(RootId(7), NodeId(0x1234_5678));
+    fn result_id_keeps_root_node_and_epoch() {
+        let id = ResultId::new(RootId(7), NodeId(0x1234_5678), 4);
         assert_eq!(id.root(), RootId(7));
         assert_eq!(id.node(), NodeId(0x1234_5678));
         // 根 ID 只打包 u16。
-        let id = ResultId::new(RootId(u16::MAX), NodeId(u32::MAX));
+        let id = ResultId::new(RootId(u16::MAX), NodeId(u32::MAX), u32::MAX);
         assert_eq!(id.root(), RootId(u16::MAX));
         assert_eq!(id.node(), NodeId(u32::MAX));
-        assert_ne!(ResultId::new(RootId(1), NodeId(2)), ResultId::new(RootId(2), NodeId(1)));
+        assert_eq!(id.epoch(), u32::MAX);
+        assert_ne!(
+            ResultId::new(RootId(1), NodeId(2), 1),
+            ResultId::new(RootId(1), NodeId(2), 2)
+        );
     }
 
     #[test]

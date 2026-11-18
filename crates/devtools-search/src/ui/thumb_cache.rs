@@ -5,16 +5,12 @@
 //! 解完直接上传纹理（`egui::Context::load_texture` 允许任意线程调用）并回传句柄，
 //! 下一帧界面就能画出来，期间先显示矢量图标。
 //!
-//! **缓存分两种，这是省 CPU 和内存的关键**：
-//! - 内容预览按 (路径, 尺寸) 存——每个文件都不一样；
-//! - 文件图标按 (扩展名, 尺寸) 存——`.rs` 的图标全都一样。滚动几百个源码文件时，
-//!   只有第一个要问 shell，其余直接命中；否则每个文件都要跑两次 COM 调用再加解码，
-//!   滚动一下就能把两个核跑满。
-//!
-//! 缓存满了只清预览，图标那几十条留着（复用率最高，清了才是真的浪费）。
+//! 内容预览按路径和尺寸缓存，文件图标按扩展名和尺寸复用。
+//! 同类型的图标可用作占位，但内容预览要逐文件判断。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
@@ -22,8 +18,11 @@ use egui::{ColorImage, TextureHandle, TextureOptions};
 
 use crate::{HostServices, Thumbnail};
 
-/// 预览缓存上限（张）。图标按扩展名存，量很小，不占这个额度。
+/// 限制内容预览内存与快滚时排队的工作量。
 const MAX_PREVIEWS: usize = 160;
+const MAX_PREVIEW_BYTES: usize = 24 * 1024 * 1024;
+const MAX_ICONS: usize = 64;
+const MAX_PENDING: usize = 32;
 /// 解码线程数（每个线程是一个独立的 COM 单元）。
 const WORKERS: usize = 2;
 
@@ -32,6 +31,7 @@ type RequestKey = (PathBuf, u32);
 
 struct Reply {
     key: RequestKey,
+    is_dir: bool,
     /// 这次拿到的是图标时，按扩展名复用的键。
     icon_key: Option<String>,
     texture: Option<TextureHandle>,
@@ -41,14 +41,17 @@ struct Reply {
 #[derive(Default)]
 pub struct ThumbnailCache {
     previews: HashMap<RequestKey, Option<TextureHandle>>,
-    icons: HashMap<String, Option<TextureHandle>>,
+    preview_order: VecDeque<RequestKey>,
+    preview_bytes: usize,
+    icons: HashMap<String, TextureHandle>,
     /// 已经排进后台队列、还没回来的请求。
     pending: HashSet<RequestKey>,
     /// 每个解码线程一个队列（两个 worker 各自 `recv`，不用共享接收端）。
-    queues: Vec<Sender<(RequestKey, String, bool)>>,
+    queues: Vec<Sender<(RequestKey, bool)>>,
     /// 下一次投递用哪个队列（轮流，避免全压在一个线程上）。
     next_queue: usize,
     replies: Option<Receiver<Reply>>,
+    closed: Arc<AtomicBool>,
 }
 
 impl ThumbnailCache {
@@ -65,32 +68,26 @@ impl ThumbnailCache {
     ) -> Option<TextureHandle> {
         self.drain();
         let key = (PathBuf::from(path), size);
+        let key_of_icon = icon_key(Path::new(path), size, is_dir);
+        let fallback = self.icons.get(&key_of_icon).cloned();
         if let Some(cached) = self.previews.get(&key) {
-            return cached.clone();
+            return cached.clone().or(fallback);
         }
-        // 同扩展名的图标已经有了：直接复用，不再问 shell。
-        let key_of_icon = icon_key(path, size, is_dir);
-        if let Some(cached) = self.icons.get(&key_of_icon) {
-            let texture = cached.clone();
-            self.previews.insert(key, texture.clone());
-            return texture;
+        if is_dir && fallback.is_some() {
+            return fallback;
         }
-        if self.pending.contains(&key) {
-            return None;
-        }
-        if self.previews.len() >= MAX_PREVIEWS {
-            self.previews.clear();
+        if self.pending.contains(&key) || self.pending.len() >= MAX_PENDING {
+            return fallback;
         }
         if !self.ensure_worker(ctx, host) {
-            return None;
+            return fallback;
         }
-        self.pending.insert(key.clone());
-        if !self.queues.is_empty() {
-            let sender = &self.queues[self.next_queue % self.queues.len()];
-            self.next_queue = self.next_queue.wrapping_add(1);
-            let _ = sender.send((key, path.to_string(), is_dir));
+        let sender = &self.queues[self.next_queue % self.queues.len()];
+        self.next_queue = self.next_queue.wrapping_add(1);
+        if sender.send((key.clone(), is_dir)).is_ok() {
+            self.pending.insert(key);
         }
-        None
+        fallback
     }
 
     /// 只读缓存：拖动框选时代替 [`texture`](Self::texture)，不发起新的解码请求
@@ -102,25 +99,50 @@ impl ThumbnailCache {
             .and_then(|texture| texture.clone())
             .or_else(|| {
                 self.icons
-                    .get(&icon_key(path, size, is_dir))
-                    .and_then(|texture| texture.clone())
+                    .get(&icon_key(Path::new(path), size, is_dir))
+                    .cloned()
             })
     }
 
     /// 把后台已经做完的结果收进缓存。
     fn drain(&mut self) {
-        let Some(replies) = &self.replies else {
-            return;
-        };
-        while let Ok(reply) = replies.try_recv() {
+        while let Some(reply) = self
+            .replies
+            .as_ref()
+            .and_then(|replies| replies.try_recv().ok())
+        {
             self.pending.remove(&reply.key);
-            if let Some(icon_key) = reply.icon_key {
-                // 图标：同扩展名的后续项都能直接用。
-                if reply.texture.is_some() {
-                    self.icons.insert(icon_key, reply.texture.clone());
+            let preview = match reply.icon_key {
+                Some(icon_key) => {
+                    if let Some(texture) = reply.texture {
+                        if self.icons.len() >= MAX_ICONS && !self.icons.contains_key(&icon_key) {
+                            self.icons.clear();
+                        }
+                        self.icons.entry(icon_key).or_insert(texture);
+                        if reply.is_dir {
+                            continue;
+                        }
+                    }
+                    None
+                }
+                None => reply.texture,
+            };
+            let bytes = preview.as_ref().map_or(0, TextureHandle::byte_size);
+            while self.previews.len() >= MAX_PREVIEWS
+                || self.preview_bytes + bytes > MAX_PREVIEW_BYTES
+            {
+                let Some(oldest) = self.preview_order.pop_front() else {
+                    break;
+                };
+                if let Some(Some(texture)) = self.previews.remove(&oldest) {
+                    self.preview_bytes -= texture.byte_size();
                 }
             }
-            self.previews.insert(reply.key, reply.texture);
+            if bytes <= MAX_PREVIEW_BYTES {
+                self.preview_bytes += bytes;
+                self.preview_order.push_back(reply.key.clone());
+                self.previews.insert(reply.key, preview);
+            }
         }
     }
 
@@ -131,23 +153,31 @@ impl ThumbnailCache {
         }
         let (reply_tx, reply_rx) = channel::<Reply>();
         for index in 0..WORKERS {
-            let (work_tx, work_rx) = channel::<(RequestKey, String, bool)>();
+            let (work_tx, work_rx) = channel::<(RequestKey, bool)>();
             let reply_tx = reply_tx.clone();
             let ctx = ctx.clone();
             let host = host.clone();
+            let closed = self.closed.clone();
             let ok = std::thread::Builder::new()
                 .name(format!("search-thumbnails-{index}"))
                 .spawn(move || {
-                    while let Ok((key, path, is_dir)) = work_rx.recv() {
-                        let thumbnail = host.thumbnail(Path::new(&path), key.1);
+                    while let Ok((key, is_dir)) = work_rx.recv() {
+                        if closed.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let thumbnail = host.thumbnail(&key.0, key.1);
+                        if closed.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let icon_key = thumbnail
                             .as_ref()
                             .filter(|thumbnail| !thumbnail.preview)
-                            .map(|_| icon_key(&path, key.1, is_dir));
+                            .map(|_| icon_key(&key.0, key.1, is_dir));
                         let texture = thumbnail.and_then(|thumbnail| upload(&ctx, &key, thumbnail));
                         if reply_tx
                             .send(Reply {
                                 key,
+                                is_dir,
                                 icon_key,
                                 texture,
                             })
@@ -172,12 +202,18 @@ impl ThumbnailCache {
     }
 }
 
+impl Drop for ThumbnailCache {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::Relaxed);
+    }
+}
+
 /// 图标复用的键：目录一张、每种扩展名一张。
-fn icon_key(path: &str, size: u32, is_dir: bool) -> String {
+fn icon_key(path: &Path, size: u32, is_dir: bool) -> String {
     if is_dir {
         return format!("{size}:<dir>");
     }
-    let extension = Path::new(path)
+    let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase());
