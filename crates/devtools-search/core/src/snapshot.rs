@@ -22,6 +22,8 @@ pub const SNAPSHOT_MAGIC: [u8; 4] = *b"DSIX";
 pub const FORMAT_VERSION: u32 = 1;
 /// 头部长度：magic(4) + version(4) + sha256(32)。
 const HEADER_LEN: usize = 40;
+/// 单根索引的解压预算，超限时由运行时重建索引。
+const MAX_SNAPSHOT_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// 事件流检查点（§7.6：重连后用 `last_event_id` 作 catch-up 起点）。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,10 +162,20 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedSnapshot, SnapshotError> {
     if Sha256::digest(compressed).as_slice() != checksum {
         return Err(SnapshotError::Invalid("校验和不匹配"));
     }
-    let payload = zstd::decode_all(compressed)?;
+    let mut payload = Vec::new();
+    let mut decoder = zstd::stream::read::Decoder::new(compressed)?;
+    decoder.window_log_max(27)?;
+    decoder
+        .take(MAX_SNAPSHOT_BYTES + 1)
+        .read_to_end(&mut payload)?;
+    if payload.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return Err(SnapshotError::Invalid("快照解压超过预算"));
+    }
     let body: SnapshotBody =
         postcard::from_bytes(&payload).map_err(|e| SnapshotError::Decode(e.to_string()))?;
     drop(payload);
+    RootIndex::validate_parts(&body.columns, &body.names, body.next_node)
+        .map_err(SnapshotError::Invalid)?;
     let mut index = RootIndex::from_parts(
         body.columns,
         body.names,
@@ -318,14 +330,17 @@ impl SnapshotStore {
         let Some(entry) = manifest.roots.get(root_key) else {
             return Ok(None);
         };
-        let mut file = match fs::File::open(self.snapshot_path(root_key, entry.generation)) {
+        let file = match fs::File::open(self.snapshot_path(root_key, entry.generation)) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(SnapshotError::Io(e)),
         };
         drop(lock);
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        file.take(MAX_SNAPSHOT_BYTES + HEADER_LEN as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_SNAPSHOT_BYTES + HEADER_LEN as u64 {
+            return Err(SnapshotError::Invalid("快照文件超过读取预算"));
+        }
         let mut snapshot = decode(&bytes)?;
         snapshot.storage_generation = Some(entry.generation);
         if let Some(checkpoint) = &entry.checkpoint {

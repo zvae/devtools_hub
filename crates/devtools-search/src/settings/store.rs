@@ -36,12 +36,17 @@ impl SearchSettingsStore {
     /// 加载设置。文件不存在 → 默认；损坏 → 隔离为 `.corrupt.<unix_ts>` 后用默认；
     /// 未知更高版本 → 只读模式（不回写），并通知用户。
     pub fn load(&self) -> LoadOutcome {
-        let Ok(bytes) = fs::read(&self.path) else {
-            return LoadOutcome {
-                settings: SearchSettings::default(),
-                notice: None,
-                read_only: false,
-            };
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return LoadOutcome {
+                    settings: SearchSettings::default(),
+                    notice: (error.kind() != std::io::ErrorKind::NotFound).then(|| {
+                        format!("读取搜索设置失败：{error}；已按只读默认设置运行，原文件不会被覆盖")
+                    }),
+                    read_only: error.kind() != std::io::ErrorKind::NotFound,
+                }
+            }
         };
         // 先只取版本号，判断是否是未来版本。
         #[derive(serde::Deserialize)]
@@ -86,7 +91,7 @@ impl SearchSettingsStore {
                                 "使用默认设置".to_string()
                             }
                         )),
-                        read_only: false,
+                        read_only: !renamed,
                     }
                 }
             },
@@ -313,5 +318,15 @@ mod tests {
         settings.debounce_ms = 5000;
         assert!(store.save(&settings).is_err());
         assert!(!store.path().exists());
+    }
+    #[test]
+    fn read_failure_protects_original_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SearchSettingsStore::new(dir.path());
+        fs::create_dir(store.path()).unwrap();
+        let outcome = store.load();
+        assert!(outcome.read_only);
+        assert!(outcome.notice.is_some());
+        assert!(store.path().is_dir());
     }
 }

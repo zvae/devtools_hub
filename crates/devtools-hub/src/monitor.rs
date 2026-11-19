@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use devtools_clipboard::store::now_ms;
-use devtools_clipboard::{thumbnail, uti, Capture, RecordOutcome, Store};
+use devtools_clipboard::{read::ReadError, thumbnail, uti, Capture, RecordOutcome, Store};
 
 use crate::platform::pasteboard::Pasteboard;
 use crate::platform::workspace;
@@ -36,6 +36,7 @@ fn run(shared: &Shared, mut store: Store, pasteboard_name: Option<&str>) {
     // 启动时也记录一次当前剪贴板内容（若已存在只会更新时间）。
     let mut last_count: Option<isize> = None;
     let mut last_prune: Option<Instant> = None;
+    let mut retry = CaptureRetry::default();
     tracing::info!(
         "开始监听剪贴板，间隔 {} ms",
         shared.poll_interval_ms.load(Ordering::Relaxed)
@@ -54,16 +55,40 @@ fn run(shared: &Shared, mut store: Store, pasteboard_name: Option<&str>) {
         if shared.writing.load(Ordering::SeqCst) {
             // 本应用正在写剪贴板，等写完再看。
         } else if last_count != Some(count) {
-            last_count = Some(count);
+            if retry.count != Some(count) {
+                retry = CaptureRetry {
+                    count: Some(count),
+                    ..Default::default()
+                };
+            }
             let ours = count == shared.ignore_change_count.load(Ordering::Relaxed);
-            if !ours && !shared.paused.load(Ordering::Relaxed) {
-                match capture_once(shared, &pasteboard, &mut store) {
-                    Ok(Some(outcome)) => {
-                        tracing::debug!("记录剪贴板 #{} (新建: {})", outcome.id, outcome.inserted);
-                        shared.bump_revision();
+            if ours || shared.paused.load(Ordering::Relaxed) {
+                last_count = Some(count);
+            } else if retry.ready() {
+                // 重试时保留首次观察到的来源，避免切换应用后绕过应用排除规则。
+                let source = retry
+                    .source
+                    .get_or_insert_with(workspace::frontmost_app)
+                    .clone();
+                match capture_once(shared, &pasteboard, &mut store, count, source) {
+                    Ok(outcome) => {
+                        last_count = Some(count);
+                        if let Some(outcome) = outcome {
+                            tracing::debug!(
+                                "记录剪贴板 #{} (新建: {})",
+                                outcome.id,
+                                outcome.inserted
+                            );
+                            shared.bump_revision();
+                        }
                     }
-                    Ok(None) => {}
-                    Err(err) => tracing::warn!("记录剪贴板失败：{err:#}"),
+                    Err(err) => {
+                        tracing::warn!("记录剪贴板失败：{err:#}");
+                        if !retry.failed() {
+                            tracing::warn!("剪贴板序号 {count} 连续失败，停止重试，等待下一次复制");
+                            last_count = Some(count);
+                        }
+                    }
                 }
             }
         }
@@ -76,20 +101,65 @@ fn run(shared: &Shared, mut store: Store, pasteboard_name: Option<&str>) {
     }
 }
 
+/// 单个序号最多重试八次，指数退避期间仍轮询新序号和退出标记。
+#[derive(Default)]
+struct CaptureRetry {
+    count: Option<isize>,
+    failures: u32,
+    retry_at: Option<Instant>,
+    source: Option<devtools_clipboard::SourceApp>,
+}
+
+impl CaptureRetry {
+    fn ready(&self) -> bool {
+        self.retry_at.is_none_or(|at| Instant::now() >= at)
+    }
+
+    fn failed(&mut self) -> bool {
+        self.failures += 1;
+        self.retry_at = Some(
+            Instant::now() + Duration::from_millis((100u64 << self.failures.min(5)).min(5000)),
+        );
+        self.failures < 8
+    }
+}
+
 /// 读取一次剪贴板并按规则记录；被规则跳过时返回 `None`。
 fn capture_once(
     shared: &Shared,
     pasteboard: &Pasteboard,
     store: &mut Store,
+    count: isize,
+    source: devtools_clipboard::SourceApp,
 ) -> Result<Option<RecordOutcome>> {
     let rules = shared.config().rules;
-    let source = workspace::frontmost_app();
     // 先只看类型列表：被标记为密码等隐私内容时，连数据都不读取。
-    if let Err(reason) = rules.check_markers(&pasteboard.types(), &source) {
+    if let Err(reason) = rules.check_markers(&pasteboard.types_checked()?, &source) {
         tracing::debug!("跳过：{reason}");
         return Ok(None);
     }
-    let snapshot = pasteboard.read();
+    let limit = if rules.max_size_mb == 0 {
+        devtools_clipboard::codec::MAX_DECODE_BYTES
+    } else {
+        (rules.max_size_mb as usize)
+            .saturating_mul(1024 * 1024)
+            .min(devtools_clipboard::codec::MAX_DECODE_BYTES)
+    };
+    let snapshot = match pasteboard.read_with_limit(limit) {
+        Ok(snapshot) => snapshot,
+        Err(ReadError::TooLarge) => {
+            tracing::debug!("跳过：剪贴板内容超过读取预算");
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if pasteboard.change_count() != count {
+        return Err(ReadError::Changed.into());
+    }
+    // 在文本转换、哈希和缩略图之前检查原始大小。
+    if snapshot.total_bytes() > limit {
+        return Ok(None);
+    }
     let analysis = uti::analyze(&snapshot);
     if let Err(reason) = rules.check(&snapshot, &analysis, &source) {
         tracing::debug!("跳过：{reason}");
@@ -190,5 +260,21 @@ mod tests {
         shared.stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
         pasteboard.release();
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn transient_failures_back_off_and_stop_after_eight_attempts() {
+        let mut retry = CaptureRetry::default();
+        assert!(retry.ready());
+        for _ in 0..7 {
+            assert!(retry.failed());
+            assert!(!retry.ready());
+        }
+        assert!(!retry.failed());
     }
 }

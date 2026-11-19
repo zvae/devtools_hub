@@ -712,6 +712,89 @@ impl RootIndex {
         (&self.columns, &self.names, self.next_node)
     }
 
+    /// 在重建派生表前验证磁盘输入，避免越界、无根节点和父链循环。
+    pub(crate) fn validate_parts(
+        columns: &Columns,
+        names: &NameArena,
+        next_node: u32,
+    ) -> Result<(), &'static str> {
+        let n = next_node as usize;
+        if [
+            columns.parent.len(),
+            columns.name.len(),
+            columns.kind.len(),
+            columns.status.len(),
+            columns.size.len(),
+            columns.mtime.len(),
+            columns.btime.len(),
+        ]
+        .iter()
+        .any(|&len| len != n)
+        {
+            return Err("节点列长度不一致");
+        }
+        for entry in &names.entries {
+            for (offset, len, bytes) in [
+                (entry.raw_off, entry.raw_len, &names.raw),
+                (entry.nfc_off, entry.nfc_len, &names.nfc),
+                (entry.lower_off, entry.lower_len, &names.lower),
+            ] {
+                if (offset as usize)
+                    .checked_add(len as usize)
+                    .is_none_or(|end| end > bytes.len())
+                {
+                    return Err("名字数据越界");
+                }
+            }
+        }
+        if columns
+            .name
+            .iter()
+            .any(|&name| name as usize >= names.entries.len())
+            || columns.kind.iter().any(|&kind| kind > NodeKind::Dir as u8)
+            || columns
+                .status
+                .iter()
+                .any(|&status| status > NodeStatus::PendingRemove as u8)
+        {
+            return Err("节点属性无效");
+        }
+        if n > 0
+            && columns
+                .parent
+                .iter()
+                .filter(|&&parent| parent == PARENT_NONE)
+                .count()
+                != 1
+        {
+            return Err("索引必须恰有一个根节点");
+        }
+        if columns
+            .parent
+            .iter()
+            .any(|&parent| parent != PARENT_NONE && parent as usize >= n)
+        {
+            return Err("父节点越界");
+        }
+        let mut visited = vec![0u8; n];
+        for start in 0..n {
+            let mut node = start as u32;
+            while node != PARENT_NONE && visited[node as usize] == 0 {
+                visited[node as usize] = 1;
+                node = columns.parent[node as usize];
+            }
+            if node != PARENT_NONE && visited[node as usize] == 1 {
+                return Err("父节点形成循环");
+            }
+            node = start as u32;
+            while node != PARENT_NONE && visited[node as usize] == 1 {
+                visited[node as usize] = 2;
+                node = columns.parent[node as usize];
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn from_parts(
         columns: Columns,
         mut names: NameArena,
@@ -920,5 +1003,24 @@ mod tests {
         index.insert(Some(root), os("dup.txt"), NodeKind::File, NodeMeta::default());
         index.commit();
         assert_eq!(index.names.entries.len(), 2);
+    }
+    #[test]
+    fn snapshot_parts_reject_cycles_bad_columns_and_name_ranges() {
+        let mut index = RootIndex::new(RootId(0));
+        let root = index.insert(None, os("root"), NodeKind::Dir, NodeMeta::default());
+        index.insert(Some(root), os("file"), NodeKind::File, NodeMeta::default());
+        let valid = || RootIndex::validate_parts(&index.columns, &index.names, index.next_node);
+        assert!(valid().is_ok());
+        let mut columns = index.columns.clone();
+        columns.parent[1] = 1;
+        assert!(RootIndex::validate_parts(&columns, &index.names, index.next_node).is_err());
+        columns.parent[1] = 99;
+        assert!(RootIndex::validate_parts(&columns, &index.names, index.next_node).is_err());
+        columns.parent = index.columns.parent.clone();
+        columns.kind.clear();
+        assert!(RootIndex::validate_parts(&columns, &index.names, index.next_node).is_err());
+        let mut names = index.names.clone();
+        names.entries[0].raw_off = u32::MAX;
+        assert!(RootIndex::validate_parts(&index.columns, &names, index.next_node).is_err());
     }
 }

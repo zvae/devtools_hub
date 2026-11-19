@@ -3,7 +3,10 @@
 //! 与 PasteNow 一致：不依赖剪贴板变化通知（macOS 没有公开的通知），
 //! 而是定时比较 `changeCount`，变化后读取所有 item 的所有类型。
 
-use devtools_clipboard::{uti, Representation, Snapshot};
+use devtools_clipboard::{
+    read::{ReadError, MAX_ITEMS, MAX_REPRESENTATIONS},
+    uti, Representation, Snapshot,
+};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
@@ -78,36 +81,66 @@ impl Pasteboard {
         })
     }
 
-    /// 读取剪贴板上所有条目的所有类型。
+    pub fn types_checked(&self) -> Result<Vec<String>, ReadError> {
+        Ok(self.types())
+    }
+
+    /// 兼容交互读取；监听器使用有预算、可报告错误的读取接口。
     pub fn read(&self) -> Snapshot {
+        self.read_with_limit(usize::MAX).unwrap_or_default()
+    }
+
+    pub fn read_with_limit(&self, limit: usize) -> Result<Snapshot, ReadError> {
         autoreleasepool(|_| {
+            let mut remaining = limit;
             let Some(items) = self.inner.pasteboardItems() else {
-                return Snapshot::default();
+                return Ok(Snapshot::default());
             };
-            let items = items
-                .iter()
-                .map(|item| {
-                    let types: Vec<Retained<NSString>> = item.types().to_vec();
-                    let names: Vec<String> = types.iter().map(|t| t.to_string()).collect();
-                    let keep_dynamic = names.iter().all(|name| should_skip(name));
-                    types
-                        .iter()
-                        .zip(names)
-                        .filter(|(_, name)| keep_dynamic || !should_skip(name))
-                        .filter_map(|(ty, name)| {
-                            let data = item.dataForType(ty)?.to_vec();
-                            let data = if name == uti::FILE_URL {
-                                resolve_file_reference(data)
-                            } else {
-                                data
-                            };
-                            Some(Representation { uti: name, data })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .filter(|reps| !reps.is_empty())
-                .collect();
-            Snapshot { items }
+            if items.len() > MAX_ITEMS {
+                return Err(ReadError::TooLarge);
+            }
+            let mut captured = Vec::new();
+            let mut unavailable = false;
+            let mut rep_count = 0usize;
+            for item in items.iter() {
+                let types: Vec<Retained<NSString>> = item.types().to_vec();
+                rep_count = rep_count
+                    .checked_add(types.len())
+                    .ok_or(ReadError::TooLarge)?;
+                if rep_count > MAX_REPRESENTATIONS {
+                    return Err(ReadError::TooLarge);
+                }
+                let names: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+                let keep_dynamic = names.iter().all(|name| should_skip(name));
+                let mut reps = Vec::new();
+                for (ty, name) in types.iter().zip(names) {
+                    if !keep_dynamic && should_skip(&name) {
+                        continue;
+                    }
+                    // 某些应用列出无法兑现的可选格式；保留其余可读格式，与交互读取保持兼容。
+                    let Some(native) = item.dataForType(ty) else {
+                        unavailable = true;
+                        continue;
+                    };
+                    remaining = remaining
+                        .checked_sub(native.len())
+                        .ok_or(ReadError::TooLarge)?;
+                    let data = native.to_vec();
+                    let data = if name == uti::FILE_URL {
+                        resolve_file_reference(data)
+                    } else {
+                        data
+                    };
+                    reps.push(Representation { uti: name, data });
+                }
+                if !reps.is_empty() {
+                    captured.push(reps);
+                }
+            }
+            if captured.is_empty() && unavailable {
+                return Err(ReadError::Unavailable);
+            }
+            Ok(Snapshot { items: captured })
         })
     }
 

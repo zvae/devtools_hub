@@ -159,7 +159,7 @@ fn main() -> anyhow::Result<()> {
     update::cleanup();
 
     controller::init_main_thread();
-    let settings = settings::Settings::load(&data_dir);
+    let settings = settings::Settings::load(&data_dir)?;
     let shared = shared::Shared::new(&settings);
     let monitor_store =
         devtools_clipboard::Store::open(&data_dir).context("打开剪贴板数据库失败")?;

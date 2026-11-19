@@ -3,6 +3,9 @@
 //! 线程模型：Service 在 UI 线程串行处理命令；扫描与查询跑在专用 rayon 池里，结果通过
 //! 事件通道回传。live 索引用 `RwLock` 保护，扫描完成时整体替换（epoch+1），查询只在读锁下工作。
 
+mod query_execution;
+use query_execution::run_query;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,7 +15,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use devtools_search_core::ports::FsSource;
-use devtools_search_core::query::{self, Ast, EvalOptions, Term};
 use devtools_search_core::scan::{self, ExcludeSet, ScanOptions, ScanStats};
 use devtools_search_core::snapshot::{config_fingerprint, EventCheckpoint, SnapshotStore};
 use devtools_search_core::volumes::RootState;
@@ -581,188 +583,6 @@ impl QueryOutcome {
             cancelled: true,
         }
     }
-}
-
-fn run_query(slots: &[Arc<RootSlot>], spec: &QuerySpec, cancel: &AtomicBool) -> QueryOutcome {
-    if cancel.load(Ordering::Relaxed) {
-        return QueryOutcome::cancelled();
-    }
-    // 空查询：只有"列出全部"、指定了目录范围或选了具体类型时才继续
-    // （范围与类型本身就是过滤条件）。
-    if spec.text.trim().is_empty()
-        && !spec.show_all_on_empty
-        && spec.scope.is_none()
-        && spec.kind == FileKind::All
-    {
-        return QueryOutcome::empty(None, None);
-    }
-    // 解析（字面模式跳过语法，§4.5）。
-    let ast = if spec.text.trim().is_empty() {
-        Ast::And(Vec::new())
-    } else if spec.literal {
-        Ast::Term(Term::Name {
-            pattern: spec.text.clone(),
-            wildcards: false,
-        })
-    } else {
-        match query::parse(&spec.text) {
-            Ok(ast) => ast,
-            Err(err) => return QueryOutcome::empty(Some(err.to_string()), None),
-        }
-    };
-    // 附加条件：类型筛选与目录范围（都是与查询本身 AND 的过滤项）。
-    let mut terms = vec![ast];
-    if let Some(kind_ast) = spec.kind.to_ast() {
-        terms.push(kind_ast);
-    }
-    if let Some(scope) = &spec.scope {
-        // 入口带选中的文件夹时作为 infolder 过滤（§4.5）。
-        terms.push(Ast::Term(Term::InFolder(
-            scope.to_string_lossy().into_owned(),
-        )));
-    }
-    let ast = if terms.len() == 1 {
-        terms.pop().unwrap()
-    } else {
-        Ast::And(terms)
-    };
-    let limit = if spec.max_results == 0 {
-        usize::MAX
-    } else {
-        spec.max_results as usize
-    };
-    let path_order = spec.sort_column == SortColumn::Path || spec.sort_dir == SortDir::None;
-    let mut roots: Vec<_> = slots
-        .iter()
-        .filter(|slot| !matches!(slot.state(), RootState::Offline | RootState::Dormant))
-        .collect();
-    if path_order {
-        roots.sort_by(|a, b| a.mount.cmp(&b.mount));
-    }
-    // 查找和排序共用这一批读锁，节点编号与排序键来自同一版本。
-    let guards: Vec<_> = roots
-        .iter()
-        .map(|slot| slot.index.read().unwrap())
-        .collect();
-    let mut total = 0;
-    let mut notice = None;
-    let mut ids = Vec::new();
-    let mut all = Vec::new();
-    for (position, index) in guards.iter().enumerate() {
-        if index.is_empty() {
-            continue;
-        }
-        let slot = roots[position];
-        let opts = EvalOptions {
-            case_sensitive: spec.case_sensitive,
-            home: spec.home.clone(),
-            root_abs: slot.mount.clone(),
-        };
-        let mut matches = Vec::new();
-        let remaining = limit - ids.len();
-        let root_node = index.root_node();
-        let (root_notice, cancelled) = query::visit_matches(index, &ast, &opts, cancel, |node| {
-            if Some(node) == root_node {
-                return;
-            }
-            total += 1;
-            if !path_order {
-                all.push((position, node));
-            } else if remaining > 0 {
-                matches.push(node);
-            }
-        });
-        if cancelled || cancel.load(Ordering::Relaxed) {
-            return QueryOutcome::cancelled();
-        }
-        if let Some(query::Notice::NotIndexed { value }) = root_notice {
-            notice.get_or_insert(format!("{value} 不在索引范围内，可把它添加为索引根"));
-        }
-        if !matches.is_empty() {
-            let (nodes, _) =
-                query::sort_matches(index, matches, SortColumn::Path, SortDir::None, remaining);
-            ids.extend(
-                nodes
-                    .into_iter()
-                    .map(|node| ResultId::new(slot.id, node, index.epoch())),
-            );
-        }
-    }
-
-    if !path_order {
-        let compare = |&(a, na): &(usize, NodeId), &(b, nb): &(usize, NodeId)| {
-            compare_across(
-                &guards[a],
-                na,
-                &guards[b],
-                nb,
-                spec.sort_column,
-                spec.sort_dir,
-            )
-            .then_with(|| a.cmp(&b))
-        };
-        if all.len() > limit {
-            all.select_nth_unstable_by(limit, compare);
-            all.truncate(limit);
-        }
-        all.sort_unstable_by(compare);
-        ids.reserve(all.len());
-        ids.extend(
-            all.into_iter()
-                .map(|(root, node)| ResultId::new(roots[root].id, node, guards[root].epoch())),
-        );
-    }
-    QueryOutcome {
-        ids,
-        total,
-        error: None,
-        notice,
-        cancelled: false,
-    }
-}
-
-/// 跨根比较：未知元数据置后（与方向无关）；相同键按路径与 rank 保证确定性。
-fn compare_across(
-    a: &RootIndex,
-    na: NodeId,
-    b: &RootIndex,
-    nb: NodeId,
-    column: SortColumn,
-    dir: SortDir,
-) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    if column == SortColumn::Name {
-        let order = a.sort_name(na).cmp(b.sort_name(nb));
-        let order = if dir == SortDir::Desc {
-            order.reverse()
-        } else {
-            order
-        };
-        return order.then_with(|| a.rank_of(na).cmp(&b.rank_of(nb)));
-    }
-    let (ma, mb) = (a.meta(na), b.meta(nb));
-    let (miss_a, miss_b) = match column {
-        SortColumn::Size => (ma.size.is_none(), mb.size.is_none()),
-        SortColumn::Modified => (ma.mtime.is_none(), mb.mtime.is_none()),
-        SortColumn::Created => (ma.btime.is_none(), mb.btime.is_none()),
-        _ => (false, false),
-    };
-    let missing = miss_a.cmp(&miss_b);
-    if missing != Ordering::Equal {
-        return missing;
-    }
-    let ord = match column {
-        SortColumn::Size => ma.size.unwrap_or(0).cmp(&mb.size.unwrap_or(0)),
-        SortColumn::Modified => ma.mtime.unwrap_or(0).cmp(&mb.mtime.unwrap_or(0)),
-        SortColumn::Created => ma.btime.unwrap_or(0).cmp(&mb.btime.unwrap_or(0)),
-        SortColumn::Name | SortColumn::Path => Ordering::Equal,
-    };
-    let ord = if dir == SortDir::Desc {
-        ord.reverse()
-    } else {
-        ord
-    };
-    ord.then_with(|| a.rank_of(na).cmp(&b.rank_of(nb)))
 }
 
 fn missing_row(id: ResultId, index: u32) -> RowData {
@@ -1359,5 +1179,71 @@ mod tests {
             result.ids.iter().map(|id| id.root().0).collect::<Vec<_>>(),
             [4, 0, 1, 2, 3]
         );
+    }
+    #[test]
+    fn detached_top_k_matches_core_sort_for_every_column_and_direction() {
+        let slot = Arc::new(root(0, PathBuf::from("/root")));
+        let mut nodes = Vec::new();
+        {
+            let mut index = slot.index.write().unwrap();
+            let root = index.insert(None, OsStr::new("root"), NodeKind::Dir, NodeMeta::default());
+            for i in (0..80).rev() {
+                nodes.push(index.insert(
+                    Some(root),
+                    OsStr::new(&format!("file-{:02}", i)),
+                    NodeKind::File,
+                    NodeMeta {
+                        size: (i % 5 != 0).then_some(i % 9),
+                        mtime: (i % 3 != 0).then_some(i as i64 - 50),
+                        btime: (i % 4 != 0).then_some(100 - i as i64),
+                    },
+                ));
+            }
+            index.commit();
+        }
+        slot.work.lock().unwrap().state = RootState::Ready;
+        let mut spec = QuerySpec {
+            text: "file".into(),
+            literal: true,
+            case_sensitive: false,
+            scope: None,
+            kind: FileKind::All,
+            max_results: 7,
+            show_all_on_empty: false,
+            sort_column: SortColumn::Name,
+            sort_dir: SortDir::Asc,
+            home: None,
+        };
+        for column in [
+            SortColumn::Name,
+            SortColumn::Path,
+            SortColumn::Size,
+            SortColumn::Modified,
+            SortColumn::Created,
+        ] {
+            for direction in [SortDir::Asc, SortDir::Desc, SortDir::None] {
+                spec.sort_column = column;
+                spec.sort_dir = direction;
+                let expected = {
+                    let index = slot.index.read().unwrap();
+                    devtools_search_core::query::sort_matches(
+                        &index,
+                        nodes.clone(),
+                        column,
+                        direction,
+                        7,
+                    )
+                    .0
+                };
+                let result = run_query(&[slot.clone()], &spec, &AtomicBool::new(false));
+                assert_eq!(result.total, nodes.len());
+                assert_eq!(
+                    result.ids.iter().map(|id| id.node()).collect::<Vec<_>>(),
+                    expected,
+                    "{column:?} {direction:?}"
+                );
+            }
+        }
+        assert!(run_query(&[slot], &spec, &AtomicBool::new(true)).cancelled);
     }
 }

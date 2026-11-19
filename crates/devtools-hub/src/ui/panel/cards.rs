@@ -37,6 +37,11 @@ impl HubApp {
         if self.panel.items.is_empty() {
             ui.add_space(top + (ui.available_height() - top - bottom) * 0.28);
             ui.vertical_centered(|ui| {
+                if self.panel.query_pending {
+                    ui.spinner();
+                    ui.label(RichText::new("正在读取历史…").color(palette.weak));
+                    return;
+                }
                 let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
                 icons::paint(ui.painter(), icon_rect, Icon::Document, palette.weak);
                 ui.add_space(6.0);

@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde::Deserialize;
@@ -63,6 +63,14 @@ pub struct Asset {
     pub size: u64,
     /// GitHub 记录的 SHA-256（小写十六进制）；比较早上传的附件没有。
     pub sha256: Option<String>,
+}
+
+impl Asset {
+    fn verified_digest_available(&self) -> bool {
+        self.sha256.as_ref().is_some_and(|digest| {
+            digest.len() == 64 && digest.bytes().all(|ch| ch.is_ascii_hexdigit())
+        })
+    }
 }
 
 impl Release {
@@ -205,7 +213,11 @@ pub fn update_resets_permission() -> bool {
 
 /// 能否在应用内安装 `release`；不能时只能在浏览器中下载。
 pub fn can_install(release: &Release) -> bool {
-    release.asset.is_some() && install_target().is_ok()
+    release
+        .asset
+        .as_ref()
+        .is_some_and(Asset::verified_digest_available)
+        && install_target().is_ok()
 }
 
 /// 开始下载并安装检查到的新版本；完成后 UI 线程调用 [`restart_if_installed`] 重启。
@@ -223,12 +235,15 @@ pub fn install(shared: &Arc<Shared>) {
     let Some((release, cancel)) = started else {
         return;
     };
-    let shared = shared.clone();
+    let worker_shared = shared.clone();
     let spawned = std::thread::Builder::new()
         .name("update-install".into())
-        .spawn(move || run_install(&shared, &release, &cancel));
+        .spawn(move || run_install(&worker_shared, &release, &cancel));
     if let Err(err) = spawned {
         tracing::warn!("无法启动安装更新线程：{err}");
+        shared.modify_update(|state| {
+            state.install = Some(Install::Failed(format!("无法启动安装更新线程：{err}")))
+        });
     }
 }
 
@@ -284,18 +299,16 @@ pub fn relaunch_if_pending() -> bool {
 /// 新版本启动时清理上次更新留下的文件。
 pub fn cleanup() {
     updater::cleanup();
-    let _ = fs::remove_dir_all(work_root());
 }
 
 /// 安装线程：在临时目录里下载、安装，完成后清理临时目录并更新状态（取消时什么都不改）。
 fn run_install(shared: &Shared, release: &Release, cancel: &AtomicBool) {
     let release = &latest_before_install(shared, release);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    let work = work_root().join(format!("{}-{nanos}", std::process::id()));
-    let result = install_release(shared, release, cancel, &work);
-    let _ = fs::remove_dir_all(&work);
+    let result = tempfile::Builder::new()
+        .prefix("DevToolsHub-update-")
+        .tempdir()
+        .context("创建更新工作目录失败")
+        .and_then(|work| install_release(shared, release, cancel, work.path()));
     if cancel.load(Ordering::Relaxed) {
         tracing::info!("已取消更新");
         return;
@@ -347,6 +360,10 @@ fn install_release(
         .asset
         .as_ref()
         .context("Release 中没有当前平台的安装包")?;
+    ensure!(
+        asset.verified_digest_available(),
+        "安装包缺少有效的 SHA-256，请在浏览器中下载"
+    );
     let target = install_target().map_err(anyhow::Error::msg)?;
     fs::create_dir_all(work).context("创建临时目录失败")?;
     // 文件名来自 GitHub，只取最后一段。
@@ -370,6 +387,10 @@ fn install_release(
 
 /// 下载安装包到 `path`，核对大小与 SHA-256。
 fn download(shared: &Shared, asset: &Asset, path: &Path, cancel: &AtomicBool) -> Result<()> {
+    ensure!(
+        asset.verified_digest_available(),
+        "安装包缺少有效的 SHA-256，请在浏览器中下载"
+    );
     let agent: ureq::Agent = config()
         .timeout_connect(Some(TIMEOUT))
         .timeout_recv_response(Some(TIMEOUT))
@@ -397,10 +418,10 @@ fn download(shared: &Shared, asset: &Asset, path: &Path, cancel: &AtomicBool) ->
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err).context("下载安装包失败"),
         };
-        file.write_all(&buffer[..read]).context("写入安装包失败")?;
-        hasher.update(&buffer[..read]);
         received += read as u64;
         ensure!(received <= asset.size, "下载的安装包比 Release 中记录的大");
+        file.write_all(&buffer[..read]).context("写入安装包失败")?;
+        hasher.update(&buffer[..read]);
         if reported.elapsed() >= PROGRESS_INTERVAL {
             reported = Instant::now();
             shared.modify_update(|state| {
@@ -424,11 +445,6 @@ fn download(shared: &Shared, asset: &Asset, path: &Path, cancel: &AtomicBool) ->
         ensure!(actual == *expected, "安装包校验失败（SHA-256 不一致）");
     }
     Ok(())
-}
-
-/// 下载安装包用的临时目录。
-fn work_root() -> PathBuf {
-    std::env::temp_dir().join("DevToolsHub-update")
 }
 
 /// 请求 GitHub 的公共配置。
@@ -680,6 +696,27 @@ mod tests {
         cancel_install(&shared);
         assert_eq!(shared.update_state().install, None);
         assert!(shared.update_state().cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn automatic_download_requires_valid_digest_before_creating_file() {
+        let shared = Shared::new(&Settings::default());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.exe");
+        let mut asset = Asset {
+            name: "package.exe".into(),
+            url: "https://example.invalid".into(),
+            size: 1,
+            sha256: None,
+        };
+        for digest in [None, Some("xyz".into()), Some("g".repeat(64))] {
+            asset.sha256 = digest;
+            assert!(!asset.verified_digest_available());
+            assert!(download(&shared, &asset, &path, &AtomicBool::new(false)).is_err());
+            assert!(!path.exists());
+        }
+        asset.sha256 = Some("a".repeat(64));
+        assert!(asset.verified_digest_available());
     }
 
     /// 访问真实的 GitHub 接口，默认跳过：

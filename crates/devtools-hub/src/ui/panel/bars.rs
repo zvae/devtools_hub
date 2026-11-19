@@ -219,10 +219,11 @@ impl HubApp {
                 .lock_focus(true),
         );
         if response.changed() {
+            self.panel.query_changed_at = Some(std::time::Instant::now());
             self.panel.selected = 0;
             self.panel.scroll_to_selected = true;
             self.panel.preview_open = false;
-            self.panel.needs_reload = true;
+            self.panel.invalidate_query();
         }
         let wants_focus = self.panel.focus_search
             || (!response.has_focus() && !egui::Popup::is_any_open(ui.ctx()));

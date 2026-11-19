@@ -2,7 +2,9 @@
 
 pub mod codec;
 pub mod model;
+pub mod read;
 pub mod rules;
+pub mod storage;
 pub mod store;
 pub mod styled;
 pub mod thumbnail;

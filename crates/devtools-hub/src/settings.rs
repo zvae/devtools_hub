@@ -243,28 +243,43 @@ impl Settings {
         }
     }
 
-    /// 读取设置；文件不存在或无法解析时用默认设置。
-    pub fn load(dir: &Path) -> Settings {
+    /// 仅首次启动使用默认值；读取错误直接报告，避免随后覆盖原配置。
+    pub fn load(dir: &Path) -> Result<Settings> {
         let path = dir.join(SETTINGS_FILE);
-        let Ok(text) = fs::read_to_string(&path) else {
-            return Settings::default();
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Settings::default())
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("读取设置失败，原文件未改动：{}", path.display()))
+            }
         };
         match serde_json::from_str(&text) {
-            Ok(settings) => settings,
-            Err(err) => {
-                tracing::warn!("设置文件解析失败，使用默认设置：{err}");
-                let _ = fs::rename(&path, dir.join("settings.invalid.json"));
-                Settings::default()
+            Ok(settings) => Ok(settings),
+            Err(error) => {
+                let backup = tempfile::Builder::new()
+                    .prefix("settings.invalid.")
+                    .suffix(".json")
+                    .tempfile_in(dir)?
+                    .into_temp_path()
+                    .keep()?;
+                fs::rename(&path, &backup).context("隔离损坏设置失败，已停止加载以保护原文件")?;
+                tracing::warn!(
+                    "设置文件解析失败：{error}；已隔离到 {}，使用默认设置",
+                    backup.display()
+                );
+                Ok(Settings::default())
             }
         }
     }
 
-    /// 保存设置：先写临时文件再改名，写到一半退出也不会损坏原文件。
+    /// 唯一临时文件 → 同步落盘 → 原子替换。
     pub fn save(&self, dir: &Path) -> Result<()> {
         let path = dir.join(SETTINGS_FILE);
-        let tmp = dir.join("settings.json.tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        fs::rename(&tmp, &path).with_context(|| format!("保存设置失败：{}", path.display()))
+        devtools_clipboard::storage::atomic_write(&path, &serde_json::to_vec_pretty(self)?)
+            .with_context(|| format!("保存设置失败：{}", path.display()))
     }
 
     /// 历史最多保留条数；不限制时为 `None`。
@@ -311,20 +326,32 @@ mod tests {
             ..Settings::default()
         };
         settings.save(dir.path()).unwrap();
-        assert_eq!(Settings::load(dir.path()), settings);
+        assert_eq!(Settings::load(dir.path()).unwrap(), settings);
     }
 
     #[test]
     fn missing_fields_use_defaults_and_bad_file_is_moved_aside() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(SETTINGS_FILE), r#"{"hotkey":"Cmd+B"}"#).unwrap();
-        let settings = Settings::load(dir.path());
+        let settings = Settings::load(dir.path()).unwrap();
         assert_eq!(settings.hotkey, "Cmd+B");
         assert_eq!(settings.poll_interval_ms, 500);
 
         fs::write(dir.path().join(SETTINGS_FILE), "{oops").unwrap();
-        assert_eq!(Settings::load(dir.path()), Settings::default());
-        assert!(dir.path().join("settings.invalid.json").exists());
+        assert_eq!(Settings::load(dir.path()).unwrap(), Settings::default());
+        assert!(fs::read_dir(dir.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("settings.invalid.")));
+    }
+
+    #[test]
+    fn unreadable_settings_are_reported_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(SETTINGS_FILE)).unwrap();
+        assert!(Settings::load(dir.path()).is_err());
+        assert!(dir.path().join(SETTINGS_FILE).is_dir());
     }
 
     #[test]
