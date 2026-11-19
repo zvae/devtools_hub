@@ -12,6 +12,45 @@ DevTools Hub 用 Rust + egui 编写，支持 macOS 和 Windows，提供剪贴板
 - 微信滚动截图与文字提取：[docs/微信滚动截图与文字提取实现分析.md](docs/微信滚动截图与文字提取实现分析.md)
 - 文件搜索：[docs/devtools-search-实现说明.md](docs/devtools-search-实现说明.md)
 
+## 界面预览
+
+以下截图由项目现有的界面渲染测试使用示例数据生成，展示 macOS 下的主要页面。
+
+### 剪贴板历史与设置
+
+分类浏览复制过的文本、链接、图片和文件，并在设置中调整快捷键、粘贴行为与记录规则。
+
+<table>
+  <tr>
+    <th>剪贴板历史</th>
+    <th>应用设置</th>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/clipboard.png" alt="剪贴板历史面板，展示分类、内容卡片、收藏和快速粘贴快捷键" width="380"></td>
+    <td><img src="docs/screenshots/settings.png" alt="应用设置页，展示全局快捷键、出现位置、自动更新和粘贴行为" width="380"></td>
+  </tr>
+</table>
+
+### 文件搜索
+
+在独立窗口中限定目录范围、筛选文件类型、切换排序，并查看文件路径、大小和时间。
+
+<img src="docs/screenshots/file-search.png" alt="文件搜索详情视图，展示搜索范围、类型筛选、排序和文件结果列表" width="1100">
+
+### 鼠标中键快捷面板与 JSON 编辑器
+
+选中 JSON 后按鼠标中键，从快捷面板进入编辑器，进行格式化、路径过滤、压缩和转义复制。
+
+<img src="docs/screenshots/quick-panel.png" alt="鼠标中键快捷面板，根据选中的文本提供 JSON 编辑器和剪贴板历史入口" width="316">
+
+<img src="docs/screenshots/json-editor.png" alt="JSON 编辑器，展示行号、语法高亮、路径过滤和格式化工具栏" width="760">
+
+### 截图与标注
+
+框选截图区域后，可以添加形状、箭头、画笔、文字和马赛克，再复制、保存或贴到屏幕。
+
+<img src="docs/screenshots/screenshot-annotation.png" alt="截图标注界面，展示选区、矩形、椭圆、箭头、画笔、文字、马赛克和工具栏" width="800">
+
 ## 功能
 
 - **后台记录**：轮询系统剪贴板的变化序号（macOS 的 `changeCount`、Windows 的 `GetClipboardSequenceNumber`），间隔可选 0.1 / 0.25 / 0.5 / 1 秒；保存剪贴板里的所有格式（纯文本、RTF、HTML、图片、文件……），粘贴时原样写回，格式不丢
@@ -422,6 +461,13 @@ cargo test -p devtools-hub snapshot -- --ignored
 
 ## 致谢
 
+感谢以下软件与开源项目，为本项目的功能设计、交互方式与实现研究提供参考：
+
+- [PasteNow](https://pastenow.app/)：剪贴板历史、分类列表、内容预览与隐私规则的设计参考。
+- [微信](https://weixin.qq.com/)：滚动截图与文字提取交互的参考。
+- [Everything](https://www.voidtools.com/)：快速文件搜索与搜索语法的设计参考。
+- [uTools](https://www.u-tools.cn/)：鼠标中键快捷面板与 JSON 编辑器交互的参考。
+- [Snipaste](https://www.snipaste.com/)：截图选区、标注、取色与贴图交互的参考。
 - [morluto/rea](https://github.com/morluto/rea)
 
 ## 免责声明
