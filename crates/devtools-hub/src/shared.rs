@@ -10,6 +10,31 @@ use crate::platform::panel::Placement;
 use crate::settings::Settings;
 use crate::update::UpdateState;
 
+/// FIXME: 临时调试：退出链路打点（release 是 GUI 子系统没有控制台，tracing 看不见），
+/// 写入临时目录 `devtools-hub-quit-debug.log`，定位退出卡死后删除。
+pub fn quit_trace(msg: &str) {
+    use std::io::Write as _;
+    let path = std::env::temp_dir().join("devtools-hub-quit-debug.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(file, "{now} {msg}");
+    }
+}
+
+/// 打开搜索页的来源（决定预填内容与是否按字面短语搜索，见 devtools-search 的 SearchOptions）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchEntry {
+    /// 热键 / 托盘菜单：打开上次的页面状态。
+    Hotkey,
+    /// 快捷面板选中的文本：按字面短语搜索。
+    Text(String),
+    /// 快捷面板选中的路径：作为范围或取文件所在目录。
+    Paths(Vec<String>),
+}
+
 /// 从热键、菜单栏发往 UI 的事件。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEvent {
@@ -39,6 +64,12 @@ pub enum AppEvent {
     Pin(u64, PinRequest),
     /// 后台的文字识别完成（成功或失败），结果在界面持有的通道里。
     OcrDone,
+    /// 收起当前窗口（热键、托盘点击、失焦逻辑都走事件，§4.4 不再直接 hide）。
+    HidePanel,
+    /// 打开 / 切换到文件搜索页。
+    ShowSearch(SearchEntry),
+    /// 退出应用：托盘、更新重启和系统会话结束统一走清理流程。
+    Quit,
 }
 
 /// 贴图窗口自己做不了、交给界面执行的操作（需要剪贴板、对话框或弹出菜单）。
@@ -74,12 +105,14 @@ pub struct Shared {
     pub writing: AtomicBool,
     /// 每记录一条就加一，UI 据此判断是否需要刷新列表。
     pub revision: AtomicU64,
-    /// 通知监听线程退出（测试里用）。
-    pub stop: AtomicBool,
+    /// 所有退出入口共用的停止信号、任务回收与完成通知。
+    pub shutdown: Arc<crate::shutdown::Shutdown>,
     /// 鼠标中键快捷面板是否开启（监听线程据此决定是否拦截中键）。
     pub middle_click: AtomicBool,
     /// 是否定时检查更新（检查更新线程据此决定是否检查）。
     pub auto_check_updates: AtomicBool,
+    /// UI 线程已消费 `AppEvent::Quit`（托盘退出看门狗据此判断是否需要强杀）。
+    pub quit_consumed: AtomicBool,
     config: Mutex<MonitorConfig>,
     placement: Mutex<Placement>,
     /// 剪贴板面板的大小（逻辑像素）。窗口也用作快捷面板和 JSON 编辑器，
@@ -99,9 +132,10 @@ impl Shared {
             ignore_change_count: AtomicIsize::new(-1),
             writing: AtomicBool::new(false),
             revision: AtomicU64::new(0),
-            stop: AtomicBool::new(false),
+            shutdown: Arc::default(),
             middle_click: AtomicBool::new(settings.middle_click),
             auto_check_updates: AtomicBool::new(settings.auto_check_updates),
+            quit_consumed: AtomicBool::new(false),
             config: Mutex::new(MonitorConfig {
                 rules: settings.rules.clone(),
                 retention_ms: settings.retention.millis(),
@@ -175,8 +209,40 @@ impl Shared {
 
     /// 给 UI 线程发事件，并唤醒它。
     pub fn post(&self, event: AppEvent) {
+        if event == AppEvent::Quit {
+            self.request_exit(false);
+            return;
+        }
+        if self.shutdown.requested() {
+            return;
+        }
         self.events.lock().unwrap().push_back(event);
         self.request_repaint();
+    }
+
+    /// 退出后不再接收新工作；看门狗覆盖 UI 未响应和收尾被系统调用卡住两种情况。
+    pub fn request_exit(&self, system_session: bool) {
+        if !self.shutdown.request(system_session) {
+            return;
+        }
+        self.middle_click.store(false, Ordering::Release);
+        self.auto_check_updates.store(false, Ordering::Release);
+        let mut events = self.events.lock().unwrap_or_else(|p| p.into_inner());
+        events.clear();
+        events.push_back(AppEvent::Quit);
+        drop(events);
+        self.request_repaint();
+        // 单元测试只验证状态机，不允许测试失败时的看门狗终止整个测试进程。
+        #[cfg(not(test))]
+        {
+            let shutdown = self.shutdown.clone();
+            std::thread::spawn(move || {
+                if !shutdown.wait_exited(crate::shutdown::EXIT_WATCHDOG) {
+                    tracing::error!("退出清理或事件循环结束超时，结束进程");
+                    std::process::exit(0);
+                }
+            });
+        }
     }
 
     /// 取出所有待处理的事件（UI 线程每帧调用）。

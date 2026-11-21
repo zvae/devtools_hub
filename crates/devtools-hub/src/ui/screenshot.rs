@@ -54,6 +54,26 @@ pub(super) type CaptureResult = anyhow::Result<(Capture, [f64; 2])>;
 const MAX_PIN_FRACTION: f32 = 0.8;
 
 impl HubApp {
+    /// 丢弃未完成的截屏会话；系统退出期间不能弹保存对话框或恢复其他应用焦点。
+    pub(super) fn shutdown_screenshots(&mut self) {
+        if let Some(snip) = self.snip.take() {
+            snip.shutdown(&self.ctx, &self.shared);
+        }
+        if let Some(closing) = self.closing_snip.take() {
+            closing.snipper.shutdown(&self.ctx, &self.shared);
+        }
+        self.capturing = None;
+        self.pending_edit = None;
+        for pin in &self.pins {
+            if let Some(worker) = pin.shutdown(&self.ctx) {
+                self.shared.shutdown.track(worker);
+            }
+            floating::release_pin(&pin.title());
+        }
+        self.pins.clear();
+        self.pin_menu = None;
+    }
+
     /// 截屏：截下鼠标所在的显示器，记下屏幕上的窗口，然后显示截屏遮罩。
     pub(super) fn start_snip(&mut self) {
         self.begin_capture(None);
@@ -87,7 +107,7 @@ impl HubApp {
         let (sender, receiver) = mpsc::channel();
         self.capturing = Some(receiver);
         let shared = self.shared.clone();
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("screen-capture".into())
             .spawn(move || {
                 let started = Instant::now();
@@ -109,6 +129,7 @@ impl HubApp {
                 shared.post(AppEvent::SnipCaptured);
             })
             .expect("创建截屏线程失败");
+        self.shared.shutdown.track(worker);
     }
 
     /// 后台截屏完成：显示截屏遮罩；失败时打开设置页说明怎么授权。

@@ -78,7 +78,15 @@ impl HubApp {
                 let rect = Rect::from_min_size(window.min, Vec2::new(window.width(), height));
                 let liquid = self.liquid.as_ref().map(|liquid| (liquid, 0));
                 let tint = glass::tint(palette, liquid.is_some());
-                bar.finish(ui.painter(), rect, glass::Edge::Top, list, tint, liquid);
+                bar.finish(
+                    ui.painter(),
+                    rect,
+                    glass::Edge::Top,
+                    native_panel::CORNER_RADIUS as f32,
+                    list,
+                    tint,
+                    liquid,
+                );
                 if (height - self.panel.header_height).abs() > 0.5 {
                     self.panel.header_height = height;
                     ui.ctx().request_discard("顶部栏的高度变了");
@@ -123,7 +131,15 @@ impl HubApp {
                 );
                 let liquid = self.liquid.as_ref().map(|liquid| (liquid, 1));
                 let tint = glass::tint(palette, liquid.is_some());
-                bar.finish(ui.painter(), rect, glass::Edge::Bottom, list, tint, liquid);
+                bar.finish(
+                    ui.painter(),
+                    rect,
+                    glass::Edge::Bottom,
+                    native_panel::CORNER_RADIUS as f32,
+                    list,
+                    tint,
+                    liquid,
+                );
                 if (height - self.panel.footer_height).abs() > 0.5 {
                     self.panel.footer_height = height;
                     ui.ctx().request_discard("底部栏的高度变了");
@@ -203,10 +219,11 @@ impl HubApp {
                 .lock_focus(true),
         );
         if response.changed() {
+            self.panel.query_changed_at = Some(std::time::Instant::now());
             self.panel.selected = 0;
             self.panel.scroll_to_selected = true;
             self.panel.preview_open = false;
-            self.panel.needs_reload = true;
+            self.panel.invalidate_query();
         }
         let wants_focus = self.panel.focus_search
             || (!response.has_focus() && !egui::Popup::is_any_open(ui.ctx()));
@@ -313,7 +330,7 @@ impl HubApp {
             "复制（或双击）".to_string()
         };
         let hotkey = hotkey::display_parts(&self.settings.hotkey);
-        let rows: [(Vec<&str>, &str); 11] = [
+        let mut rows: Vec<(Vec<&str>, &str)> = vec![
             (vec![keys::RETURN], paste.as_str()),
             (vec![keys::SHIFT, keys::RETURN], "以纯文本粘贴"),
             (vec![keys::COMMAND, keys::RETURN], "仅复制"),
@@ -324,11 +341,16 @@ impl HubApp {
             (vec![keys::TAB], "切换分类"),
             (vec![keys::COMMAND, ","], "设置"),
             (vec![keys::ESCAPE], "清空搜索 / 关闭"),
-            (
+        ];
+        // 设置里删掉快捷键后按键列表是空的：直接说明，免得只看到一句“在任意应用中唤起”。
+        if hotkey.is_empty() {
+            rows.push((Vec::new(), "未设置唤起快捷键"));
+        } else {
+            rows.push((
                 hotkey.iter().map(String::as_str).collect(),
                 "在任意应用中唤起",
-            ),
-        ];
+            ));
+        }
         egui::Grid::new("shortcuts")
             .num_columns(2)
             .spacing([14.0, 6.0])

@@ -235,6 +235,23 @@ impl Snipper {
         &self.title
     }
 
+    /// 退出时立即结束遮罩、滚动截图和看门狗，不继续导出或写剪贴板。
+    pub fn shutdown(&self, ctx: &egui::Context, shared: &crate::shared::Shared) {
+        let mut session = self.session.lock().unwrap_or_else(|p| p.into_inner());
+        session.finished = true;
+        if let Some(scroll) = &mut session.scroll {
+            if let Some(worker) = scroll.shutdown() {
+                shared.shutdown.track(worker);
+            }
+        }
+        session.scroll = None;
+        if let Some(watch) = session.watch.take() {
+            watchdog::stop(watch);
+        }
+        floating::hide_overlay(self.title());
+        ctx.send_viewport_cmd_to(self.viewport, egui::ViewportCommand::Close);
+    }
+
     /// 遮罩窗口还没显示出来（隐藏着创建、等主界面显示）。这期间主界面要一直运行（见 `panel::wake`）。
     pub fn waiting_to_show(&self) -> bool {
         !self.session.lock().unwrap().shown

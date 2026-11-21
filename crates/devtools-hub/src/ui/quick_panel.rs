@@ -37,21 +37,24 @@ pub struct QuickPanelView {
     pub actions: Vec<QuickAction>,
     /// 高亮的功能在 `actions` 中的下标。
     pub selected: usize,
+    /// 文件搜索是否启用（决定是否列出 FileSearch）。
+    search_enabled: bool,
 }
 
 impl QuickPanelView {
     /// 按选中的内容列出功能，高亮第一个。
-    pub fn open(&mut self, selection: Option<Selection>) {
-        self.actions = tools::actions_for(selection.as_ref());
+    pub fn open(&mut self, selection: Option<Selection>, search_enabled: bool) {
+        self.actions = tools::actions_for(selection.as_ref(), search_enabled);
         self.selection = selection;
         self.selected = 0;
+        self.search_enabled = search_enabled;
     }
 
     /// 选中了内容，但没有功能能处理它。
     fn unmatched(&self) -> bool {
         self.selection
             .as_ref()
-            .is_some_and(|selection| !tools::has_match(selection))
+            .is_some_and(|selection| !tools::has_match(selection, self.search_enabled))
     }
 
     /// 窗口大小随功能个数变化。
@@ -202,6 +205,18 @@ impl HubApp {
                 self.open_json_editor(selection);
             }
             QuickAction::ClipboardHistory => self.open_clipboard_panel(),
+            QuickAction::FileSearch => {
+                let entry = match self.quick.selection.take() {
+                    Some(Selection::Text(text)) => {
+                        crate::shared::SearchEntry::Text(text)
+                    }
+                    Some(Selection::Files(paths)) => {
+                        crate::shared::SearchEntry::Paths(paths)
+                    }
+                    None => crate::shared::SearchEntry::Hotkey,
+                };
+                self.shared.post(crate::shared::AppEvent::ShowSearch(entry));
+            }
         }
     }
 }
@@ -302,6 +317,16 @@ pub(super) fn paint_badge(ui: &Ui, rect: Rect, action: QuickAction, palette: &Pa
                 rect,
                 rect.height() * 0.58,
                 Icon::Document,
+                Color32::WHITE,
+            );
+        }
+        QuickAction::FileSearch => {
+            painter.rect_filled(rect, style::SMALL_RADIUS, palette.accent.gamma_multiply(0.9));
+            icons::paint_centered(
+                painter,
+                rect,
+                rect.height() * 0.58,
+                Icon::Folder,
                 Color32::WHITE,
             );
         }

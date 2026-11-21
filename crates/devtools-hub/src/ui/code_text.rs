@@ -29,6 +29,11 @@ pub struct CodeStyles {
 }
 
 impl CodeStyles {
+    /// 隐藏面板后释放已解析的富文本样式。
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
+
     /// 富文本条目的代码样式（只解析一次，不是代码时也缓存为 `None`）。
     pub fn get(&mut self, store: &Store, item: &ClipItem) -> Option<Arc<Vec<StyledRun>>> {
         if item.kind != ContentKind::RichText {
@@ -186,12 +191,11 @@ fn invert_lightness(color: Color32) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::Backdrop;
 
     #[test]
     fn keeps_readable_colors_and_flips_unreadable_ones() {
-        let dark = Palette::new(true, Backdrop::Opaque, 0);
-        let light = Palette::new(false, Backdrop::Opaque, 0);
+        let dark = Palette::new(true);
+        let light = Palette::new(false);
         // Darcula 的关键字色在深色面板上够清楚，原样保留。
         let keyword = Color32::from_rgb(204, 120, 50);
         assert_eq!(readable(Some([204, 120, 50]), &dark), keyword);
@@ -208,7 +212,7 @@ mod tests {
 
     #[test]
     fn card_collapses_whitespace() {
-        let palette = Palette::new(true, Backdrop::Opaque, 0);
+        let palette = Palette::new(true);
         let run = |text: &str| StyledRun {
             text: text.into(),
             color: None,

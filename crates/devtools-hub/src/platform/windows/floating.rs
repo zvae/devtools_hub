@@ -35,9 +35,11 @@ use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumThreadWindows, GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowRect,
     GetWindowTextW, IsWindow, SetForegroundWindow, SetWindowDisplayAffinity, SetWindowPos,
-    ShowWindow, ShowWindowAsync, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_HIDE, WDA_EXCLUDEFROMCAPTURE,
+    ShowWindow, ShowWindowAsync, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WDA_EXCLUDEFROMCAPTURE,
 };
+
+use devtools_search::FolderPurpose;
 
 use super::{panel, scroll_mask, wide, workspace};
 
@@ -488,4 +490,98 @@ static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 /// 界面层据此不要自动收起面板（见 `HubApp::handle_focus`）。
 pub fn dialog_open() -> bool {
     DIALOG_OPEN.load(Ordering::Relaxed)
+}
+
+// `windows-sys` 0.61 没有导出 `SHBrowseForFolderW`（旧 API，被 IFileDialog 取代），
+// 这里手动声明这两个 shell32 函数；结构体 `BROWSEINFOW` 仍在 `Win32_UI_Shell` 里。
+#[link(name = "shell32")]
+extern "system" {
+    fn SHBrowseForFolderW(info: *mut windows_sys::Win32::UI::Shell::BROWSEINFOW)
+        -> *mut std::ffi::c_void;
+    fn SHGetPathFromIDListW(pidl: *const std::ffi::c_void, path: *mut u16) -> i32;
+}
+
+/// 选择文件夹。取消返回 `Ok(None)`。
+///
+/// 用 `SHBrowseForFolderW`（不需要 COM 接口对象）；`initial` 暂不支持——
+/// 指定初始目录需要 BFFM_SETSELECTION 回调，v1 从默认位置开始。
+/// `purpose` 决定对话框标题（添加索引根 / 设置搜索范围）。
+pub fn pick_folder(
+    _initial: Option<&Path>,
+    purpose: FolderPurpose,
+) -> Result<Option<PathBuf>, String> {
+    use windows_sys::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        BIF_EDITBOX, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+    };
+    // SAFETY: 结构体里的指针都指向本函数内的缓冲区；对话框返回后立即释放 pidl。
+    unsafe {
+        CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
+    }
+    let title: Vec<u16> = wide(purpose.message());
+    let mut display = [0u16; 260];
+    DIALOG_OPEN.store(true, Ordering::Relaxed);
+    // SAFETY: 同上；pidl 由 shell32 分配，下面立即释放。
+    let pidl = unsafe {
+        let mut info: BROWSEINFOW = zeroed();
+        // 指定 owner：对话框是面板的从属窗口，不会被置顶的面板挡在后面，也会跟面板一起居中。
+        info.hwndOwner = panel::window();
+        info.pszDisplayName = display.as_mut_ptr();
+        info.lpszTitle = title.as_ptr();
+        info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
+        SHBrowseForFolderW(&mut info)
+    };
+    DIALOG_OPEN.store(false, Ordering::Relaxed);
+    if pidl.is_null() {
+        unsafe { CoUninitialize() };
+        return Ok(None);
+    }
+    let mut path = [0u16; 260];
+    // SAFETY: pidl 来自上面的 SHBrowseForFolderW。
+    let ok = unsafe { SHGetPathFromIDListW(pidl, path.as_mut_ptr()) };
+    unsafe {
+        CoTaskMemFree(pidl);
+        CoUninitialize();
+    }
+    if ok == 0 {
+        return Err("无法读取所选文件夹的路径".into());
+    }
+    let len = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    Ok(Some(PathBuf::from(String::from_utf16_lossy(&path[..len]))))
+}
+
+/// 搜索模块的原生模态开始：标记"对话框已打开"，面板不会因为失焦被收起；
+/// 同时临时取消面板的置顶，否则系统对话框会被一直置顶的面板压住。
+pub fn begin_system_modal() -> bool {
+    DIALOG_OPEN.store(true, Ordering::Relaxed);
+    set_topmost(false);
+    true
+}
+
+/// 原生模态结束：恢复置顶。
+pub fn end_system_modal(_restore_focus: bool) {
+    DIALOG_OPEN.store(false, Ordering::Relaxed);
+    set_topmost(true);
+}
+
+/// 面板窗口的置顶状态（对话框期间临时取消）。
+fn set_topmost(on: bool) {
+    let hwnd = panel::window();
+    if hwnd.is_null() {
+        return;
+    }
+    // SAFETY: hwnd 是已绑定的面板窗口；只改 z 序，不动位置与大小。
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            if on { HWND_TOPMOST } else { HWND_NOTOPMOST },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
 }

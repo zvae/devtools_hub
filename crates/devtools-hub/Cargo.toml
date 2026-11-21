@@ -22,6 +22,8 @@ anyhow.workspace = true
 chrono.workspace = true
 devtools-clipboard.workspace = true
 devtools-json.workspace = true
+devtools-search.workspace = true
+devtools-ui.workspace = true
 directories.workspace = true
 eframe.workspace = true
 egui.workspace = true
@@ -32,11 +34,13 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tempfile.workspace = true
 tray-icon.workspace = true
 wgpu.workspace = true
 windows-sys = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-core-graphics.workspace = true
@@ -57,4 +61,3 @@ winresource.workspace = true
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
-tempfile.workspace = true

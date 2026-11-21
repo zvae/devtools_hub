@@ -9,6 +9,7 @@ pub mod mouse;
 pub mod ocr;
 pub mod panel;
 pub mod pasteboard;
+pub(super) mod quick_look;
 pub mod screen;
 pub mod updater;
 pub mod workspace;

@@ -2,6 +2,7 @@
 
 use std::io::Cursor;
 use std::mem::{size_of, zeroed};
+use std::path::Path;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Graphics::Gdi::{
@@ -111,6 +112,66 @@ unsafe fn read_bitmap(bitmap: HBITMAP, width: i32, height: i32) -> Option<Vec<u8
     );
     DeleteDC(dc);
     (lines == height).then_some(pixels)
+}
+
+// `windows-sys` 0.61 没有导出 `SHGetFileInfoW`（挪到了 `windows` crate），这里手动声明。
+#[repr(C)]
+#[allow(non_snake_case)]
+struct ShFileInfoW {
+    hIcon: *mut std::ffi::c_void,
+    iIcon: i32,
+    dwAttributes: u32,
+    szDisplayName: [u16; 260],
+    szTypeName: [u16; 80],
+}
+
+const SHGFI_ICON: u32 = 0x0000_0100;
+const SHGFI_SMALLICON: u32 = 0x0000_0001;
+
+// `windows-sys` 0.61 同样没有导出 `SHGetFileInfoW`，手动声明并链接 shell32。
+#[link(name = "shell32")]
+extern "system" {
+    fn SHGetFileInfoW(
+        path: *const u16,
+        attributes: u32,
+        info: *mut ShFileInfoW,
+        info_size: u32,
+        flags: u32,
+    ) -> usize;
+}
+
+/// 文件 / 文件夹的系统图标（RGBA，`size` 见方）。搜索结果的图标用。
+///
+/// 用 `SHGetFileInfoW` 取 16×16 的 shell 图标（与资源管理器同款），
+/// 需要更大尺寸时按最近邻放大（搜索结果只用到 16）。
+pub fn file_icon_rgba(path: &Path, size: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let size = size.clamp(8, 64);
+    let path = wide(&path.to_string_lossy());
+    let mut info: ShFileInfoW = unsafe { zeroed() };
+    let flags = SHGFI_ICON | SHGFI_SMALLICON;
+    // SAFETY: 结构体与路径缓冲区都指向本函数的栈 / 堆变量，调用期间有效。
+    let ok = unsafe {
+        SHGetFileInfoW(
+            path.as_ptr(),
+            0,
+            &mut info,
+            size_of::<ShFileInfoW>() as u32,
+            flags,
+        )
+    };
+    if ok == 0 || info.hIcon.is_null() {
+        return None;
+    }
+    // SAFETY: 图标句柄来自上面的调用，转换后立即销毁。
+    let pixels = unsafe { icon_to_rgba(info.hIcon) };
+    unsafe { DestroyIcon(info.hIcon) };
+    let (width, height, rgba) = pixels?;
+    if width == size && height == size {
+        return Some((width, height, rgba));
+    }
+    let image = image::RgbaImage::from_raw(width, height, rgba)?;
+    let resized = image::imageops::resize(&image, size, size, image::imageops::FilterType::Lanczos3);
+    Some((size, size, resized.into_raw()))
 }
 
 #[cfg(all(test, windows))]

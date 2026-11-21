@@ -1,6 +1,6 @@
 # DevTools Hub
 
-DevTools Hub 是一个剪贴板历史管理器，支持 macOS 和 Windows，用 Rust + egui 编写，功能和实现思路参考 PasteNow。
+DevTools Hub 用 Rust + egui 编写，支持 macOS 和 Windows，提供剪贴板历史管理、文件搜索、JSON 编辑、截屏和贴图。剪贴板功能的实现思路参考 PasteNow。
 
 另外参照 uTools 实现了鼠标中键快捷面板：在任意应用中选中 JSON 后按鼠标中键，可以直接用内置的 JSON 编辑器格式化；参照 Snipaste 实现了截屏、标注与贴图。
 
@@ -10,6 +10,46 @@ DevTools Hub 是一个剪贴板历史管理器，支持 macOS 和 Windows，用 
 - uTools 鼠标中键面板：[docs/uTools鼠标中键面板实现分析.md](docs/uTools鼠标中键面板实现分析.md)
 - Snipaste 截图与贴图：[docs/Snipaste截图贴图实现分析.md](docs/Snipaste截图贴图实现分析.md)
 - 微信滚动截图与文字提取：[docs/微信滚动截图与文字提取实现分析.md](docs/微信滚动截图与文字提取实现分析.md)
+- 文件搜索：[docs/devtools-search-实现说明.md](docs/devtools-search-实现说明.md)
+
+## 界面预览
+
+以下截图由项目现有的界面渲染测试使用示例数据生成，展示 macOS 下的主要页面。
+
+### 剪贴板历史与设置
+
+分类浏览复制过的文本、链接、图片和文件，并在设置中调整快捷键、粘贴行为与记录规则。
+
+<table>
+  <tr>
+    <th>剪贴板历史</th>
+    <th>应用设置</th>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/clipboard.png" alt="剪贴板历史面板，展示分类、内容卡片、收藏和快速粘贴快捷键" width="380"></td>
+    <td><img src="docs/screenshots/settings.png" alt="应用设置页，展示全局快捷键、出现位置、自动更新和粘贴行为" width="380"></td>
+  </tr>
+</table>
+
+### 文件搜索
+
+在独立窗口中限定目录范围、筛选文件类型、切换排序，并查看文件路径、大小和时间。
+
+<img src="docs/screenshots/file-search.png" alt="文件搜索详情视图，展示搜索范围、类型筛选、排序和文件结果列表" width="1100">
+
+### 鼠标中键快捷面板与 JSON 编辑器
+
+选中 JSON 后按鼠标中键，从快捷面板进入编辑器，进行格式化、路径过滤、压缩和转义复制。
+
+<img src="docs/screenshots/quick-panel.png" alt="鼠标中键快捷面板，根据选中的文本提供 JSON 编辑器和剪贴板历史入口" width="316">
+
+<img src="docs/screenshots/json-editor.png" alt="JSON 编辑器，展示行号、语法高亮、路径过滤和格式化工具栏" width="760">
+
+### 截图与标注
+
+框选截图区域后，可以添加形状、箭头、画笔、文字和马赛克，再复制、保存或贴到屏幕。
+
+<img src="docs/screenshots/screenshot-annotation.png" alt="截图标注界面，展示选区、矩形、椭圆、箭头、画笔、文字、马赛克和工具栏" width="800">
 
 ## 功能
 
@@ -22,6 +62,7 @@ DevTools Hub 是一个剪贴板历史管理器，支持 macOS 和 Windows，用 
 - **列表**：内置“收藏”，也可以自建列表；列表里的条目不会被自动清理
 - **历史清理**：按保留时长（1 天到 1 年，或永久）和最大条数自动清理
 - **菜单栏 / 托盘图标**：左键弹出 / 收起面板，右键打开菜单（暂停记录、截屏、贴图、关闭所有贴图、设置、打开数据目录、退出）；不显示 Dock 图标或任务栏按钮
+- **退出清理**：Windows 关机、重启、注销和系统要求关闭应用时，确认退出后统一保存设置与搜索历史、停止后台任务、关闭截图贴图并卸载钩子；托盘退出和更新重启也走同一流程。取消关机时继续运行，系统关机期间不自动拉起新版本
 - **开机启动**：macOS 通过 LaunchAgent，Windows 通过注册表 `Run` 项
 - **检查与安装更新**：启动时和之后每天查询一次 GitHub Releases 上最新的正式版本，有新版本时在面板顶部和菜单栏 / 托盘菜单中提示；点击“更新”在应用内下载、校验并替换旧版本，完成后自动重新启动。设置页底部可以手动检查，也可以跳过某个版本或关闭自动检查（见下文“检查更新与发布”）
 - **鼠标中键快捷面板**（参照 uTools）：在其他应用中按鼠标中键，在鼠标处弹出面板。选中了文字时，模拟一次复制读出选中的内容（读完把剪贴板恢复原样，也不会记进历史），标题显示“选中的文本 N 个”，下面列出能处理它的功能；没有选中时列出常用功能。中键点击本身会被拦截，不再传给前台应用；可以在设置中关闭
@@ -30,6 +71,7 @@ DevTools Hub 是一个剪贴板历史管理器，支持 macOS 和 Windows，用 
 - **提取文字**：截屏工具栏的“提取文字”（`⌘E` / `Ctrl+E`，长截图也有）或贴图右键菜单的“提取文字”，用系统自带的文字识别（中文 + 英文）识别图片里的文字，结果显示在一个窗口里：左边的图片上框出识别到的每一行，点击复制这一行；右边是合并好的文字，可以修改、选中复制，“复制全部”（`⇧⌘C` / `Ctrl+Shift+C`）复制全部文字，复制的内容照常进入剪贴板历史。长截图按高度分块识别；同一行里离得远的两段（表格的不同列）用制表符隔开
 - **贴图**：把截图或剪贴板里的图片贴在屏幕上，置顶显示，不抢前台应用的焦点。可以拖动、滚轮以鼠标为中心缩放、⌘ / Ctrl + 滚轮调整不透明度（仅 macOS）、旋转翻转、复制、保存；右键菜单的“编辑标注”（或空格）可以继续在贴图上标注。剪贴板面板里的图片条目也可以“贴到屏幕”
 - **JSON 编辑器**：选中 JSON（或在访达 / 资源管理器中选中一个 `.json` 文件）后从中键面板打开，自动格式化。数字的写法（`2.0`、超长整数）、键的顺序和注释都原样保留；转义过的 JSON（`{\"a\":1}`）会先去掉转义。带行号与语法高亮，格式错误时显示行列号并标出出错行，点击跳过去。支持重新格式化、去除注释、去除转义、复制、压缩复制、转义复制，缩进可选 2 / 4 / Tab，以及路径过滤（`.key.subkey`、`[0][1]`、`[-1]`、`.list[].name`）
+- **文件搜索**：在独立窗口中搜索已索引的文件名和路径片段，支持目录范围、类型筛选、排序、历史与保存搜索。结果可切换详情和图标视图，图标视图按需显示系统内容缩略图。已有索引快照会先用于查询，后台校验后默认自动更新结果
 
 ### 两个平台的差异
 
@@ -37,6 +79,9 @@ DevTools Hub 是一个剪贴板历史管理器，支持 macOS 和 Windows，用 
 | --- | --- | --- |
 | 默认唤起快捷键 | `⇧⌘V`（与 PasteNow 一致） | `Alt+Shift+V`（`Win+V` 是系统剪贴板历史，`Ctrl+Shift+V` 常被用作“粘贴为纯文本”） |
 | 默认截屏 / 贴图快捷键 | `⌃⇧A` / `⌃⇧V`（Mac 键盘的 F1–F12 默认是媒体键；避开微信、QQ 截图常用的 `⌃⌘A`） | `F1` / `F3`（与 Snipaste 一致） |
+| 默认文件搜索快捷键 | `⇧⌘F` | `Ctrl+Shift+F` |
+| 文件搜索缩略图 | Quick Look | 资源管理器的缩略图提供器 |
+| 文件搜索启动校验 | 优先回放持久 FSEvents，按需重扫索引根 | 本地 NTFS 优先回放 USN Journal，按需重扫索引根 |
 | 截屏 | `CGDisplayCreateImageForRect`，需要“屏幕录制”权限 | GDI `BitBlt`，不需要权限 |
 | 识别窗口 | `CGWindowListCopyWindowInfo` | `EnumWindows` + DWM 窗口边界 |
 | 提取文字 | Vision 的 `VNRecognizeTextRequest`（准确模式） | `Windows.Media.Ocr`；识别中文需要系统装有中文的 OCR 语言组件（中文版系统默认有），没有时用用户语言列表里的语言 |
@@ -87,9 +132,18 @@ JSON 编辑器中（快捷键与 uTools 的 JSON 编辑器插件一致）：
 
 编辑器左上角的 📌 可以固定窗口。uTools 本身也能用中键唤出面板，两者同时开启时，后启动的那个会先收到中键；请在其中一个里关掉（uTools：设置 › 超级面板，关闭“启用超级面板”，或把“鼠标按键弹出”改成其他按键）。
 
+## 文件搜索
+
+在应用设置的「文件搜索」中启用后，可以通过热键、菜单栏 / 托盘菜单或中键快捷面板打开。默认索引用户主目录，可以按需改成常用文件夹，并用排除规则跳过无关目录。搜索窗口支持普通、置顶固定和失焦收起三种模式。
+
+- **查询**支持文件名、路径片段和组合条件，例如 `project/report`、`ext:pdf`、`folder:`、`size:>10MB` 和 `dm:today`。
+- **启动与索引**默认按需启动。提交查询时会优先载入上次保存的索引快照，结果在校验期间即可显示。macOS 通过 FSEvents 增量更新，Windows 在本地 NTFS 日志已启用且进程有卷日志读取权限时通过 USN Journal 增量更新。首次建索引、快照缺少有效检查点或日志无法完整回放时，会扫描对应的索引根。开启「空查询时列出全部文件」时，首次打开窗口会自动提交查询。
+- **关闭窗口**会释放列表行、图标和缩略图缓存，保留内存索引以便重开。默认关窗后停止监听，重开时后台补扫。频繁开关窗时，可以打开「搜索页隐藏后继续建立索引」，让后台监听持续更新。
+- **图标视图**在 macOS 调用 Quick Look，在 Windows 调用资源管理器的缩略图提供器。可见文件按需在后台生成预览，系统取不到时回退到文件图标。
+
 ## 截屏与贴图
 
-截屏快捷键（默认 macOS `⌃⇧A`、Windows `F1`）截下鼠标所在的显示器；贴图快捷键（默认 macOS `⌃⇧V`、Windows `F3`）把剪贴板里的图片贴到鼠标处。两个快捷键都可以在设置 › 截屏与贴图中录制修改。截屏进行中再按截屏快捷键会被忽略。
+截屏快捷键（默认 macOS `⌃⇧A`、Windows `F1`）截下鼠标所在的显示器；贴图快捷键（默认 macOS `⌃⇧V`、Windows `F3`）把剪贴板里的图片贴到鼠标处。两个快捷键都可以在设置 › 截屏与贴图中录制修改，也可以删掉；删除后这个功能就不再关联快捷键，仍可以从托盘菜单触发。截屏进行中再按截屏快捷键会被忽略。
 
 截屏时（macOS 用 `⌘`，Windows 用 `Ctrl`）：
 
@@ -286,58 +340,74 @@ codesign --display --requirements - "/Applications/DevTools Hub.app"
 - `history.sqlite3`：SQLite（WAL），表 `items`、`payloads`、`lists`、`list_items`
 - `blobs/`：压缩后超过 256 KB 的剪贴板数据（zstd）
 - `settings.json`：设置
+- `search/settings.json` 与 `search/snapshots/`：文件搜索设置、历史和索引快照
 
 ## 项目结构
 
 ```
-crates/
-├── devtools-clipboard/       与平台无关的核心库：剪贴板数据
-│   ├── model.rs              快照（多 item × 多类型）、条目、列表
-│   ├── uti.rs                类型识别、标题、全文、指纹、file URL 与路径互转
-│   ├── windows_formats.rs    Windows 剪贴板格式 ↔ UTI（CF_HTML、DIB、CF_HDROP、隐私标记等）
-│   ├── rules.rs              隐私与排除规则
-│   ├── styled/               从 IDE 复制的富文本（RTF / HTML）中取出代码的高亮样式
-│   ├── codec.rs              快照二进制编码 + zstd 压缩
-│   ├── store.rs              SQLite 存储：去重、搜索、列表、清理、外部数据
-│   └── thumbnail.rs          图片缩略图
-├── devtools-json/            与平台无关的 JSON 文本处理（只依赖 serde）
-│   ├── lexer.rs              把任意文本切成词法单元（也用于语法高亮）
-│   ├── parser.rs             校验并解析成保留原文的语法树，报告错误位置
-│   ├── format.rs             格式化、压缩
-│   ├── path.rs               `.data.list[0]` 这样的路径过滤
-│   └── tests.rs              单元测试
-└── devtools-hub/             应用（macOS / Windows）
-    ├── assets/               应用图标与托盘图标（原图及生成的各平台格式）
-    ├── build.rs              Windows 上把程序图标嵌入 exe
-    ├── monitor.rs            剪贴板监听线程
-    ├── middle_click.rs       鼠标中键快捷面板的触发
-    ├── selection.rs          模拟复制读取选中的内容，读完恢复剪贴板
-    ├── tools/                中键面板里的功能：按选中内容匹配（JSON 的处理在 devtools-json）
-    ├── snip/                 截屏与贴图中与界面无关的部分：截图与窗口位置、选区计算、图片处理；annotation.rs 是标注
-    ├── hotkey.rs             全局快捷键（唤起面板、截屏、贴图）
-    ├── keys.rs               按键在界面上的写法（⌘ / Ctrl）
-    ├── tray.rs               菜单栏 / 托盘图标
-    ├── controller.rs         显示 / 切换面板
-    ├── settings.rs           设置与数据目录
-    ├── update.rs             检查 GitHub Releases 上的新版本，下载并安装
-    ├── platform/
-    │   ├── mod.rs            公共类型（面板位置、托盘区域）与平台文案
-    │   ├── macos/            NSPasteboard、前台应用、CGEvent ⌘V / ⌘C、中键 CGEventTap、窗口与毛玻璃、LaunchAgent、替换 .app、
-    │   │                     截屏与窗口列表（screen.rs）、截屏遮罩与贴图窗口（floating.rs）
-    │   └── windows/          Win32 剪贴板、来源程序、SendInput Ctrl+V / Ctrl+C、中键鼠标钩子、窗口定位、图标提取、注册表开机启动、替换 exe、
-    │                         BitBlt 截屏与 EnumWindows（screen.rs）、截屏遮罩与贴图窗口（floating.rs）
-    └── ui/                   egui 界面：字体、矢量图标、样式、玻璃效果与共用控件（widgets.rs）
-        ├── panel/            剪贴板面板：顶部 / 底部栏、卡片列表、大预览、右键菜单、快捷键
-        ├── settings_page/    设置页：各分组与行控件
-        ├── quick_panel.rs    鼠标中键快捷面板
-        ├── json_editor.rs    JSON 编辑器
-        ├── screenshot.rs     截屏与贴图的流程：后台截屏、处理输出、维持贴图窗口
-        ├── snipper/          截屏遮罩：选区、放大镜、工具栏（toolbar.rs）、标注绘制与文字输入（marks.rs）、
-        │                     看门狗（watchdog.rs：遮罩卡住、不再重绘时强制收起，免得整个屏幕点不了）
-        └── pin.rs            贴图窗口
+├── Cargo.toml                            workspace 配置与共用依赖
+├── crates/
+│   ├── devtools-clipboard/              剪贴板数据层
+│   │   └── src/
+│   │       ├── model.rs                 快照、条目与列表
+│   │       ├── uti.rs                   类型识别、全文搜索字段、指纹与文件路径转换
+│   │       ├── windows_formats.rs       Windows 剪贴板格式与 UTI 互转
+│   │       ├── rules.rs                 隐私与排除规则
+│   │       ├── styled/                  从 RTF / HTML 提取代码高亮样式
+│   │       ├── codec.rs                 快照编码与 zstd 压缩
+│   │       ├── store.rs                 SQLite 存储、去重、搜索与清理
+│   │       └── thumbnail.rs             剪贴板图片缩略图
+│   ├── devtools-hub/                    macOS / Windows 应用
+│   │   ├── assets/                      应用图标与托盘图标
+│   │   ├── build.rs                     Windows 可执行文件资源
+│   │   └── src/
+│   │       ├── main.rs                  程序入口
+│   │       ├── monitor.rs               剪贴板监听线程
+│   │       ├── middle_click.rs          鼠标中键触发
+│   │       ├── selection.rs             读取选中内容并恢复剪贴板
+│   │       ├── hotkey.rs                全局快捷键
+│   │       ├── tray.rs                  菜单栏与托盘菜单
+│   │       ├── controller.rs            窗口显示与切换
+│   │       ├── settings.rs              应用设置与数据目录
+│   │       ├── update.rs                检查、下载和安装更新
+│   │       ├── tools/                   中键快捷面板的功能匹配
+│   │       ├── snip/                    截屏、滚动拼接、标注和 OCR 的共用逻辑
+│   │       ├── platform/
+│   │       │   ├── macos/               AppKit、Core Graphics、Vision 与 Quick Look
+│   │       │   └── windows/             Win32、WinRT OCR 与资源管理器集成
+│   │       └── ui/
+│   │           ├── panel/               剪贴板面板
+│   │           ├── settings_page/       应用设置页
+│   │           ├── quick_panel.rs       中键快捷面板
+│   │           ├── json_editor.rs       JSON 编辑器
+│   │           ├── screenshot.rs        调度截屏与贴图
+│   │           ├── snipper/             截屏遮罩、选区、放大镜与标注交互
+│   │           ├── pin.rs               贴图窗口
+│   │           ├── search_host.rs       为搜索模块提供原生对话框、系统菜单和缩略图
+│   │           └── search_window.rs     文件搜索的独立视口
+│   ├── devtools-json/                   JSON 文本处理库
+│   │   └── src/
+│   │       ├── lexer.rs                 词法分析与语法高亮支持
+│   │       ├── parser.rs                解析为保留原文的语法树
+│   │       ├── format.rs                格式化与压缩
+│   │       └── path.rs                  按 JSON 路径过滤
+│   ├── devtools-search/                 文件搜索模块
+│   │   ├── core/                       独立 crate devtools-search-core
+│   │   │   └── src/                    平台无关的索引、查询、扫描与快照
+│   │   ├── src/
+│   │   │   ├── application/            搜索服务、命令与事件、索引和查询调度
+│   │   │   ├── platform/               文件系统、卷、实时监听与 FSEvents / USN Journal 回放
+│   │   │   ├── settings/               搜索设置与历史持久化
+│   │   │   └── ui/                     搜索界面、结果视图与图标和缩略图缓存
+│   │   └── tests/                       搜索服务集成测试
+│   └── devtools-ui/                     共用界面库
+│       └── src/                         字体、矢量图标、样式、玻璃效果与控件
+├── docs/                                 功能设计、实现说明与排查记录
+├── scripts/                              macOS 打包与签名辅助、图标生成
+└── .github/workflows/                    CI 检查与版本发布
 ```
 
-两个平台的 `platform` 模块对外提供相同的模块和函数（`pasteboard`、`workspace`、`keyboard`、`mouse`、`panel`、`icons`、`login_item`、`updater`、`screen`、`floating`），编译时按目标系统选择其一。剪贴板面板、设置页、中键快捷面板和 JSON 编辑器共用同一个窗口，切换时由 `panel::show` 调整窗口大小和位置。
+宿主的 `platform` 按目标系统接入原生剪贴板、键鼠、窗口、截屏、OCR 和缩略图。剪贴板面板、设置页、中键快捷面板和 JSON 编辑器共用同一个窗口，切换时由 `panel::show` 调整窗口大小和位置。文件搜索运行在独立视口，通过 `search_host.rs` 调用宿主的原生能力。
 
 截屏遮罩和贴图是各自独立的窗口（egui 的延迟视口），只能在主界面运行时创建；面板隐藏时先用 `panel::wake` 把面板以全透明的方式临时摆出来，让 eframe 运行一次界面。踩过的坑（即时视口在面板隐藏时建不出窗口、换类后 winit 的 KVO 登记失效、贴图抢走键盘焦点等）记在 Snipaste 分析文档的“egui 多视口的几处坑”里。
 
@@ -382,7 +452,7 @@ cargo test -p devtools-hub snapshot -- --ignored
 
 - 只支持 macOS 和 Windows；在其他平台上编译后，运行只会输出提示
 - Windows 版本只在 macOS 上做过类型检查，还没有在真实的 Windows 机器上运行验证
-- 没有 iCloud 同步、智能列表的自定义规则、条目编辑、Quick Look
+- 剪贴板历史缺少 iCloud 同步、智能列表的自定义规则和条目编辑
 - 面板是 eframe 的普通窗口：弹出时会激活本应用，粘贴前再把焦点还给原来的应用。也因为这样，中键快捷面板要先读完选中内容再显示，没有选中内容时约 0.3 秒后才弹出（uTools 先不抢焦点地显示面板，再读取）
 - 中键快捷面板开启后会拦截所有中键点击（与 uTools 相同），浏览器里中键打开新标签页等操作会失效；还没有按应用排除的设置
 - 读取选中内容靠模拟复制：VS Code 等编辑器在没有选中时 ⌘C 会复制整行，这时会被当成选中了这一行
@@ -392,6 +462,13 @@ cargo test -p devtools-hub snapshot -- --ignored
 
 ## 致谢
 
+感谢以下软件与开源项目，为本项目的功能设计、交互方式与实现研究提供参考：
+
+- [PasteNow](https://pastenow.app/)：剪贴板历史、分类列表、内容预览与隐私规则的设计参考。
+- [微信](https://weixin.qq.com/)：滚动截图与文字提取交互的参考。
+- [Everything](https://www.voidtools.com/)：快速文件搜索与搜索语法的设计参考。
+- [uTools](https://www.u-tools.cn/)：鼠标中键快捷面板与 JSON 编辑器交互的参考。
+- [Snipaste](https://www.snipaste.com/)：截图选区、标注、取色与贴图交互的参考。
 - [morluto/rea](https://github.com/morluto/rea)
 
 ## 免责声明

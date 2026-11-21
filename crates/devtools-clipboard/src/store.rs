@@ -6,7 +6,10 @@
 //!   （Core Data 的 “Allows External Storage” 会把大 BLOB 放进 `_EXTERNAL_DATA/` 目录）；
 //! - `lists` / `list_items` ≈ `ZPASTELIST`：用户列表，列表中的条目不参与自动清理。
 
+mod blobs;
+
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -82,6 +85,12 @@ pub struct Store {
 }
 
 impl Store {
+    /// 退出时尽可能把已提交的 WAL 合并到数据库；不等待仍在读取的连接。
+    pub fn checkpoint(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        Ok(())
+    }
+
     /// 打开（或创建）数据目录下的数据库。多个线程可以各自打开一个 `Store`，WAL 模式下读写互不阻塞。
     pub fn open(dir: &Path) -> Result<Self> {
         let blob_dir = dir.join(BLOB_DIR);
@@ -98,6 +107,7 @@ impl Store {
             blob_dir,
         };
         store.migrate()?;
+        store.collect_orphan_blobs()?;
         Ok(store)
     }
 
@@ -167,9 +177,17 @@ impl Store {
     ) -> Result<RecordOutcome> {
         let encoded = codec::encode(&capture.snapshot)?;
         let byte_size = capture.snapshot.total_bytes() as i64;
-        let (inline, external) = self.write_payload(&encoded)?;
-
-        let tx = self.conn.transaction()?;
+        // 文件创建、提交与孤立文件回收共用数据库写锁。
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let blob = if encoded.len() > EXTERNAL_THRESHOLD {
+            Some(blobs::PendingBlob::write(&self.blob_dir, &encoded)?)
+        } else {
+            None
+        };
+        let external = blob.as_ref().and_then(blobs::PendingBlob::name);
+        let inline = blob.is_none().then_some(encoded);
         let existing: Option<(i64, Option<String>)> = tx
             .query_row(
                 "SELECT i.id, p.external_file FROM items i LEFT JOIN payloads p ON p.item_id = i.id
@@ -225,6 +243,9 @@ impl Store {
             params![id, inline, external],
         )?;
         tx.commit()?;
+        if let Some(blob) = blob {
+            blob.committed();
+        }
 
         if let Some(file) = stale_file {
             self.remove_blob(&file);
@@ -232,25 +253,23 @@ impl Store {
         Ok(RecordOutcome { id, inserted })
     }
 
-    /// 小数据内联存进数据库，大数据写到外部文件：返回（内联数据，外部文件名）。
-    fn write_payload(&self, encoded: &[u8]) -> Result<(Option<Vec<u8>>, Option<String>)> {
-        if encoded.len() <= EXTERNAL_THRESHOLD {
-            return Ok((Some(encoded.to_vec()), None));
-        }
-        let name = format!("{:x}-{:x}.zst", now_ms(), rand_suffix());
-        let path = self.blob_dir.join(&name);
-        fs::write(&path, encoded)
-            .with_context(|| format!("写入外部数据失败：{}", path.display()))?;
-        Ok((None, Some(name)))
+    /// 启动时回收崩溃、失败写入或删除遗留的载荷。
+    fn collect_orphan_blobs(&mut self) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        blobs::collect_orphans(&tx, &self.blob_dir)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// 删除外部数据文件（文件已不存在时不报错）。
     fn remove_blob(&self, name: &str) {
         // 文件名只来自本库生成的值，这里仍防御性地拒绝路径分隔符。
-        if name.contains('/') || name.contains("..") {
+        let Ok(path) = blobs::path(&self.blob_dir, name) else {
             return;
-        }
-        if let Err(err) = fs::remove_file(self.blob_dir.join(name)) {
+        };
+        if let Err(err) = fs::remove_file(path) {
             if err.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!("删除外部数据 {name} 失败：{err}");
             }
@@ -350,8 +369,17 @@ impl Store {
         let encoded = match (inline, external) {
             (Some(data), _) => data,
             (None, Some(file)) => {
-                let path = self.blob_dir.join(&file);
-                fs::read(&path).with_context(|| format!("读取外部数据失败：{}", path.display()))?
+                let path = blobs::path(&self.blob_dir, &file)?;
+                let mut data = Vec::new();
+                fs::File::open(&path)?
+                    .take(codec::MAX_ENCODED_BYTES as u64 + 1)
+                    .read_to_end(&mut data)
+                    .with_context(|| format!("读取外部数据失败：{}", path.display()))?;
+                anyhow::ensure!(
+                    data.len() <= codec::MAX_ENCODED_BYTES,
+                    "外部数据超过读取预算"
+                );
+                data
             }
             (None, None) => anyhow::bail!("条目 {id} 没有数据"),
         };
@@ -609,19 +637,6 @@ fn escape_like(term: &str) -> String {
     out
 }
 
-/// 外部数据文件名的随机后缀（同一毫秒内写入多个文件也不会重名）。
-fn rand_suffix() -> u64 {
-    use std::hash::{BuildHasher, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u128(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-    );
-    hasher.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,6 +811,25 @@ mod tests {
         // 再次复制同一内容：旧的外部文件被替换，不会泄漏。
         store.record(&capture, &analysis, None).unwrap();
         assert_eq!(blobs(), 1);
+
+        // 更新载荷失败必须回滚元数据，并自动移除新写入的外部文件。
+        store.conn.execute_batch("CREATE TEMP TRIGGER fail_payload BEFORE UPDATE ON payloads BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+        let copies = all(&store)[0].copy_count;
+        assert!(store.record(&capture, &analysis, None).is_err());
+        assert_eq!(blobs(), 1);
+        assert_eq!(all(&store)[0].copy_count, copies);
+        assert_eq!(store.snapshot(outcome.id).unwrap(), snapshot);
+        store
+            .conn
+            .execute_batch("DROP TRIGGER fail_payload")
+            .unwrap();
+
+        // 模拟提交前崩溃遗留文件；重开时只回收未被数据库引用的载荷。
+        fs::write(dir.path().join(BLOB_DIR).join("orphan.zst"), b"stale").unwrap();
+        assert_eq!(blobs(), 2);
+        drop(Store::open(dir.path()).unwrap());
+        assert_eq!(blobs(), 1);
+        assert_eq!(store.snapshot(outcome.id).unwrap(), snapshot);
 
         store.delete(outcome.id).unwrap();
         assert_eq!(blobs(), 0);

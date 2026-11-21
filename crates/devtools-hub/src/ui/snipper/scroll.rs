@@ -96,6 +96,7 @@ struct Progress {
 
 /// 一次滚动截图：后台截取、拼接的线程与界面上的状态。
 pub(super) struct ScrollCapture {
+    worker: Option<std::thread::JoinHandle<()>>,
     progress: Arc<Mutex<Progress>>,
     /// 拼接器；后台线程每拼一帧锁一次，结束时界面取走拼好的长图。
     stitcher: Arc<Mutex<Option<Stitcher>>>,
@@ -117,7 +118,7 @@ impl ScrollCapture {
         let stop = Arc::new(AtomicBool::new(false));
         let (progress_in, stitcher_in, stop_in) =
             (progress.clone(), stitcher.clone(), stop.clone());
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("scroll-capture".into())
             .spawn(move || {
                 let mut started = std::time::Instant::now();
@@ -201,6 +202,7 @@ impl ScrollCapture {
             })
             .expect("创建滚动截图线程失败");
         Self {
+            worker: Some(worker),
             progress,
             stitcher,
             stop,
@@ -209,6 +211,12 @@ impl ScrollCapture {
             drawn: Vec::new(),
             regions: None,
         }
+    }
+
+    /// 退出时停止连续截屏，线程由应用共用的退出协调器等待。
+    pub(super) fn shutdown(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        self.stop.store(true, Ordering::Release);
+        self.worker.take()
     }
 
     /// 停止截取，取走拼好的长图（还没截到画面时为空）。

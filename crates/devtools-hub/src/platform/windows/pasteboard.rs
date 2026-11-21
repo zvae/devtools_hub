@@ -8,8 +8,8 @@ use std::ptr::null_mut;
 use std::time::Duration;
 
 use devtools_clipboard::windows_formats::{self, ClipboardFormat, FormatData, FormatTarget};
-use devtools_clipboard::Snapshot;
-use windows_sys::Win32::Foundation::{GlobalFree, HWND};
+use devtools_clipboard::{read::ReadError, Snapshot};
+use windows_sys::Win32::Foundation::{GetLastError, GlobalFree, SetLastError, HWND};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
     GetClipboardFormatNameW, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW,
@@ -44,19 +44,24 @@ impl Pasteboard {
 
     /// 只读取格式列表（以及隐私标记的值），用于在读取大块数据之前先做隐私判断。
     pub fn types(&self) -> Vec<String> {
-        let Some(_guard) = ClipboardGuard::open(null_mut()) else {
-            return Vec::new();
-        };
-        windows_formats::type_names(&enumerate(false))
+        self.types_checked().unwrap_or_default()
     }
 
-    /// 读取剪贴板上的所有格式；剪贴板被占用时返回空内容。
+    pub fn types_checked(&self) -> Result<Vec<String>, ReadError> {
+        let _guard = ClipboardGuard::open(null_mut()).ok_or(ReadError::Unavailable)?;
+        Ok(windows_formats::type_names(&enumerate(false, usize::MAX)?))
+    }
+
+    /// 兼容交互读取；监听器区分暂时占用和空剪贴板。
     pub fn read(&self) -> Snapshot {
-        let Some(_guard) = ClipboardGuard::open(null_mut()) else {
-            tracing::debug!("剪贴板被其他程序占用，本次跳过");
-            return Snapshot::default();
-        };
-        windows_formats::snapshot_from_windows(&enumerate(true))
+        self.read_with_limit(usize::MAX).unwrap_or_default()
+    }
+
+    pub fn read_with_limit(&self, limit: usize) -> Result<Snapshot, ReadError> {
+        let _guard = ClipboardGuard::open(null_mut()).ok_or(ReadError::Unavailable)?;
+        Ok(windows_formats::snapshot_from_windows(&enumerate(
+            true, limit,
+        )?))
     }
 
     /// 写入快照，返回写入后的序号（调用方据此让监听线程跳过这次自己的写入）。
@@ -104,13 +109,21 @@ impl Drop for ClipboardGuard {
 
 /// 枚举剪贴板上的格式。`read_all` 为 false 时只读取隐私标记的数据（类型判断用）。
 /// 调用前必须已打开剪贴板。
-fn enumerate(read_all: bool) -> Vec<ClipboardFormat> {
+fn enumerate(read_all: bool, mut remaining: usize) -> Result<Vec<ClipboardFormat>, ReadError> {
     let mut formats = Vec::new();
+    let mut unavailable = false;
     let mut id = 0;
     loop {
         // SAFETY: 剪贴板已打开；传入上一个格式编号继续枚举。
-        id = unsafe { EnumClipboardFormats(id) };
+        id = unsafe {
+            SetLastError(0);
+            EnumClipboardFormats(id)
+        };
         if id == 0 {
+            // SAFETY: 读取本线程紧接枚举调用的错误码；0 表示正常枚举结束。
+            if unsafe { GetLastError() } != 0 {
+                return Err(ReadError::Unavailable);
+            }
             break;
         }
         let name = format_name(id);
@@ -118,20 +131,32 @@ fn enumerate(read_all: bool) -> Vec<ClipboardFormat> {
             if !windows_formats::should_read(id) {
                 continue;
             }
-            if let Some(data) = read_data(id) {
+            let data = match read_data(id, remaining) {
+                Ok(data) => data,
+                Err(ReadError::Unavailable) => {
+                    unavailable = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(data) = data {
+                remaining -= data.len();
                 formats.push(ClipboardFormat { id, name, data });
             }
         } else {
             let is_marker = name.as_deref() == Some(windows_formats::CAN_INCLUDE_IN_HISTORY);
             let data = if is_marker {
-                read_data(id).unwrap_or_default()
+                read_data(id, 64 * 1024)?.unwrap_or_default()
             } else {
                 Vec::new()
             };
             formats.push(ClipboardFormat { id, name, data });
         }
     }
-    formats
+    if formats.is_empty() && unavailable {
+        return Err(ReadError::Unavailable);
+    }
+    Ok(formats)
 }
 
 /// 注册格式（编号 ≥ 0xC000）的名称；标准格式返回 `None`。
@@ -146,21 +171,25 @@ fn format_name(id: u32) -> Option<String> {
 }
 
 /// 读取一种格式的内存块。调用前必须已打开剪贴板。
-fn read_data(id: u32) -> Option<Vec<u8>> {
+fn read_data(id: u32, limit: usize) -> Result<Option<Vec<u8>>, ReadError> {
     // SAFETY: 剪贴板已打开；句柄只在锁定期间访问，长度取自 GlobalSize。
     unsafe {
         let handle = GetClipboardData(id);
         if handle.is_null() {
-            return None;
+            return Err(ReadError::Unavailable);
         }
         let pointer = GlobalLock(handle);
         if pointer.is_null() {
-            return None;
+            return Err(ReadError::Unavailable);
         }
         let size = GlobalSize(handle);
+        if size > limit {
+            GlobalUnlock(handle);
+            return Err(ReadError::TooLarge);
+        }
         let data = std::slice::from_raw_parts(pointer.cast::<u8>(), size).to_vec();
         GlobalUnlock(handle);
-        Some(data)
+        Ok(Some(data))
     }
 }
 

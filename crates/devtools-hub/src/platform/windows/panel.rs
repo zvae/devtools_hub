@@ -389,3 +389,20 @@ pub(super) unsafe fn work_area_at(point: POINT) -> RECT {
     GetMonitorInfoW(monitor, &mut info);
     info.rcWork
 }
+
+/// 激活搜索窗口（Windows 由 winit 的 `ViewportCommand::Focus` 负责）。
+pub fn activate_search_window() {}
+
+/// 安装应用图标（macOS 专属；Windows 的图标由 exe 资源决定）。
+pub fn install_application_icon() {}
+
+/// 搜索页的窗口行为（§4.2：由宿主平台层实现）。
+///
+/// 面板层级与空格键行为沿用现有实现；Windows 没有额外的桌面集合行为。
+pub fn set_search_space_behavior(_searching: bool) {}
+
+/// 搜索窗口是否显示任务栏按钮。
+///
+/// Windows 的任务栏属性是窗口创建参数，由搜索窗口的 `ViewportBuilder`（普通模式）
+/// 在创建 / 重建时决定；这里不需要运行时处理。
+pub fn set_search_dock_visible(_visible: bool) {}

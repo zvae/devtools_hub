@@ -8,7 +8,7 @@ use crate::platform::{floating, keyboard, login_item, panel::Placement, screen};
 use crate::settings::{Retention, Settings, POLL_INTERVALS};
 use crate::ui::icons::{self, Icon};
 use crate::ui::style::Palette;
-use crate::ui::widgets::keycaps;
+use crate::ui::widgets::{icon_button, keycaps};
 use crate::ui::HubApp;
 use crate::{hotkey, keys, platform};
 
@@ -124,9 +124,21 @@ impl HubApp {
                         service.suspend(action);
                     }
                 }
+                // 删除：清空后 `apply_hotkey` 会注销这个组合键，功能不再关联任何快捷键。
+                if !settings.hotkey(action).trim().is_empty()
+                    && icon_button(ui, Icon::Trash, false, palette)
+                        .on_hover_text("删除快捷键，之后这个功能不再有快捷键")
+                        .clicked()
+                {
+                    settings.hotkey_mut(action).clear();
+                }
                 let parts = hotkey::display_parts(settings.hotkey(action));
-                let keys: Vec<&str> = parts.iter().map(String::as_str).collect();
-                keycaps(ui, &keys, palette);
+                if parts.is_empty() {
+                    ui.label(hint_text("未设置", palette.faint));
+                } else {
+                    let keys: Vec<&str> = parts.iter().map(String::as_str).collect();
+                    keycaps(ui, &keys, palette);
+                }
             });
             let default = Settings::default().hotkey(action).to_string();
             let restore = format!("恢复默认 {}", hotkey::display(&default));
@@ -139,6 +151,37 @@ impl HubApp {
         if let Some(error) = &self.hotkey_errors[action.index()] {
             ui.label(hint_text(error.clone(), palette.warn));
         }
+    }
+
+    /// 文件搜索：开关、快捷键、索引说明与入口（§4.3：默认关闭，用户主动开启）。
+    pub(super) fn search_section(
+        &mut self,
+        ui: &mut Ui,
+        palette: &Palette,
+        settings: &mut Settings,
+    ) {
+        switch_row(ui, palette, "启用文件搜索", &mut settings.search_enabled);
+        hint(
+            ui,
+            palette,
+            "关闭时不占用任何后台线程、不建立索引；另存为独立的搜索设置文件，首次开启会建立索引",
+        );
+        divider(ui, palette);
+        self.hotkey_row(ui, palette, settings, HotkeyAction::Search);
+        divider(ui, palette);
+        row(ui, "打开搜索页", |ui| {
+            if ui.button("立即搜索…").clicked() {
+                // 交给 UI 线程打开（内部会处理"未启用"的提示）。
+                self.shared
+                    .post(crate::shared::AppEvent::ShowSearch(crate::shared::SearchEntry::Hotkey));
+            }
+        });
+        hint(
+            ui,
+            palette,
+            "搜索页支持 ext:pdf、folder:、size:>1MB、dm:today、project/report 等写法；\
+             索引根与排除规则在搜索页的“设置”里调整",
+        );
     }
 
     /// 截屏与贴图：两个快捷键、屏幕录制权限（macOS）与操作说明。

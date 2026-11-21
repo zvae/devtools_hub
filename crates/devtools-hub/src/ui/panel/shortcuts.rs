@@ -102,7 +102,7 @@ impl HubApp {
             } else if !panel.query.is_empty() {
                 panel.query.clear();
                 panel.selected = 0;
-                panel.needs_reload = true;
+                panel.invalidate_query();
             } else {
                 actions.push(Action::Close);
             }

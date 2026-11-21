@@ -33,6 +33,8 @@ mod settings;
 #[cfg(any(target_os = "macos", windows))]
 mod shared;
 #[cfg(any(target_os = "macos", windows))]
+mod shutdown;
+#[cfg(any(target_os = "macos", windows))]
 mod snip;
 #[cfg(any(target_os = "macos", windows))]
 mod tools;
@@ -159,12 +161,22 @@ fn main() -> anyhow::Result<()> {
     update::cleanup();
 
     controller::init_main_thread();
-    let settings = settings::Settings::load(&data_dir);
+    let settings = settings::Settings::load(&data_dir)?;
     let shared = shared::Shared::new(&settings);
     let monitor_store =
         devtools_clipboard::Store::open(&data_dir).context("打开剪贴板数据库失败")?;
-    let _monitor = monitor::spawn(shared.clone(), monitor_store, args.pasteboard.clone());
+    shared.shutdown.track(monitor::spawn(shared.clone(), monitor_store, args.pasteboard.clone()));
     update::spawn(shared.clone());
+    #[cfg(windows)]
+    let session_listener = {
+        let shared = shared.clone();
+        platform::session::SessionListener::start(move || {
+            shared.request_exit(true);
+            if !shared.shutdown.wait_finished(shutdown::SESSION_WAIT) {
+                tracing::warn!("系统退出等待清理超时，交还系统处理");
+            }
+        }).inspect_err(|error| tracing::error!("无法监听系统关机和注销：{error}")).ok()
+    };
 
     let viewport = egui::ViewportBuilder::default()
         .with_title("DevTools Hub")
@@ -203,16 +215,49 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let app_shared = shared.clone();
+    let result = eframe::run_native(
         "DevTools Hub",
         options,
         Box::new(move |cc| {
-            let app = ui::HubApp::new(cc, shared, data_dir, settings, &args)?;
+            let app = ui::HubApp::new(cc, app_shared, data_dir, settings, &args)?;
             Ok(Box::new(app))
         }),
     )
-    .map_err(|err| anyhow!("{err}"))?;
+    .map_err(|err| anyhow!("{err}"));
+    // 启动失败或事件循环直接结束也要停止监听，随后才能释放数据目录锁。
+    if !shared.shutdown.wait_finished(Duration::ZERO) {
+        shared.shutdown.request(false);
+        update::shutdown(&shared);
+        let remaining = shared.shutdown.join_until(Instant::now() + shutdown::CLEANUP_BUDGET);
+        if !remaining.is_empty() {
+            tracing::warn!("退出时仍有后台任务：{remaining:?}");
+        }
+        shared.shutdown.finish();
+    }
+    #[cfg(windows)]
+    drop(session_listener);
+    // 先释放单实例锁，再（如果需要）拉起新版本，否则新进程会以为已有实例在运行。
     drop(lock_file);
+    shared.shutdown.mark_exited();
+    // 托盘退出、更新重启都先正常结束事件循环（搜索模块已在 `on_exit` 里有界停止），
+    // 更新重启在这里重新拉起新版本（§4.6）。
+    if !shared.shutdown.system_session() {
+        update::relaunch_if_pending();
+    }
+    result?;
+    // macOS：输入法 / objc 的线程局部析构在进程退出时会 panic
+    // （fatal runtime error: thread local panicked on drop）。此时需要保存的状态、
+    // 搜索线程的停止和更新重启的子进程都已经处理完，直接结束进程，跳过这些析构。
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn _exit(status: i32) -> !;
+        }
+        // SAFETY: 只结束当前进程，不再执行任何析构 / atexit。
+        unsafe { _exit(0) }
+    }
+    #[cfg(not(target_os = "macos"))]
     Ok(())
 }
 

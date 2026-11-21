@@ -15,11 +15,10 @@ mod bars;
 mod cards;
 mod menus;
 mod preview;
+pub(super) mod query;
 mod shortcuts;
 
-use devtools_clipboard::{
-    ClipItem, ClipList, ContentKind, ItemQuery, KindFilter, FAVORITES_LIST_ID,
-};
+use devtools_clipboard::{ClipItem, ClipList, ContentKind, KindFilter, FAVORITES_LIST_ID};
 use egui::{Frame, Rect, Ui, Vec2};
 
 use super::native_menu::{Entry, NativeMenu};
@@ -97,6 +96,9 @@ pub struct PanelView {
     pub selected: usize,
     /// 下一帧需要按当前条件重新加载条目。
     pub needs_reload: bool,
+    query_pending: bool,
+    query_changed_at: Option<std::time::Instant>,
+    query_generation: u64,
     /// 上次加载时数据库的修订号（见 `Shared::revision`），后台记录了新内容时修订号会变。
     pub seen_revision: u64,
     /// 固定窗口：失去焦点时不自动隐藏。
@@ -128,9 +130,19 @@ pub struct PanelView {
 }
 
 impl PanelView {
+    /// 隐藏面板后释放大预览；下次显示时按当前条目重新读取。
+    pub(super) fn release_preview(&mut self) {
+        self.preview = None;
+        self.preview_open = false;
+    }
+
     /// 唤起面板时回到初始状态：清空搜索、回到“全部”、选中第一条、焦点放到搜索框。
     pub fn reset_for_show(&mut self) {
+        if !self.query.is_empty() || self.filter != Filter::All {
+            self.invalidate_query();
+        }
         self.query.clear();
+        self.query_changed_at = None;
         self.filter = Filter::All;
         self.selected = 0;
         self.needs_reload = true;
@@ -183,8 +195,18 @@ impl PanelView {
             self.filter = filter;
             self.selected = 0;
             self.scroll_to_selected = true;
-            self.needs_reload = true;
+            self.invalidate_query();
         }
+    }
+
+    /// 条件变化后撤下旧结果，避免异步查询期间 Enter 粘贴上一条件的条目。
+    fn invalidate_query(&mut self) {
+        self.items.clear();
+        self.total = 0;
+        self.preview = None;
+        self.preview_open = false;
+        self.needs_reload = true;
+        self.query_pending = true;
     }
 
     /// 选中第 `index` 条（超出范围时选最后一条），并滚动到可见范围内。
@@ -262,6 +284,7 @@ impl HubApp {
         if self.panel.needs_reload {
             self.reload_items();
         }
+        self.poll_panel_query();
         let window = ui.max_rect();
         // 顶部栏、底部栏浮在列表上面：列表占满整个窗口，上下留出两个栏的高度（上一帧量出来的）。
         let (top, bottom) = (self.panel.header_height, self.panel.footer_height);
@@ -289,55 +312,11 @@ impl HubApp {
         self.glass_footer(ui, &palette, window, list.as_ref(), &mut actions);
         if self.panel.needs_reload {
             // 搜索词或分类在顶部栏里变了：下一帧按新条件重新加载列表。
-            ui.ctx().request_repaint();
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
         }
 
         self.apply_actions(actions);
-    }
-
-    /// 按当前的搜索词与分类重新从数据库加载条目、总数与列表。
-    pub(super) fn reload_items(&mut self) {
-        self.panel.needs_reload = false;
-        let (kind, list_id) = self.panel.filter.to_query();
-        let query = ItemQuery {
-            text: self.panel.query.clone(),
-            kind,
-            list_id,
-            limit: QUERY_LIMIT,
-        };
-        let previous = self.panel.selected_item().map(|item| item.id);
-        let loaded = self
-            .store
-            .items(&query)
-            .and_then(|items| Ok((items, self.store.count(&query)?, self.store.lists()?)));
-        match loaded {
-            Ok((items, total, lists)) => {
-                self.panel.items = items;
-                self.panel.total = total;
-                self.panel.lists = lists;
-                self.panel.error = None;
-            }
-            Err(err) => self.panel.error = Some(format!("读取历史失败：{err:#}")),
-        }
-        if let Filter::List(id) = self.panel.filter {
-            if !self.panel.lists.iter().any(|list| list.id == id) {
-                self.panel.filter = Filter::All;
-                self.panel.needs_reload = true;
-            }
-        }
-        // 后台新增记录导致的刷新：尽量保持选中同一条目。
-        if !self.panel.scroll_to_selected {
-            if let Some(index) =
-                previous.and_then(|id| self.panel.items.iter().position(|item| item.id == id))
-            {
-                self.panel.selected = index;
-            }
-        }
-        self.panel.selected = self
-            .panel
-            .selected
-            .min(self.panel.items.len().saturating_sub(1));
-        self.panel.preview = None;
     }
 
     /// 弹出右键菜单。Windows 的自绘菜单关闭时就知道选中了哪一项，马上执行。
@@ -434,7 +413,7 @@ impl HubApp {
                 }
                 Action::OpenSettings => {
                     self.settings_view.refresh(&self.store);
-                    self.page = super::Page::Settings;
+                    self.set_page(super::Page::Settings);
                 }
                 Action::Close => self.hide_panel(true),
                 Action::OpenUrl(url) => {

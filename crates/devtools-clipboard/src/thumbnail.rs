@@ -3,7 +3,7 @@
 use std::io::Cursor;
 
 use anyhow::{Context, Result};
-use image::{ImageFormat, ImageReader};
+use image::{ImageFormat, ImageReader, Limits};
 
 /// 缩略图最长边（像素）。预览区也直接使用它，避免每次都解码原图。
 pub const MAX_SIDE: u32 = 640;
@@ -19,11 +19,15 @@ pub struct Thumbnail {
 
 /// 解码图片（自动识别格式），缩小到最长边不超过 [`MAX_SIDE`]，编码成 PNG。
 pub fn make(bytes: &[u8]) -> Result<Thumbnail> {
-    let image = ImageReader::new(Cursor::new(bytes))
+    let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .context("无法识别图片格式")?
-        .decode()
-        .context("解码图片失败")?;
+        .context("无法识别图片格式")?;
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    limits.max_image_width = Some(32_768);
+    limits.max_image_height = Some(32_768);
+    reader.limits(limits);
+    let image = reader.decode().context("解码图片失败")?;
     let (width, height) = (image.width(), image.height());
     let thumb = if width > MAX_SIDE || height > MAX_SIDE {
         image.thumbnail(MAX_SIDE, MAX_SIDE)

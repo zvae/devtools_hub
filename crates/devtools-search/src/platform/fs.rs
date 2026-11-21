@@ -1,0 +1,213 @@
+//! 平台层的文件系统来源：`std::fs` 实现（§7.3 扫描时预取元数据）。
+//!
+//! 扫描时一次 `read_dir` + `DirEntry::metadata`（lstat 语义，不跟随符号链接），
+//! 大小/修改时间/创建时间在列表项里带出，查询阶段不再 stat。
+//! Unix 用同一次元数据读取的设备号判断是否跨卷。
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+use devtools_search_core::ports::{Entry, EntryKind, FsSource};
+use devtools_search_core::NodeMeta;
+
+/// `std::fs` 实现的 FsSource。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StdFs;
+
+impl FsSource for StdFs {
+    fn list_dir(&self, path: &Path, out: &mut Vec<Entry>) -> io::Result<()> {
+        out.clear();
+        let dir = match std::fs::read_dir(path) {
+            Ok(dir) => dir,
+            Err(err) => return Err(err),
+        };
+        for item in dir {
+            let item = match item {
+                Ok(item) => item,
+                // 单个目录项的失败不影响整目录（§7.3）。
+                Err(_) => continue,
+            };
+            let name = item.file_name();
+            // `file_type()` 是 lstat 语义：符号链接不被跟随。
+            let file_type = match item.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let metadata = if file_type.is_symlink() {
+                None
+            } else {
+                item.metadata().ok()
+            };
+            out.push(entry_from_type(name, file_type, metadata.as_ref()));
+        }
+        Ok(())
+    }
+
+    fn device_of(&self, path: &Path) -> Option<u64> {
+        #[cfg(unix)]
+        {
+            let metadata = std::fs::symlink_metadata(path).ok()?;
+            metadata_device(&metadata)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            None
+        }
+    }
+}
+
+/// 读取监听事件的目录项，和初扫共享类型及元数据语义。
+pub fn entry_at(path: &Path) -> io::Result<Entry> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    let name = path.file_name().unwrap_or(path.as_os_str()).to_os_string();
+    Ok(entry_from_type(name, metadata.file_type(), Some(&metadata)))
+}
+
+fn entry_from_type(
+    name: std::ffi::OsString,
+    ty: std::fs::FileType,
+    metadata: Option<&std::fs::Metadata>,
+) -> Entry {
+    let kind = if ty.is_symlink() {
+        EntryKind::Symlink
+    } else if ty.is_dir() {
+        EntryKind::Dir
+    } else if ty.is_file() {
+        EntryKind::File
+    } else {
+        EntryKind::Other
+    };
+    let mut meta = NodeMeta::default();
+    let mut device = None;
+    if let Some(metadata) = metadata.filter(|_| kind != EntryKind::Symlink) {
+        meta.size = (kind == EntryKind::File).then(|| metadata.len());
+        meta.mtime = metadata.modified().ok().and_then(to_unix);
+        meta.btime = metadata.created().ok().and_then(to_unix);
+        device = metadata_device(metadata);
+    }
+    Entry {
+        name,
+        kind,
+        meta,
+        device,
+    }
+}
+
+#[cfg(unix)]
+fn metadata_device(metadata: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(metadata.dev())
+}
+
+#[cfg(not(unix))]
+fn metadata_device(_: &std::fs::Metadata) -> Option<u64> {
+    None
+}
+
+fn to_unix(time: std::time::SystemTime) -> Option<i64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
+/// 去掉 Windows 上 `canonicalize` 加上的 `\\?\` 逐字节前缀（`\\?\F:\a` → `F:\a`）。
+///
+/// 这个前缀是给 Win32 的宽字符接口用的"禁用规范化"标记，界面上显示出来就是
+/// `\\?\F:\`，和用户在资源管理器、粘贴路径里看到的 `F:\` 不一致；存储时留在根路径里
+/// 还会让 `starts_with(挂载点)` 对不上，根因此退化成"绝对路径身份"。
+///
+/// - `\\?\C:\...` → `C:\...`；
+/// - `\\?\UNC\server\share\...` → `\\server\share\...`；
+/// - 设备命名空间（`\\?\Volume{...}`、`\\.\`）没有等价写法，原样返回。
+#[cfg(windows)]
+pub fn simplify(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+    let mut out = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", drive as char)),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut out = PathBuf::from("\\\\");
+            out.push(server);
+            out.push(share);
+            out
+        }
+        _ => return path,
+    };
+    for component in components {
+        if component != Component::RootDir {
+            out.push(component.as_os_str());
+        }
+    }
+    out
+}
+
+/// 其他平台没有 `\\?\` 前缀，直接透传。
+#[cfg(not(windows))]
+pub fn simplify(path: PathBuf) -> PathBuf {
+    path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devtools_search_core::ports::FsSource;
+
+    #[test]
+    fn lists_directory_with_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut entries = Vec::new();
+        StdFs.list_dir(dir.path(), &mut entries).unwrap();
+        assert_eq!(entries.len(), 2);
+        let file = entries
+            .iter()
+            .find(|e| e.name == "a.txt")
+            .expect("a.txt 应被列出");
+        assert_eq!(file.kind, EntryKind::File);
+        assert_eq!(file.meta.size, Some(5));
+        assert!(file.meta.mtime.is_some());
+        let sub = entries.iter().find(|e| e.name == "sub").unwrap();
+        assert_eq!(sub.kind, EntryKind::Dir);
+        assert_eq!(sub.meta.size, None, "目录不记录大小");
+    }
+
+    #[test]
+    fn reports_io_error_for_missing_directory() {
+        let mut entries = Vec::new();
+        assert!(StdFs.list_dir(Path::new("/definitely/not/here"), &mut entries).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn simplify_strips_verbatim_prefix() {
+        // 盘符路径：去掉 `\\?\`，其余原样。
+        assert_eq!(
+            simplify(PathBuf::from(r"\\?\F:\work\a.txt")),
+            PathBuf::from(r"F:\work\a.txt")
+        );
+        // UNC：`\\?\UNC\server\share` → `\\server\share`。
+        assert_eq!(
+            simplify(PathBuf::from(r"\\?\UNC\server\share\a")),
+            PathBuf::from(r"\\server\share\a")
+        );
+        // 普通路径、设备命名空间、裸盘符根都不动。
+        assert_eq!(simplify(PathBuf::from(r"F:\a")), PathBuf::from(r"F:\a"));
+        assert_eq!(simplify(PathBuf::from(r"F:\")), PathBuf::from(r"F:\"));
+        assert_eq!(
+            simplify(PathBuf::from(r"\\?\Volume{1234}\a")),
+            PathBuf::from(r"\\?\Volume{1234}\a")
+        );
+        // canonicalize 的结果简化后与手写路径一致（同一目录只差前缀）。
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let stripped = canonical.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+        assert_eq!(simplify(canonical), PathBuf::from(stripped));
+    }
+}

@@ -2,6 +2,8 @@
 
 面向 AI 编码助手的项目约定。本文件之外，`README.md` 有完整的功能与实现说明，`docs/` 有各项功能的实现分析与踩坑记录。
 
+每次回复时，请先称呼我“靓仔”，然后再开始回答问题。
+
 ## 项目概览
 
 DevTools Hub：剪贴板历史管理器（参照 PasteNow），附带鼠标中键快捷面板（参照 uTools）、截屏 / 标注 / 贴图（参照 Snipaste）、滚动截图与文字提取（参照微信）、JSON 编辑器。
@@ -16,6 +18,7 @@ DevTools Hub：剪贴板历史管理器（参照 PasteNow），附带鼠标中�
 crates/
 ├── devtools-clipboard/   平台无关：剪贴板数据模型、UTI、隐私规则、SQLite 存储
 ├── devtools-json/        平台无关：JSON 词法/解析/格式化/路径过滤（只依赖 serde）
+├── devtools-ui/          平台无关：基础界面样式（字体、矢量图标、配色/圆角规范、通用小控件、栏的液态玻璃背景；依赖 egui / eframe）
 └── devtools-hub/         应用本体：monitor、中键面板、截屏贴图 snip/、platform/、ui/
 docs/                     实现分析与排查记录（修改对应功能前先读相关文档）
 scripts/                  bundle-macos.sh、create-signing-cert.sh、generate-icons.py

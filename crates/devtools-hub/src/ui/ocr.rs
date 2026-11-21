@@ -165,9 +165,11 @@ impl OcrView {
     fn start(&mut self, image: Arc<RgbaImage>, shared: Arc<Shared>) {
         let (sender, receiver) = mpsc::channel();
         let input = image.clone();
-        std::thread::Builder::new()
+        let worker_shared = shared.clone();
+        let worker = std::thread::Builder::new()
             .name("ocr".into())
             .spawn(move || {
+                let shared = worker_shared;
                 let started = Instant::now();
                 let result = platform::ocr::recognize(&input);
                 match &result {
@@ -184,6 +186,7 @@ impl OcrView {
                 shared.post(AppEvent::OcrDone);
             })
             .expect("创建文字识别线程失败");
+        shared.shutdown.track(worker);
         self.job = Some(Job {
             image,
             texture: None,
@@ -250,7 +253,7 @@ impl HubApp {
         self.startup_hide_pending = false;
         self.cancel_hotkey_recording();
         self.ocr.start(image, self.shared.clone());
-        self.page = super::Page::Ocr;
+        self.set_page(super::Page::Ocr);
         native_panel::show(
             Anchor::Placement(Placement::ScreenCenter),
             self.settings.ocr_size,
@@ -396,7 +399,13 @@ impl HubApp {
                     .job
                     .as_ref()
                     .is_some_and(|job| !job.text.trim().is_empty());
-                if labeled_button(ui, Icon::Save, "保存图片", self.ocr.job.is_some(), palette)
+                if labeled_button(
+                    ui,
+                    Some(Icon::Save),
+                    "保存图片",
+                    self.ocr.job.is_some(),
+                    palette,
+                )
                     .on_hover_text(format!(
                         "把左边的图片存成 PNG  {}",
                         keys::shortcut(&[keys::COMMAND, "S"])
@@ -405,7 +414,7 @@ impl HubApp {
                 {
                     actions.push(OcrAction::Save);
                 }
-                if labeled_button(ui, Icon::Copy, "复制全部", has_text, palette)
+                if labeled_button(ui, Some(Icon::Copy), "复制全部", has_text, palette)
                     .on_hover_text(format!(
                         "复制右边的文字  {}",
                         keys::shortcut(&[keys::SHIFT, keys::COMMAND, "C"])
@@ -958,7 +967,6 @@ impl OcrView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::Backdrop;
 
     fn line(text: &str, x: f32, y: f32, w: f32, h: f32) -> Line {
         Line::new(text, Rect::from_min_size(pos2(x, y), vec2(w, h)))
@@ -1061,7 +1069,7 @@ mod tests {
 
     #[test]
     fn highlights_the_selected_lines_in_the_text() {
-        let palette = Palette::new(true, Backdrop::Opaque, 0);
+        let palette = Palette::new(true);
         let text = "一二\n三四";
         let layout = text_layout(text, Some(3..6), &palette, 400.0);
         let marked: Vec<_> = layout

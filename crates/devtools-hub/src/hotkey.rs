@@ -13,7 +13,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 use crate::controller;
 use crate::keys;
-use crate::shared::{AppEvent, Shared};
+use crate::shared::{AppEvent, SearchEntry, Shared};
 
 /// 全局快捷键对应的操作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -24,10 +24,17 @@ pub enum HotkeyAction {
     Snip,
     /// 把剪贴板里的图片贴到屏幕上。
     Pin,
+    /// 打开 / 收起文件搜索页。
+    Search,
 }
 
 impl HotkeyAction {
-    pub const ALL: [HotkeyAction; 3] = [HotkeyAction::Panel, HotkeyAction::Snip, HotkeyAction::Pin];
+    pub const ALL: [HotkeyAction; 4] = [
+        HotkeyAction::Panel,
+        HotkeyAction::Snip,
+        HotkeyAction::Pin,
+        HotkeyAction::Search,
+    ];
 
     /// 设置页与报错里的名称。
     pub fn label(self) -> &'static str {
@@ -35,6 +42,7 @@ impl HotkeyAction {
             HotkeyAction::Panel => "唤起快捷键",
             HotkeyAction::Snip => "截屏快捷键",
             HotkeyAction::Pin => "贴图快捷键",
+            HotkeyAction::Search => "文件搜索快捷键",
         }
     }
 
@@ -59,6 +67,9 @@ impl HotkeyService {
         let actions: Arc<Mutex<HashMap<u32, HotkeyAction>>> = Arc::default();
         let lookup = actions.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+            if shared.shutdown.requested() {
+                return;
+            }
             if event.state() != HotKeyState::Pressed {
                 return;
             }
@@ -67,6 +78,7 @@ impl HotkeyService {
                 Some(HotkeyAction::Panel) => controller::toggle_panel(&shared),
                 Some(HotkeyAction::Snip) => shared.post(AppEvent::Snip),
                 Some(HotkeyAction::Pin) => shared.post(AppEvent::PinClipboard),
+                Some(HotkeyAction::Search) => shared.post(AppEvent::ShowSearch(SearchEntry::Hotkey)),
                 None => {}
             }
         }));
@@ -167,7 +179,13 @@ pub fn display(spec: &str) -> String {
 }
 
 /// 拆成一个个按键，用于绘制键帽：`Cmd+Shift+V` → `["⇧", "⌘", "V"]`。
+///
+/// 没有设置快捷键（空字符串）时返回空列表，调用方据此显示“未设置”而不是一个空的键帽。
 pub fn display_parts(spec: &str) -> Vec<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Vec::new();
+    }
     let parts: Vec<String> = spec
         .split('+')
         .map(|p| p.trim().to_ascii_uppercase())
@@ -232,6 +250,14 @@ mod tests {
         // 功能键可以不带修饰键。
         assert!(parse("F1").is_ok());
         assert!(parse("Shift+F3").is_ok());
+    }
+
+    #[test]
+    fn empty_spec_means_no_shortcut() {
+        // 设置里“删除”快捷键后保存的是空字符串：没有键帽可画，菜单里也不显示按键。
+        assert!(display_parts("").is_empty());
+        assert!(display_parts("   ").is_empty());
+        assert_eq!(display(""), "");
     }
 
     #[cfg(target_os = "macos")]

@@ -379,6 +379,70 @@ fn snapshot_glass_header() {
     }
 }
 
+/// 使用真实玻璃管线验证：闲置释放纹理后重新显示，画面与释放前一致。
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_glass_resources_rebuild() {
+    use eframe::egui_wgpu::RendererOptions;
+    use egui_kittest::wgpu::{create_render_state, default_wgpu_setup, WgpuTestRenderer};
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(&mut Store::open(dir.path()).unwrap());
+    let settings = Settings::default();
+    let state = create_render_state(default_wgpu_setup(), RendererOptions::PREDICTABLE);
+    let mut app = HubApp::build(
+        egui::Context::default(),
+        Shared::new(&settings),
+        Store::open(dir.path()).unwrap(),
+        dir.path().to_path_buf(),
+        settings,
+    );
+    app.liquid = Some(super::LiquidGlass::new(&state));
+    app.accessibility_ok = true;
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(380.0, 640.0))
+        .with_pixels_per_point(2.0)
+        .renderer(WgpuTestRenderer::from_render_state(state.clone()))
+        .build_ui_state(|ui, app: &mut HubApp| app.draw(ui), app);
+    style::install(&harness.ctx);
+    harness.ctx.set_theme(egui::Theme::Dark);
+    harness.state_mut().ctx = harness.ctx.clone();
+    harness.state_mut().panel.reset_for_show();
+    harness.run_steps(4);
+    let before = harness.render().unwrap();
+    let app = harness.state_mut();
+    let image_id = app
+        .panel
+        .items
+        .iter()
+        .find(|item| item.kind == ContentKind::Image)
+        .unwrap()
+        .id;
+    let texture_id = app
+        .textures
+        .get(&app.ctx, &app.store, image_id)
+        .unwrap()
+        .id();
+    assert!(state.renderer.read().texture(&texture_id).is_some());
+    // 隐藏未满 30 秒应保留缓存；超过阈值后，即使没有绘制帧也要释放 GPU 纹理。
+    app.release_idle_panel_resources(false, Some(&state));
+    assert!(!app.panel_resources_released);
+    assert!(state.renderer.read().texture(&texture_id).is_some());
+    app.panel_hidden_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+    app.release_idle_panel_resources(false, Some(&state));
+    assert!(app.panel_resources_released);
+    assert!(state.renderer.read().texture(&texture_id).is_none());
+    app.release_idle_panel_resources(false, Some(&state));
+    app.release_idle_panel_resources(true, Some(&state));
+    assert!(!app.panel_resources_released);
+    harness.run_steps(4);
+    let after = harness.render().unwrap();
+    assert_eq!(before, after, "释放玻璃纹理后重建的画面应保持一致");
+    after
+        .save(output_dir().join("glass-resources-rebuilt.png"))
+        .unwrap();
+}
+
 /// 条目与分类标签的右键菜单是原生菜单，测试里不弹出，只检查菜单内容和选中后的操作。
 #[test]
 fn context_menu_entries() {
@@ -659,7 +723,7 @@ fn snapshot_quick_panel_and_json_editor() {
         // 没有选中内容：列出常用功能。
         let mut probe = None;
         let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
-            app.quick.open(None);
+            app.quick.open(None, false);
             app.page = Page::QuickActions;
             probe = Some(quick_size(app));
         });
@@ -670,7 +734,7 @@ fn snapshot_quick_panel_and_json_editor() {
         // 选中的文本不是 JSON：提示没有匹配的功能。
         let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
             app.quick
-                .open(Some(Selection::Text("今天的会议改到下午三点".into())));
+                .open(Some(Selection::Text("今天的会议改到下午三点".into())), false);
             app.page = Page::QuickActions;
             probe = Some(quick_size(app));
         });
@@ -684,7 +748,7 @@ fn snapshot_quick_panel_and_json_editor() {
 
         // 选中 JSON：第一项是 JSON 编辑器，回车打开并自动格式化。
         let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
-            app.quick.open(Some(Selection::Text(SELECTED_JSON.into())));
+            app.quick.open(Some(Selection::Text(SELECTED_JSON.into())), false);
             app.page = Page::QuickActions;
             probe = Some(quick_size(app));
         });
@@ -956,4 +1020,324 @@ fn snapshot_update_prompt() {
         harness.run_steps(3);
         save(&mut harness, &format!("update-failed-{suffix}"));
     }
+}
+
+/// 搜索页离屏渲染：验证布局不 panic、结果行能画出来（输出 PNG 供人工检查）。
+#[test]
+#[ignore = "需要 GPU；输出 PNG 供人工检查"]
+fn snapshot_search_page() {
+    use std::time::{Duration, Instant};
+
+    use devtools_search::application::protocol::Command as SearchCommand;
+    use devtools_search::settings::{RootConfig, RootLocation, VolumeId};
+
+    // 索引根：一个临时目录，里面放几个文件。
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("季度报告.pdf"), "pdf").unwrap();
+    std::fs::write(root.path().join("notes.md"), "md").unwrap();
+    std::fs::write(root.path().join("README.txt"), "readme").unwrap();
+    // 长文件名：确认按列宽截断，不会画到路径列上面。
+    std::fs::write(
+        root.path().join("综合底座平台软件需求规格说明书（整合版）v3.final.docx"),
+        "docx",
+    )
+    .unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/main.rs"), "fn main() {}").unwrap();
+    // 两张真实图片：确认图标视图画的是预览（缩略图）而不是通用图标，且保持宽高比。
+    let wide = image::RgbaImage::from_fn(320, 180, |x, y| {
+        image::Rgba([(40 + x / 4) as u8, (90 + y / 3) as u8, 200, 255])
+    });
+    wide.save(root.path().join("海边日落.png")).unwrap();
+    let tall = image::RgbImage::from_fn(150, 200, |x, y| {
+        image::Rgb([220, (60 + x / 2) as u8, (40 + y / 3) as u8])
+    });
+    tall.save(root.path().join("竖版海报.jpg")).unwrap();
+
+    let data = tempfile::tempdir().unwrap();
+    let shared = Shared::new(&Settings::default());
+    let mut app = HubApp::build(
+        egui::Context::default(),
+        shared,
+        Store::open(data.path()).unwrap(),
+        data.path().to_path_buf(),
+        Settings::default(),
+    );
+    app.settings.search_enabled = true;
+    app.sync_search_module();
+    // 配置索引根并完成首次引导。
+    {
+        let handle = app.search.as_ref().expect("已启用搜索");
+        let mut module = super::lock_search(handle);
+        let mut draft = module.service().settings().clone();
+        draft.permission_onboarding_completed = true;
+        draft.lazy_start = false;
+        draft.show_all_on_empty = false;
+        draft.history_enabled = true;
+        draft.roots = vec![RootConfig {
+            location: RootLocation {
+                volume_id: VolumeId::fallback_absolute(root.path()),
+                relative_path: String::new(),
+                fallback_absolute_path: root.path().to_path_buf(),
+            },
+            enabled: true,
+        }];
+        draft.exclude_patterns = vec!["node_modules".into()];
+        module
+            .service_mut()
+            .handle(SearchCommand::ApplySettings {
+                draft: Box::new(draft),
+            });
+    }
+    // 等索引就绪。
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        app.poll_search();
+        let ready = app
+            .search
+            .as_ref()
+            .map(|module| {
+                super::lock_search(module)
+                    .service()
+                    .roots()
+                    .iter()
+                    .all(|root| matches!(root.state, devtools_search::RootState::Ready))
+            })
+            .unwrap_or(false);
+        if ready {
+            break;
+        }
+        assert!(Instant::now() < deadline, "索引没有就绪");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // 提交一次查询并等结果。
+    if let Some(handle) = app.search.as_ref() {
+        super::lock_search(handle)
+            .service_mut()
+            .handle(SearchCommand::Search {
+                text: "r".into(),
+                literal: false,
+                case_sensitive: false,
+                scope: None,
+            });
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        app.poll_search();
+        let len = app
+            .search
+            .as_ref()
+            .map(|module| super::lock_search(module).service().results_len())
+            .unwrap_or(0);
+        if len > 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "查询没有结果");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if let Some(handle) = app.search.as_ref() {
+        super::lock_search(handle)
+            .service_mut()
+            .handle(SearchCommand::LoadRows {
+                start: 0,
+                count: 128,
+            });
+    }
+    // 入口带来的范围胶囊（模拟快捷面板选中文件夹后打开搜索）。
+    if let Some(handle) = app.search.as_ref() {
+        super::lock_search(handle).on_shown(Some(devtools_search::SearchOptions {
+            query: String::new(),
+            selected_paths: vec![root.path().to_path_buf()],
+            query_is_literal: false,
+            case_sensitive: false,
+        }));
+    }
+    app.poll_search();
+    app.set_page(Page::Search);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 680.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut HubApp| {
+                app.poll_search();
+                app.draw(ui);
+            },
+            app,
+        );
+    let ctx = harness.ctx.clone();
+    style::install(&ctx);
+    ctx.set_theme(egui::Theme::Light);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(6);
+    // 等到行数据到达后再截图。
+    for _ in 0..100 {
+        let has_rows = harness
+            .state()
+            .search
+            .as_ref()
+            .map(|module| super::lock_search(module).service().results_len())
+            .unwrap_or(0)
+            > 0;
+        if has_rows {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        harness.run_steps(1);
+    }
+    harness.run_steps(4);
+    save(&mut harness, "search-page");
+
+    // 图标视图与类型筛选下拉（2026-10-31 新增）：确认网格布局、工具条与浮层菜单。
+    if let Some(handle) = harness.state_mut().search.as_ref() {
+        super::lock_search(handle)
+            .service_mut()
+            .handle(SearchCommand::SetView {
+                view: devtools_search::settings::ResultView::Large,
+            });
+    }
+    // 缩略图在后台线程解码（每个文件先试预览、再试按尺寸的图标）：多跑几帧等它们到货。
+    for _ in 0..150 {
+        harness.run_steps(1);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    save(&mut harness, "search-page-grid");
+    // 深色主题下的图标视图：确认工具条与卡片跟着取色。
+    let ctx = harness.ctx.clone();
+    ctx.set_theme(egui::Theme::Dark);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(3);
+    save(&mut harness, "search-page-grid-dark");
+    let ctx = harness.ctx.clone();
+    ctx.set_theme(egui::Theme::Light);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(2);
+    // 点工具条左侧的类型按钮，展开「所有 / 音频 / …」下拉。
+    click_at(&mut harness, egui::pos2(49.0, 82.0), egui::PointerButton::Primary);
+    harness.run_steps(3);
+    save(&mut harness, "search-page-grid-kind");
+    // 关掉下拉、展开右侧的「视图」菜单（确认快捷键提示与选中标记）。
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    click_at(&mut harness, egui::pos2(1040.0, 82.0), egui::PointerButton::Primary);
+    harness.run_steps(3);
+    save(&mut harness, "search-page-grid-view");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    if let Some(handle) = harness.state_mut().search.as_ref() {
+        super::lock_search(handle)
+            .service_mut()
+            .handle(SearchCommand::SetView {
+                view: devtools_search::settings::ResultView::Detail,
+            });
+    }
+    harness.run_steps(2);
+
+    // 模块内的设置页。
+    if let Some(handle) = harness.state_mut().search.as_ref() {
+        super::lock_search(handle).show_settings();
+    }
+    harness.run_steps(4);
+    save(&mut harness, "search-settings");
+
+    // 暗色主题：确认取色跟随主题（§5.6）。
+    let ctx = harness.ctx.clone();
+    ctx.set_theme(egui::Theme::Dark);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(3);
+    save(&mut harness, "search-settings-dark");
+}
+
+/// 首次使用的权限引导页（新数据目录、引导未完成）。
+#[test]
+#[ignore = "需要 GPU；输出 PNG 供人工检查"]
+fn snapshot_search_permissions() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = HubApp::build(
+        egui::Context::default(),
+        Shared::new(&Settings::default()),
+        Store::open(data.path()).unwrap(),
+        data.path().to_path_buf(),
+        Settings::default(),
+    );
+    app.settings.search_enabled = true;
+    app.sync_search_module();
+    app.set_page(Page::Search);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 680.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut HubApp| {
+                app.poll_search();
+                app.draw(ui);
+            },
+            app,
+        );
+    let ctx = harness.ctx.clone();
+    style::install(&ctx);
+    ctx.set_theme(egui::Theme::Light);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(4);
+    save(&mut harness, "search-permissions");
+
+    let ctx = harness.ctx.clone();
+    ctx.set_theme(egui::Theme::Dark);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(3);
+    save(&mut harness, "search-permissions-dark");
+}
+
+/// 空态：首次打开、索引尚未建立时的引导（大图标 + 主按钮）。
+#[test]
+#[ignore = "需要 GPU；输出 PNG 供人工检查"]
+fn snapshot_search_empty() {
+    use devtools_search::application::protocol::Command as SearchCommand;
+
+    let data = tempfile::tempdir().unwrap();
+    let mut app = HubApp::build(
+        egui::Context::default(),
+        Shared::new(&Settings::default()),
+        Store::open(data.path()).unwrap(),
+        data.path().to_path_buf(),
+        Settings::default(),
+    );
+    app.settings.search_enabled = true;
+    app.sync_search_module();
+    // 完成引导但保持惰性启动：空态显示"索引尚未建立 + 立即建立索引"。
+    if let Some(handle) = app.search.as_ref() {
+        let mut module = super::lock_search(handle);
+        let mut draft = module.service().settings().clone();
+        draft.permission_onboarding_completed = true;
+        draft.lazy_start = true;
+        draft.show_all_on_empty = false;
+        draft.history_enabled = true;
+        module
+            .service_mut()
+            .handle(SearchCommand::ApplySettings {
+                draft: Box::new(draft),
+            });
+    }
+    app.poll_search();
+    app.set_page(Page::Search);
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 680.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut HubApp| {
+                app.poll_search();
+                app.draw(ui);
+            },
+            app,
+        );
+    let ctx = harness.ctx.clone();
+    style::install(&ctx);
+    ctx.set_theme(egui::Theme::Light);
+    harness.state_mut().ctx = ctx;
+    harness.run_steps(4);
+    save(&mut harness, "search-empty");
 }

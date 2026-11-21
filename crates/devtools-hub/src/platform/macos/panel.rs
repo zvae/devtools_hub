@@ -19,15 +19,16 @@ pub use crate::platform::{Anchor, Backdrop, Placement};
 use anyhow::{bail, Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationOptions, NSAutoresizingMaskOptions, NSEvent,
-    NSEventModifierFlags, NSEventType, NSGlassEffectView, NSGlassEffectViewStyle, NSPanel,
-    NSPopUpMenuWindowLevel, NSResponder, NSRunningApplication, NSScreen, NSView,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
+    NSAutoresizingMaskOptions, NSEvent, NSEventModifierFlags, NSEventType, NSGlassEffectView,
+    NSGlassEffectViewStyle, NSImage, NSPanel, NSPopUpMenuWindowLevel, NSResponder,
+    NSRunningApplication, NSScreen, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowOrderingMode, NSWindowStyleMask, NSWorkspace, NSWorkspaceIconCreationOptions,
 };
-use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSData, NSObject, NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 thread_local! {
@@ -553,14 +554,11 @@ pub fn previous_app_name() -> Option<String> {
 fn position(mtm: MainThreadMarker, window: &NSWindow, placement: Placement) {
     let frame = window.frame();
     let mouse = NSEvent::mouseLocation();
-    let screens = NSScreen::screens(mtm);
-    let screen_frames: Vec<NSRect> = screens.iter().map(|s| s.visibleFrame()).collect();
-    let mouse_screen = screen_frames
+    let screen_frames: Vec<NSRect> = NSScreen::screens(mtm)
         .iter()
-        .copied()
-        .find(|vf| contains(*vf, mouse))
-        .or_else(|| screen_frames.first().copied());
-    let Some(vf) = mouse_screen else {
+        .map(|screen| screen.visibleFrame())
+        .collect();
+    let Some(vf) = mouse_frame(&screen_frames, mouse) else {
         return;
     };
 
@@ -578,6 +576,20 @@ fn position(mtm: MainThreadMarker, window: &NSWindow, placement: Placement) {
             return position(mtm, window, Placement::ScreenCenter);
         }
     };
+    place_inside(window, frame, vf, x, top);
+}
+
+/// 鼠标所在的屏幕，找不到时用第一块屏幕。
+fn mouse_frame(frames: &[NSRect], mouse: NSPoint) -> Option<NSRect> {
+    frames
+        .iter()
+        .copied()
+        .find(|vf| contains(*vf, mouse))
+        .or_else(|| frames.first().copied())
+}
+
+/// 把窗口左上角放到 `(x, top)`，并限制在 `vf` 内。
+fn place_inside(window: &NSWindow, frame: NSRect, vf: NSRect, x: f64, top: f64) {
     let x = x.clamp(
         vf.origin.x,
         (vf.origin.x + vf.size.width - frame.size.width).max(vf.origin.x),
@@ -662,4 +674,89 @@ fn intersects(a: NSRect, b: NSRect) -> bool {
         && b.origin.x < a.origin.x + a.size.width
         && a.origin.y < b.origin.y + b.size.height
         && b.origin.y < a.origin.y + a.size.height
+}
+
+/// 激活本应用，让新建的搜索窗口成为键盘窗口。
+///
+/// 浮动 / 固定模式的应用仍是 Accessory（没有 Dock 图标），但搜索窗口是普通 `NSWindow`，
+/// 需要应用成为前台才能接收键盘输入；普通模式在 `set_search_dock_visible` 里已经激活过。
+pub fn activate_search_window() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    NSApplication::sharedApplication(mtm).activate();
+}
+
+/// 搜索页的窗口行为（§4.2：由宿主平台层实现）。
+///
+/// 面板本身就是 101 层级、并跟随共享窗口，这里不需要调整层级；宿主也没有全局绑定空格键，
+/// 空格在搜索框里照常输入。保留这个入口，方便以后接入原生空格/焦点处理。
+pub fn set_search_space_behavior(_searching: bool) {}
+
+/// 搜索页普通窗口是否出现在 Dock。
+///
+/// 应用平时以 Accessory 运行（只在菜单栏常驻）；普通窗口打开时临时切到 Regular，
+/// 这样窗口有 Dock 图标、可按 ⌘Tab 切换，关闭后恢复 Accessory。
+pub fn set_search_dock_visible(visible: bool) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let policy = if visible {
+        NSApplicationActivationPolicy::Regular
+    } else {
+        NSApplicationActivationPolicy::Accessory
+    };
+    if app.activationPolicy() != policy {
+        if !app.setActivationPolicy(policy) {
+            tracing::warn!("切换应用激活策略失败（Dock 图标）");
+        } else if visible {
+            // 普通窗口要像独立应用窗口一样成为前台；窗口本身随后由 eframe 创建。
+            app.activate();
+        }
+    }
+    if visible {
+        // 切到 Regular 之后系统才会创建 Dock 图标：这时再设置，避免被应用包 / 可执行文件的
+        // 默认图标覆盖。直接运行 target/debug 下的可执行文件时没有 .app 包，不设置就是通用的
+        // “exec” 图标。
+        set_application_icon(&app);
+    }
+}
+
+/// 启动时先装好应用图标：Dock 图标可能在应用第一次成为前台前就按可执行文件生成。
+pub fn install_application_icon() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    set_application_icon(&NSApplication::sharedApplication(mtm));
+}
+
+/// 设置 Dock / 应用切换器里的图标（只影响运行时，不写回 .app 包）。
+fn set_application_icon(app: &NSApplication) {
+    static ICON_BYTES: &[u8] = include_bytes!("../../../assets/AppIcon.icns");
+    let data = NSData::with_bytes(ICON_BYTES);
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        tracing::warn!("无法解码应用图标 AppIcon.icns");
+        return;
+    };
+    // SAFETY: 在主线程设置应用图标，image 在调用期间一直有效。
+    unsafe { app.setApplicationIconImage(Some(&image)) };
+    // 没有 .app 包时（`cargo run` / target 下的可执行文件），Dock 的通用图标来自可执行文件本身：
+    // 把图标写到可执行文件上，正在运行的 Dock 图标也会立即更新；带 .app 包时用包里的图标即可。
+    let bundled = std::env::current_exe()
+        .map(|exe| exe.to_string_lossy().contains(".app/Contents/MacOS/"))
+        .unwrap_or(false);
+    if !bundled {
+        if let Ok(exe) = std::env::current_exe() {
+            let path = NSString::from_str(&exe.to_string_lossy());
+            let workspace = NSWorkspace::sharedWorkspace();
+            if !workspace.setIcon_forFile_options(
+                Some(&image),
+                &path,
+                NSWorkspaceIconCreationOptions::empty(),
+            ) {
+                tracing::warn!("无法设置可执行文件图标（Dock 会显示通用图标）");
+            }
+        }
+    }
 }

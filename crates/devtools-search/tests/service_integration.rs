@@ -1,0 +1,669 @@
+//! 服务端到端测试：真实文件系统上扫描 → 索引 → 查询 → 取行（不涉及 UI）。
+//!
+//! 验证 §7 的主干链路：排除规则、字面查询、过滤器、路径分段、LoadRows 与快照落盘。
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use devtools_search::application::protocol::{Command, Event, RowData};
+use devtools_search::application::service::{Lifecycle, Service};
+use devtools_search::settings::{RootConfig, RootLocation, SearchSettings, VolumeId};
+use devtools_search::{HostServices, SystemModalGuard};
+
+#[derive(Default)]
+struct FakeHost {
+    opened: Mutex<Vec<PathBuf>>,
+    revealed: Mutex<Vec<PathBuf>>,
+    picked: Mutex<Option<PathBuf>>,
+}
+
+impl HostServices for FakeHost {
+    fn pick_folder(
+        &self,
+        _initial: Option<&Path>,
+        _purpose: devtools_search::FolderPurpose,
+    ) -> Result<Option<PathBuf>, String> {
+        Ok(self.picked.lock().unwrap().take())
+    }
+    fn begin_system_modal(&self) -> Option<Box<dyn SystemModalGuard>> {
+        None
+    }
+    fn open(&self, path: &Path) -> io::Result<()> {
+        self.opened.lock().unwrap().push(path.to_path_buf());
+        Ok(())
+    }
+    fn reveal(&self, path: &Path) -> io::Result<()> {
+        self.revealed.lock().unwrap().push(path.to_path_buf());
+        Ok(())
+    }
+    fn icon(&self, _path: &Path) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+    fn set_search_space_behavior(&self, _searching: bool) {}
+    fn request_repaint(&self) {}
+    fn start_window_drag(&self) -> bool {
+        false
+    }
+}
+
+/// 临时目录里放几个文件，包含一个应被排除的 node_modules。
+fn fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("alpha.txt"), "hello").unwrap();
+    std::fs::write(dir.path().join("beta.PDF"), "pdf").unwrap();
+    std::fs::write(dir.path().join("gamma.md"), "# md").unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/delta.txt"), "delta").unwrap();
+    std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+    std::fs::write(dir.path().join("node_modules/pkg/skip.js"), "x").unwrap();
+    dir
+}
+
+fn root_for(path: &Path) -> RootLocation {
+    RootLocation {
+        volume_id: VolumeId::fallback_absolute(path),
+        relative_path: String::new(),
+        fallback_absolute_path: path.to_path_buf(),
+    }
+}
+
+fn settings_for(root: &Path) -> SearchSettings {
+    let mut settings = SearchSettings::default();
+    settings.roots = vec![RootConfig {
+        location: root_for(root),
+        enabled: true,
+    }];
+    settings.exclude_patterns = vec!["node_modules".into()];
+    settings.exclude_case_sensitive = false;
+    settings.lazy_start = false;
+    settings.persist_index = true;
+    settings.permission_onboarding_completed = true;
+    settings.history_enabled = false;
+    settings.show_all_on_empty = false;
+    settings.debounce_ms = 1;
+    settings.ui.window.size = [1100.0, 680.0];
+    settings
+}
+
+/// 轮询事件直到条件满足或超时。
+fn wait_for(
+    service: &mut Service,
+    timeout: Duration,
+    mut predicate: impl FnMut(&Event) -> bool,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        for event in service.poll().events {
+            if predicate(&event) {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// 等到所有根就绪（扫描完成）。
+fn wait_ready(service: &mut Service) {
+    use devtools_search_core::volumes::RootState;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let roots = service.roots();
+        if !roots.is_empty() && roots.iter().all(|r| matches!(r.state, RootState::Ready)) {
+            return;
+        }
+        let _ = service.poll();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    panic!("索引没有在 30 秒内就绪：{:?}", service.roots());
+}
+
+fn search(service: &mut Service, text: &str) -> Vec<RowData> {
+    service.handle(Command::Search {
+        text: text.to_string(),
+        literal: false,
+        case_sensitive: false,
+        scope: None,
+    });
+    let done = wait_for(service, Duration::from_secs(20), |event| {
+        matches!(event, Event::SearchDone(_))
+    });
+    assert!(done, "查询 {text:?} 没有返回结果");
+    assert!(
+        service.last_error().is_none(),
+        "查询 {text:?} 报错：{:?}",
+        service.last_error()
+    );
+    let len = service.results_len() as u32;
+    service.handle(Command::LoadRows {
+        start: 0,
+        count: 200,
+    });
+    let mut rows = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while rows.len() < len as usize && Instant::now() < deadline {
+        for event in service.poll().events {
+            if let Event::Rows { rows: batch, .. } = event {
+                rows.extend(batch);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    rows.retain(|row| !row.missing);
+    rows
+}
+
+fn names(rows: &[RowData]) -> Vec<String> {
+    let mut names: Vec<String> = rows.iter().map(|row| row.name.clone()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn scans_indexes_searches_and_loads_rows() {
+    let fixture = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    let mut service = Service::new(data.path(), host.clone());
+    assert_eq!(service.lifecycle(), Lifecycle::AwaitingConsent);
+
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings_for(fixture.path())),
+    });
+    wait_ready(&mut service);
+    assert_eq!(service.lifecycle(), Lifecycle::Indexing);
+
+    // 子串查询。
+    let rows = search(&mut service, "alpha");
+    assert_eq!(names(&rows), ["alpha.txt"]);
+    // 路径按父链拼出来（完整路径可用于打开/显示；根路径已规范化为 /private/var/…，
+    // Windows 上还要去掉 canonicalize 加的 `\\?\`）。
+    let expected = devtools_search::platform::fs::simplify(
+        std::fs::canonicalize(fixture.path()).unwrap(),
+    )
+    .join("alpha.txt");
+    assert_eq!(rows[0].path, expected.to_string_lossy());
+    assert!(
+        !rows[0].path.starts_with(r"\\?\"),
+        "展示路径不应带 Windows 逐字节前缀：{}",
+        rows[0].path
+    );
+
+    // 大小写不敏感（beta.PDF 用小写 pdf 能搜到）。
+    let rows = search(&mut service, "pdf");
+    assert_eq!(names(&rows), ["beta.PDF"]);
+
+    // 过滤器。
+    let rows = search(&mut service, "ext:md");
+    assert_eq!(names(&rows), ["gamma.md"]);
+
+    // 路径分段。
+    let rows = search(&mut service, "sub/delta");
+    assert_eq!(names(&rows), ["delta.txt"]);
+
+    // 排除规则：node_modules 下不进入索引。
+    assert!(search(&mut service, "skip").is_empty());
+    assert!(search(&mut service, "node_modules").is_empty());
+
+    // 空查询 + show_all_on_empty=false → 没有结果。
+    assert!(search(&mut service, "").is_empty());
+
+    // 打开/显示走宿主。
+    let path = fixture.path().join("alpha.txt");
+    service.handle(Command::Open { path: path.clone() });
+    service.handle(Command::Reveal { path: path.clone() });
+    let _ = service.poll();
+    assert_eq!(host.opened.lock().unwrap().as_slice(), [path.clone()]);
+    assert_eq!(host.revealed.lock().unwrap().as_slice(), [path]);
+
+    // 快照落盘：设置文件与 manifest 都存在。
+    let search_dir = data.path().join("search");
+    assert!(search_dir.join("settings.json").is_file());
+    assert!(
+        search_dir.join("snapshots/manifest.json").is_file(),
+        "应保存索引快照"
+    );
+
+    service.shutdown();
+    assert!(service.is_stopped());
+}
+
+#[test]
+fn manual_rebuild_picks_up_new_files() {
+    let fixture = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    let mut service = Service::new(data.path(), host);
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings_for(fixture.path())),
+    });
+    wait_ready(&mut service);
+    assert!(search(&mut service, "epsilon").is_empty());
+
+    std::fs::write(fixture.path().join("epsilon.log"), "new").unwrap();
+    service.handle(Command::RebuildAll);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let rows = search(&mut service, "epsilon");
+        if names(&rows) == ["epsilon.log"] {
+            break;
+        }
+        assert!(Instant::now() < deadline, "重建索引后应能搜到新文件");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    service.shutdown();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "需要支持持久 FSEvents 的 macOS 本机卷，手动运行"]
+fn restart_replays_macos_file_changes_from_persisted_checkpoint() {
+    restart_replays_file_changes("macOS FSEvents");
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "需要临时目录位于已启用 USN Journal 的本地 NTFS 卷，并以管理员身份运行"]
+fn restart_replays_windows_usn_changes_from_persisted_checkpoint() {
+    restart_replays_file_changes("Windows USN Journal");
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn restart_replays_file_changes(journal: &str) {
+    use devtools_search_core::snapshot::SnapshotStore;
+    use devtools_search_core::root_key;
+
+    let root = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let settings = settings_for(root.path());
+    let key = root_key(&settings.roots[0].location);
+    let store = SnapshotStore::new(data.path().join("search/snapshots"));
+    let mut first = Service::new(data.path(), Arc::new(FakeHost::default()));
+    first.handle(Command::ApplySettings { draft: Box::new(settings) });
+    wait_ready(&mut first);
+    let saved = store.load_latest(&key).unwrap().unwrap();
+    assert!(saved.checkpoint.last_event_id > 0, "全扫应保存 {journal} 检查点");
+    #[cfg(windows)]
+    assert!(saved.checkpoint.stream_id.starts_with("ntfs-usn-v1:"));
+    first.shutdown();
+    drop(first);
+
+    std::fs::rename(root.path().join("beta.PDF"), root.path().join("renamed.PDF")).unwrap();
+    std::fs::rename(root.path().join("sub"), root.path().join("moved")).unwrap();
+    std::fs::write(root.path().join("moved/new.txt"), "new while closed").unwrap();
+    std::fs::write(root.path().join("alpha.txt"), "updated while closed").unwrap();
+
+    let mut next = Service::new(data.path(), Arc::new(FakeHost::default()));
+    next.handle(Command::WarmUp);
+    wait_ready(&mut next);
+    assert_eq!(names(&search(&mut next, "renamed")), ["renamed.PDF"]);
+    assert!(search(&mut next, "beta").is_empty());
+    assert_eq!(names(&search(&mut next, "new")), ["new.txt"]);
+    assert_eq!(names(&search(&mut next, "moved/delta")), ["delta.txt"]);
+    assert!(search(&mut next, "sub/delta").is_empty());
+    assert_eq!(search(&mut next, "alpha")[0].size, Some(20));
+    let updated = store.load_latest(&key).unwrap().unwrap();
+    assert!(updated.checkpoint.last_event_id >= saved.checkpoint.last_event_id);
+    assert!(updated.index.revision() > saved.index.revision(), "应增量更新快照，整根扫描会重置修订号");
+    std::fs::write(root.path().join("after-replay.log"), "live").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while search(&mut next, "after-replay").is_empty() {
+        assert!(Instant::now() < deadline, "回放后应继续实时监听");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    next.shutdown();
+    drop(next);
+
+    let mut invalid = updated.checkpoint.clone();
+    invalid.stream_id = "另一个卷的日志".into();
+    store.save(&key, &updated.index, &updated.identity, updated.config_fingerprint, &invalid).unwrap();
+    std::fs::write(root.path().join("needs-scan.log"), "fallback").unwrap();
+    let mut fallback = Service::new(data.path(), Arc::new(FakeHost::default()));
+    fallback.handle(Command::WarmUp);
+    wait_ready(&mut fallback);
+    assert_eq!(names(&search(&mut fallback, "needs-scan")), ["needs-scan.log"]);
+    let rebuilt = store.load_latest(&key).unwrap().unwrap();
+    assert_eq!(rebuilt.index.revision(), 1);
+    assert_ne!(rebuilt.checkpoint.stream_id, invalid.stream_id);
+}
+
+#[test]
+fn equal_size_rebuild_invalidates_previous_rows_without_auto_refresh() {
+    let root = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let alpha = root.path().join("alpha.txt");
+    std::fs::write(&alpha, "old").unwrap();
+    let mut settings = settings_for(root.path());
+    settings.auto_refresh = false;
+    settings.watch = false;
+    let mut service = Service::new(data.path(), Arc::new(FakeHost::default()));
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+    let old = search(&mut service, "alpha").pop().unwrap();
+
+    std::fs::rename(alpha, root.path().join("beta.txt")).unwrap();
+    service.handle(Command::RebuildAll);
+    wait_ready(&mut service);
+    assert!(wait_for(&mut service, Duration::from_secs(2), |event| {
+        matches!(event, Event::RowsInvalidated { roots } if roots.contains(&old.result.root()))
+    }));
+    service.handle(Command::LoadRows { start: 0, count: 1 });
+    assert!(wait_for(&mut service, Duration::from_secs(2), |event| {
+        matches!(event, Event::Rows { rows, .. } if rows.len() == 1 && rows[0].missing)
+    }));
+    let new = search(&mut service, "beta").pop().unwrap();
+    assert!(new.result.epoch() > old.result.epoch());
+}
+
+#[test]
+fn apply_rules_rebuilds_existing_roots_but_adding_root_does_not() {
+    let parent = tempfile::tempdir().unwrap();
+    let first = parent.path().join("first");
+    let second = parent.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    std::fs::write(first.join("keep.txt"), "first").unwrap();
+    std::fs::write(second.join("added.md"), "second").unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    let mut service = Service::new(data.path(), host.clone());
+    let mut settings = settings_for(&first);
+    settings.watch = false;
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+    assert_eq!(names(&search(&mut service, "keep")), ["keep.txt"]);
+
+    let original = service.slot_snapshot().pop().unwrap();
+    let before = original.fingerprint();
+    *host.picked.lock().unwrap() = Some(second);
+    service.handle(Command::PickFolder);
+    wait_ready(&mut service);
+    assert_eq!(original.fingerprint(), before);
+    assert_eq!(names(&search(&mut service, "added")), ["added.md"]);
+
+    let mut settings = service.settings().clone();
+    settings.exclude_patterns.push("*.txt".into());
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+    assert!(original.fingerprint().0 > before.0);
+    assert!(search(&mut service, "keep").is_empty());
+    assert_eq!(names(&search(&mut service, "added")), ["added.md"]);
+}
+
+#[test]
+fn hidden_roots_resume_and_reconcile_changes_when_reopened() {
+    let root = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut settings = settings_for(root.path());
+    settings.watch = true;
+    let mut service = Service::new(data.path(), Arc::new(FakeHost::default()));
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    service.handle(Command::VisibilityChanged { visible: true });
+    wait_ready(&mut service);
+    service.handle(Command::VisibilityChanged { visible: false });
+    std::fs::write(root.path().join("hidden.md"), "hidden").unwrap();
+    assert!(search(&mut service, "hidden").is_empty());
+
+    service.handle(Command::VisibilityChanged { visible: true });
+    wait_ready(&mut service);
+    assert_eq!(names(&search(&mut service, "hidden")), ["hidden.md"]);
+}
+
+#[test]
+fn shutdown_flushes_history_without_overwriting_new_settings() {
+    let data = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = settings_for(root.path());
+    settings.history_enabled = true;
+    settings.watch = false;
+    let mut service = Service::new(data.path(), Arc::new(FakeHost::default()));
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    for text in ["first", "second", "third"] {
+        service.handle(Command::Search {
+            text: text.into(),
+            literal: true,
+            case_sensitive: false,
+            scope: None,
+        });
+    }
+    service.handle(Command::SetView {
+        view: devtools_search::settings::ResultView::Large,
+    });
+    service.handle(Command::Search {
+        text: "last".into(),
+        literal: true,
+        case_sensitive: false,
+        scope: None,
+    });
+    service.shutdown();
+    let saved =
+        devtools_search::settings::SearchSettingsStore::new(&data.path().join("search")).load();
+    assert_eq!(
+        saved.settings.ui.view,
+        devtools_search::settings::ResultView::Large
+    );
+    let history: Vec<_> = saved
+        .settings
+        .history
+        .into_iter()
+        .map(|entry| entry.query)
+        .collect();
+    assert_eq!(history, ["last", "third", "second", "first"]);
+}
+
+#[test]
+fn not_indexed_folder_reports_notice() {
+    let fixture = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    let mut service = Service::new(data.path(), host);
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings_for(fixture.path())),
+    });
+    wait_ready(&mut service);
+
+    service.handle(Command::Search {
+        text: "infolder:/definitely/not/here".into(),
+        literal: false,
+        case_sensitive: false,
+        scope: None,
+    });
+    assert!(wait_for(&mut service, Duration::from_secs(10), |event| {
+        matches!(event, Event::SearchDone(_))
+    }));
+    assert_eq!(service.results_len(), 0);
+    assert!(
+        service
+            .last_notice()
+            .is_some_and(|notice| notice.contains("不在索引范围内")),
+        "应给出范围提示：{:?}",
+        service.last_notice()
+    );
+    service.shutdown();
+}
+
+/// 实时监听：新建 / 删除文件后，不重建索引也能出现在结果里（§8）。
+#[test]
+fn watch_updates_index_without_rebuild() {
+    let fixture = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let host = Arc::new(FakeHost::default());
+    let mut service = Service::new(data.path(), host);
+    let mut settings = settings_for(fixture.path());
+    settings.watch = true;
+    settings.persist_index = false;
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+
+    // 让服务挂上监听（poll 里维护）。
+    for _ in 0..20 {
+        let _ = service.poll();
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(search(&mut service, "watched").is_empty());
+
+    // 新建文件：应自动出现在结果里。
+    let created = fixture.path().join("watched.txt");
+    std::fs::write(&created, "hello").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let rows = search(&mut service, "watched");
+        if names(&rows) == ["watched.txt"] {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "实时监听没有把新文件加进索引：{:?}",
+            names(&rows)
+        );
+        let _ = service.poll();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // 删除文件：应自动从结果里消失。
+    std::fs::remove_file(&created).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let rows = search(&mut service, "watched");
+        if rows.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "实时监听没有把删除的文件移出索引：{:?}",
+            names(&rows)
+        );
+        let _ = service.poll();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let slot = service.slot_snapshot().pop().unwrap();
+    let root = slot.id;
+    let weak = Arc::downgrade(&slot);
+    drop(slot);
+    service.handle(Command::RemoveRoot { root });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while weak.upgrade().is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(weak.upgrade().is_none(), "移除根后应停止监听并释放索引");
+    service.shutdown();
+}
+
+/// 类型筛选：作为查询条件生效（空关键词也生效），并且重启后仍然保留（§5.1）。
+#[test]
+fn kind_filter_narrows_results_and_survives_restart() {
+    use devtools_search::settings::{FileKind, ResultView};
+
+    let fixture = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let host: Arc<dyn HostServices> = Arc::new(FakeHost::default());
+    let mut settings = settings_for(fixture.path());
+    settings.show_all_on_empty = true;
+    let mut service = Service::new(data.path(), host.clone());
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings),
+    });
+    wait_ready(&mut service);
+
+    // 所有：全部文件与目录。
+    let all = names(&search(&mut service, ""));
+    assert!(all.contains(&"alpha.txt".to_string()), "{all:?}");
+
+    // 文档：只剩扩展名属于文档组的文件（目录不再出现）。
+    service.handle(Command::SetKind {
+        kind: FileKind::Document,
+    });
+    let docs = names(&search(&mut service, ""));
+    assert_eq!(docs, ["alpha.txt", "beta.PDF", "delta.txt", "gamma.md"]);
+
+    // 图片：fixture 里没有图片。
+    service.handle(Command::SetKind {
+        kind: FileKind::Picture,
+    });
+    assert!(search(&mut service, "").is_empty());
+
+    // 文件夹：只剩目录（node_modules 被排除规则剪掉）。
+    service.handle(Command::SetKind {
+        kind: FileKind::Folder,
+    });
+    let dirs = names(&search(&mut service, ""));
+    assert_eq!(dirs, ["sub"]);
+
+    // 视图切换只影响绘制，不影响结果集，并且会持久化。
+    service.handle(Command::SetView {
+        view: ResultView::Large,
+    });
+    service.shutdown();
+
+    let mut restarted = Service::new(data.path(), host);
+    restarted.handle(Command::WarmUp);
+    wait_ready(&mut restarted);
+    assert_eq!(restarted.settings().ui.kind, FileKind::Folder);
+    assert_eq!(restarted.settings().ui.view, ResultView::Large);
+    restarted.shutdown();
+}
+
+/// 排序偏好持久化：改一次排序，重启（重建 Service）后仍然生效（§5.1）。
+#[test]
+fn sort_preference_survives_restart() {
+    let fixture = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let host: Arc<dyn HostServices> = Arc::new(FakeHost::default());
+    // 空查询列出全部文件，才能比较完整的排序。
+    let mut settings = settings_for(fixture.path());
+    settings.show_all_on_empty = true;
+    let mut service = Service::new(data.path(), host.clone());
+    service.handle(Command::ApplySettings {
+        draft: Box::new(settings.clone()),
+    });
+    wait_ready(&mut service);
+
+    // 默认路径序：目录按名字混在中间（DFS 先序）。
+    let rows = search(&mut service, "");
+    let default_order = rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+
+    // 按文件名升序。
+    service.handle(Command::SetSort {
+        column: devtools_search_core::SortColumn::Name,
+        dir: devtools_search_core::SortDir::Asc,
+    });
+    let rows = search(&mut service, "");
+    let name_order = rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+    assert_ne!(name_order, default_order, "改名排序后顺序应该变化");
+    let mut sorted = name_order.clone();
+    sorted.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    assert_eq!(name_order, sorted, "应按文件名升序：{name_order:?}");
+    service.shutdown();
+
+    // "重启"：用同一个数据目录重新创建 Service，排序偏好应原样保留。
+    let mut restarted = Service::new(data.path(), host);
+    // 真实 UI 在显示搜索页时会 warm_up（lazy_start=false 时立即建索引）。
+    restarted.handle(Command::WarmUp);
+    wait_ready(&mut restarted);
+    assert_eq!(
+        restarted.settings().ui.sort.column,
+        devtools_search_core::SortColumn::Name,
+        "重启后排序规则应保留"
+    );
+    let rows = search(&mut restarted, "");
+    let after_restart = rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        after_restart, name_order,
+        "重启后默认按上一次的排序规则排序：{after_restart:?}"
+    );
+    restarted.shutdown();
+}

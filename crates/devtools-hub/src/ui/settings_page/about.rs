@@ -146,7 +146,7 @@ impl HubApp {
                 let reason = match (&release.asset, update::install_target()) {
                     (None, _) => "Release 中没有当前平台的安装包，打开 Release 页面".to_string(),
                     (Some(_), Err(reason)) => format!("{reason}，用浏览器下载"),
-                    (Some(_), Ok(_)) => url.to_string(),
+                    (Some(_), Ok(_)) => "安装包缺少有效的校验信息，用浏览器下载".into(),
                 };
                 if ui.button("下载").on_hover_text(reason).clicked() {
                     *open = Some(url.to_string());
