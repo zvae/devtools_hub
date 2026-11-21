@@ -116,8 +116,8 @@ pub enum Event {
     Roots { roots: Vec<RootStatus> },
     /// 查询完成。
     SearchDone(SearchResult),
-    /// 一屏行数据。
-    Rows { start: u32, rows: Vec<RowData> },
+    /// 一屏行数据；代际对应当前显示的结果集，用来丢弃后台迟到的旧响应。
+    Rows { generation: u64, start: u32, rows: Vec<RowData> },
     /// 对应根的索引版本有变化，已缓存的行需要重读。
     RowsInvalidated { roots: Vec<RootId> },
     /// 结果集失效（revision 变化但不需要重跑查询，§7.7）。

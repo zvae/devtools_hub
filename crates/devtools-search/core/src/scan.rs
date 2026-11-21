@@ -234,6 +234,7 @@ pub fn scan_root(
         }
     }
     index.commit();
+    index.reclaim_unused_capacity();
     ScanOutcome { stats, cancelled: false }
 }
 

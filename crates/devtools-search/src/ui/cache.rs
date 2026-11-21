@@ -23,6 +23,8 @@ pub struct RowCache {
     chunks: HashSet<u32>,
     /// 当前结果集的顺序：增量重排的依据，也用来丢弃迟到的旧响应。
     ids: Arc<Vec<ResultId>>,
+    /// 失效行仍用于绘制，但不算作已加载，等新数据到达后原位替换。
+    stale: HashSet<ResultId>,
 }
 
 impl RowCache {
@@ -35,6 +37,7 @@ impl RowCache {
     pub fn release_rows(&mut self) {
         self.rows.clear();
         self.chunks = HashSet::new();
+        self.stale = HashSet::new();
     }
 
     /// 应用新的结果集顺序：按 `ResultId` 复用已有的行，把它们挪到新下标。
@@ -54,6 +57,12 @@ impl RowCache {
         }
         let reused = rows.len();
         self.rows = rows;
+        self.stale = self
+            .rows
+            .values()
+            .filter(|row| self.stale.contains(&row.result))
+            .map(|row| row.result)
+            .collect();
         self.ids = ids;
         self.refresh_chunks();
         reused
@@ -61,8 +70,12 @@ impl RowCache {
 
     /// 索引版本变化后重新取该根的行。节点 ID 相同也可能有新的元数据。
     pub fn invalidate_roots(&mut self, roots: &[RootId]) {
-        self.rows
-            .retain(|_, row| !roots.contains(&row.result.root()));
+        self.stale.extend(
+            self.rows
+                .values()
+                .filter(|row| roots.contains(&row.result.root()))
+                .map(|row| row.result),
+        );
         self.refresh_chunks();
     }
 
@@ -71,8 +84,10 @@ impl RowCache {
         self.chunks.clear();
         let total = self.ids.len() as u32;
         let mut counts = HashMap::<u32, u32>::new();
-        for &index in self.rows.keys() {
-            *counts.entry(index / CHUNK).or_default() += 1;
+        for (&index, row) in &self.rows {
+            if !self.stale.contains(&row.result) {
+                *counts.entry(index / CHUNK).or_default() += 1;
+            }
         }
         for (chunk, count) in counts {
             if count == total.saturating_sub(chunk * CHUNK).min(CHUNK) {
@@ -96,11 +111,14 @@ impl RowCache {
             };
             let chunk = farthest / CHUNK;
             for offset in 0..CHUNK {
-                self.rows.remove(&(chunk * CHUNK + offset));
+                if let Some(old) = self.rows.remove(&(chunk * CHUNK + offset)) {
+                    self.stale.remove(&old.result);
+                }
             }
             self.chunks.remove(&chunk);
         }
         self.chunks.insert(row.index / CHUNK);
+        self.stale.remove(&row.result);
         self.rows.insert(row.index, row);
     }
 
@@ -225,5 +243,58 @@ mod tests {
         // 迟到的旧响应被丢弃。
         cache.insert(row(1));
         assert!(cache.get(1).is_none());
+    }
+
+    #[test]
+    fn invalidation_keeps_visible_rows_until_refreshed_even_after_reorder() {
+        let mut cache = RowCache::default();
+        cache.apply_results(Arc::new(vec![id(0), id(1)]));
+        cache.insert(row(0));
+        cache.insert(row(1));
+
+        // 模拟监听不断更新同一根；等待查询重跑与 LoadRows 期间不能空一帧。
+        for _ in 0..3 {
+            cache.invalidate_roots(&[RootId(0)]);
+            assert_eq!(cache.get(0).unwrap().name, "f0");
+            assert_eq!(cache.take_requests((0, 2), 2), [(0, CHUNK)]);
+            assert!(cache.take_requests((0, 2), 2).is_empty());
+        }
+        assert_eq!(cache.apply_results(Arc::new(vec![id(1), id(0)])), 2);
+        assert_eq!(cache.get(0).unwrap().name, "f1");
+        assert_eq!(cache.take_requests((0, 2), 2), [(0, CHUNK)]);
+
+        let mut updated = row(1);
+        updated.index = 0;
+        updated.size = Some(99);
+        cache.insert(updated);
+        let mut other = row(0);
+        other.index = 1;
+        cache.insert(other);
+        assert_eq!(cache.get(0).unwrap().size, Some(99));
+        cache.apply_results(Arc::new(vec![id(1), id(0)]));
+        assert!(cache.take_requests((0, 2), 2).is_empty());
+        assert!(cache.stale.is_empty());
+    }
+
+    #[test]
+    fn invalidation_only_reloads_affected_root_chunks() {
+        let mut cache = RowCache::default();
+        let ids: Vec<_> = (0..CHUNK * 2)
+            .map(|node| ResultId::new(RootId((node / CHUNK) as u16), NodeId(node), 1))
+            .collect();
+        cache.apply_results(Arc::new(ids.clone()));
+        for index in 0..CHUNK * 2 {
+            let mut row = row(index);
+            row.result = ids[index as usize];
+            cache.insert(row);
+        }
+        cache.invalidate_roots(&[RootId(1)]);
+        assert_eq!(cache.rows.len(), (CHUNK * 2) as usize);
+        assert_eq!(
+            cache.take_requests((0, (CHUNK * 2) as usize), ids.len()),
+            [(CHUNK, CHUNK)]
+        );
+        cache.release_rows();
+        assert!(cache.stale.is_empty());
     }
 }

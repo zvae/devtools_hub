@@ -79,6 +79,8 @@ pub struct Service {
     generation: u64,
     cancel: Arc<AtomicBool>,
     results: Arc<Vec<devtools_search_core::ResultId>>,
+    /// 当前正在显示的结果代际；新查询完成前仍可加载旧结果的可见行。
+    result_generation: u64,
     last_query: Option<LastQuery>,
     query_in_flight: bool,
     last_total: usize,
@@ -139,6 +141,7 @@ impl Service {
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             results: Arc::default(),
+            result_generation: 0,
             last_query: None,
             query_in_flight: false,
             last_total: 0,
@@ -246,8 +249,12 @@ impl Service {
                 scope,
             } => self.search(text, literal, case_sensitive, scope, true),
             Command::LoadRows { start, count } => {
-                let rows = self.runtime.load_rows(&self.results, start, count);
-                let _ = self.tx.send(Event::Rows { start, rows });
+                self.runtime.spawn_load_rows(
+                    self.results.clone(),
+                    start,
+                    count,
+                    self.result_generation,
+                );
             }
             Command::SetSort { column, dir } => self.set_sort(column, dir),
             Command::SetView { view } => self.set_view(view),
@@ -860,6 +867,7 @@ impl Service {
                         continue;
                     }
                     self.query_in_flight = false;
+                    self.result_generation = result.generation;
                     self.results = result.ids.clone();
                     self.last_total = result.total;
                     self.last_took_ms = result.took_ms;
@@ -868,6 +876,7 @@ impl Service {
                     events.push(Event::SearchDone(result));
                 }
                 Event::Roots { .. } => roots_changed = true,
+                Event::Rows { generation, .. } if generation != self.result_generation => {}
                 other => events.push(other),
             }
         }
@@ -1099,6 +1108,43 @@ mod tests {
     use std::fs;
 
     struct TestHost;
+
+    #[test]
+    fn row_replies_follow_displayed_results_during_query_switch() {
+        let data = tempfile::tempdir().unwrap();
+        let mut service = Service::new(data.path(), Arc::new(TestHost));
+        service.result_generation = 20;
+        service.generation = 21;
+        let rows = |generation| Event::Rows {
+            generation,
+            start: 0,
+            rows: Vec::new(),
+        };
+        // 新查询尚未完成，界面仍显示第 20 代结果，应该能继续滚动加载。
+        service.tx.send(rows(20)).unwrap();
+        service.tx.send(rows(21)).unwrap();
+        let generations: Vec<_> = service.poll().events.into_iter().filter_map(|event| match event {
+            Event::Rows { generation, .. } => Some(generation),
+            _ => None,
+        }).collect();
+        assert_eq!(generations, [20]);
+        service.tx.send(Event::SearchDone(SearchResult {
+            session: service.session,
+            generation: 21,
+            total: 0,
+            took_ms: 0,
+            error: None,
+            notice: None,
+            ids: Arc::default(),
+        })).unwrap();
+        service.tx.send(rows(20)).unwrap();
+        service.tx.send(rows(21)).unwrap();
+        let generations: Vec<_> = service.poll().events.into_iter().filter_map(|event| match event {
+            Event::Rows { generation, .. } => Some(generation),
+            _ => None,
+        }).collect();
+        assert_eq!(generations, [21], "换结果后丢弃旧行响应");
+    }
 
     impl HostServices for TestHost {
         fn pick_folder(

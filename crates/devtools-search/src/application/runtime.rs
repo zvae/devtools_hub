@@ -482,20 +482,22 @@ impl Runtime {
         });
     }
 
-    /// 读取一屏行数据。
+    /// 可见行在查询池读取：构造路径及等待索引读锁都不能阻塞滚动所在的 UI 线程。
+    pub fn spawn_load_rows(&self, ids: Arc<Vec<ResultId>>, start: u32, count: u32, generation: u64) {
+        let slots = self.slots();
+        let tx = self.events.clone();
+        let repaint = self.repaint.clone();
+        self.query_pool.spawn_fifo(move || {
+            let rows = load_rows(&slots, &ids, start, count);
+            let _ = tx.send(Event::Rows { generation, start, rows });
+            repaint();
+        });
+    }
+
+    /// 测试中同步读取，生产界面必须走后台任务。
+    #[cfg(test)]
     pub fn load_rows(&self, ids: &[ResultId], start: u32, count: u32) -> Vec<RowData> {
-        let end = start.saturating_add(count).min(ids.len() as u32);
-        let mut rows = Vec::with_capacity(end.saturating_sub(start) as usize);
-        for index in start..end {
-            let id = ids[index as usize];
-            let Some(slot) = self.slot(id.root()) else {
-                rows.push(missing_row(id, index));
-                continue;
-            };
-            let guard = slot.index.read().unwrap();
-            rows.push(build_row(&slot, &guard, id, index));
-        }
-        rows
+        load_rows(&self.slots(), ids, start, count)
     }
 
     /// 单根只允许当前监听令牌提交。同一根重建期间暂停监听。
@@ -583,6 +585,31 @@ impl QueryOutcome {
             cancelled: true,
         }
     }
+}
+
+/// 每个连续的同根批次共用一次读锁，避免一批 128 行反复竞争锁。
+fn load_rows(slots: &[Arc<RootSlot>], ids: &[ResultId], start: u32, count: u32) -> Vec<RowData> {
+    let end = start.saturating_add(count).min(ids.len() as u32);
+    let mut rows = Vec::with_capacity(end.saturating_sub(start) as usize);
+    let mut cursor = start;
+    while cursor < end {
+        let root = ids[cursor as usize].root();
+        let next = (cursor + 1..end)
+            .find(|&index| ids[index as usize].root() != root)
+            .unwrap_or(end);
+        if let Some(slot) = slots.iter().find(|slot| slot.id == root) {
+            let index = slot.index.read().unwrap();
+            for display in cursor..next {
+                rows.push(build_row(slot, &index, ids[display as usize], display));
+            }
+        } else {
+            for display in cursor..next {
+                rows.push(missing_row(ids[display as usize], display));
+            }
+        }
+        cursor = next;
+    }
+    rows
 }
 
 fn missing_row(id: ResultId, index: u32) -> RowData {
@@ -1061,6 +1088,53 @@ mod tests {
             fallback_absolute_path: mount.clone(),
         };
         RootSlot::new(RootId(id), identity, mount)
+    }
+
+    #[test]
+    fn loading_visible_rows_returns_without_waiting_for_index_writer() {
+        use std::sync::mpsc::channel;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = channel();
+        let (repaint_tx, repaint_rx) = channel();
+        let runtime = Runtime::new(dir.path().join("snapshots"), tx, Arc::new(move || {
+            let _ = repaint_tx.send(());
+        }));
+        let mount = dir.path().join("files");
+        let identity = RootLocation {
+            volume_id: VolumeId::fallback_absolute(&mount),
+            relative_path: String::new(),
+            fallback_absolute_path: mount.clone(),
+        };
+        let slot = runtime.add_slot(identity, mount.clone());
+        let id = {
+            let mut index = slot.index.write().unwrap();
+            let root = index.insert(None, OsStr::new("files"), NodeKind::Dir, NodeMeta::default());
+            let node = index.insert(Some(root), OsStr::new("test.png"), NodeKind::File, NodeMeta::default());
+            index.commit();
+            ResultId::new(slot.id, node, index.epoch())
+        };
+        // 持有写锁模拟监听更新。发请求的一侧必须先返回，后台等锁释放后再交付行。
+        let writer = slot.index.write().unwrap();
+        let (done_tx, done_rx) = channel();
+        let returned = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                runtime.spawn_load_rows(Arc::new(vec![id]), 0, 128, 42);
+                done_tx.send(()).unwrap();
+            });
+            let returned = done_rx.recv_timeout(Duration::from_secs(2));
+            assert!(rx.try_recv().is_err());
+            drop(writer);
+            returned
+        });
+        assert!(returned.is_ok(), "取行请求不应等待索引写锁");
+        let Event::Rows { generation, rows, .. } = rx.recv_timeout(Duration::from_secs(2)).unwrap() else {
+            panic!("应返回行数据");
+        };
+        assert_eq!(generation, 42);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "test.png");
+        assert_eq!(PathBuf::from(&rows[0].path), mount.join("test.png"));
+        repaint_rx.recv_timeout(Duration::from_secs(2)).expect("数据到达后应唤醒界面");
     }
 
     #[test]

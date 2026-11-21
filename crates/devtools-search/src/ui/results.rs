@@ -327,6 +327,7 @@ fn detail_view(
                         row.kind,
                         &row.name,
                         std::path::Path::new(&row.path),
+                        !defer_visual_loads(ui),
                     );
                     paint_row(ui, rect, &row, &widths, &palette, view, service, icon);
                     respond(ui, view, index, &response, &row, &mut *action);
@@ -458,7 +459,7 @@ fn grid_cell(
             // 框选拖动中只读缓存、不发起新请求：解码线程抢 CPU 会让拖动手感变飘。
             let size = request_size(ui.ctx(), style.icon);
             let is_dir = row.kind == NodeKind::Dir;
-            let thumbnail = if view.drag_origin.is_some() {
+            let thumbnail = if view.drag_origin.is_some() || defer_visual_loads(ui) {
                 view.thumbs.cached(&row.path, size, is_dir)
             } else {
                 view.thumbs.texture(ui.ctx(), host, &row.path, size, is_dir)
@@ -499,6 +500,12 @@ fn grid_cell(
 fn request_size(ctx: &egui::Context, logical: f32) -> u32 {
     let scale = ctx.pixels_per_point().clamp(1.0, 2.0);
     (logical * scale).round().clamp(16.0, 512.0) as u32
+}
+
+/// 滚动条按住期间和滚轮动画期间暂停新预览请求，避免为快速掠过的文件解码。
+/// 松手或滚动停止后会再绘制一帧，此时正常补齐可见项。
+fn defer_visual_loads(ui: &Ui) -> bool {
+    ui.input(|input| input.pointer.primary_down() || input.smooth_scroll_delta != Vec2::ZERO)
 }
 
 /// 画缩略图：等比缩放放进 `rect`（不裁剪、不变形），四周留白。

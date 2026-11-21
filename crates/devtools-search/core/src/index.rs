@@ -603,7 +603,30 @@ impl RootIndex {
         self.epoch = self.epoch.checked_add(1).expect("索引代际耗尽");
         self.revision += 1;
         self.rebuild_derived();
+        self.reclaim_unused_capacity();
         true
+    }
+
+    /// 扫描、压缩或快照加载完成后回收构建期的多余容量。
+    /// 保留约 6% 的增量空间，避免监听新增一个文件就触发整列翻倍扩容。
+    /// 不在每次监听提交时收缩，避免反复分配。
+    pub fn reclaim_unused_capacity(&mut self) {
+        fn trim<T>(buffer: &mut Vec<T>) {
+            buffer.shrink_to(buffer.len().saturating_add(buffer.len() / 16));
+        }
+        trim(&mut self.columns.parent);
+        trim(&mut self.columns.name);
+        trim(&mut self.columns.kind);
+        trim(&mut self.columns.status);
+        trim(&mut self.columns.size);
+        trim(&mut self.columns.mtime);
+        trim(&mut self.columns.btime);
+        trim(&mut self.names.raw);
+        trim(&mut self.names.nfc);
+        trim(&mut self.names.lower);
+        trim(&mut self.names.entries);
+        // 去重表依赖二次幂容量寻址，必须保持原来的长度。
+        self.names.dedup.shrink_to_fit();
     }
 
     /// 提交一批变更：递增 revision、重建派生数据。
@@ -819,6 +842,7 @@ impl RootIndex {
         names.ensure_index();
         index.names = names;
         index.columns = columns;
+        index.reclaim_unused_capacity();
         index.rebuild_derived();
         index
     }
@@ -896,6 +920,76 @@ mod tests {
         for (name, rank) in expected {
             assert_eq!(index.rank_of(find(name)), rank, "{name} 的 rank");
         }
+    }
+
+    /// 统计驻留向量的容量，包含去重表与派生表，不包含分配器和图形驱动开销。
+    fn allocated_bytes(index: &RootIndex) -> usize {
+        let c = &index.columns;
+        let a = &index.names;
+        let d = &index.derived;
+        (c.parent.capacity() + c.name.capacity()) * 4
+            + c.kind.capacity()
+            + c.status.capacity()
+            + (c.size.capacity() + c.mtime.capacity() + c.btime.capacity()) * 8
+            + a.raw.capacity()
+            + a.nfc.capacity()
+            + a.lower.capacity()
+            + a.entries.capacity() * std::mem::size_of::<NameEntry>()
+            + a.dedup.capacity() * 4
+            + d.child_range.capacity() * 8
+            + (d.child_list.capacity() + d.tin.capacity() + d.tout.capacity()) * 4
+    }
+
+    #[test]
+    fn shrinking_storage_preserves_ids_names_and_future_inserts() {
+        let mut index = sample();
+        let before = allocated_bytes(&index);
+        let epoch = index.epoch();
+        let revision = index.revision();
+        index.reclaim_unused_capacity();
+        assert!(allocated_bytes(&index) < before);
+        assert_eq!((index.epoch(), index.revision()), (epoch, revision));
+        let root = index.root_node().unwrap();
+        let existing = index.child_by_exact_name(root, os("b.txt")).unwrap();
+        let added = index.insert(Some(root), os("b.txt"), NodeKind::File, NodeMeta::default());
+        assert_eq!(index.name_id(existing), index.name_id(added));
+        index.insert(
+            Some(root),
+            os("新增.png"),
+            NodeKind::File,
+            NodeMeta::default(),
+        );
+        index.commit();
+        assert!(index.child_by_exact_name(root, os("新增.png")).is_some());
+        assert_eq!(index.raw_name_str(existing), Some("b.txt"));
+    }
+
+    #[test]
+    #[ignore = "合成大索引内存测量，手动运行"]
+    fn measure_index_storage_reclamation() {
+        let mut index = RootIndex::new(RootId(0));
+        let root = index.insert(None, os("root"), NodeKind::Dir, NodeMeta::default());
+        for i in 0..150_000 {
+            index.insert(
+                Some(root),
+                os(&format!("image-{i:06}.png")),
+                NodeKind::File,
+                NodeMeta::default(),
+            );
+        }
+        index.commit();
+        let before = allocated_bytes(&index);
+        index.reclaim_unused_capacity();
+        let after = allocated_bytes(&index);
+        eprintln!(
+            "150001 节点向量容量：{before} → {after} 字节，回收 {} 字节（{:.1}%）",
+            before - after,
+            (before - after) as f64 * 100.0 / before as f64
+        );
+        assert!(after < before);
+        assert_eq!(index.len(), 150_001);
+        index.insert(Some(root), os("new-image.png"), NodeKind::File, NodeMeta::default());
+        assert_eq!(allocated_bytes(&index), after, "新增文件应使用预留空间");
     }
 
     #[test]

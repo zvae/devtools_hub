@@ -28,6 +28,7 @@ impl IconCache {
         kind: NodeKind,
         name: &str,
         path: &Path,
+        allow_load: bool,
     ) -> Option<TextureHandle> {
         let key = match kind {
             NodeKind::Dir => "dir".to_string(),
@@ -41,6 +42,10 @@ impl IconCache {
         };
         if let Some(cached) = self.textures.get(&key) {
             return cached.clone();
+        }
+        // 拖滚动条或滚轮滚动期间只读缓存，避免 Shell 图标处理器卡住鼠标反馈。
+        if !allow_load {
+            return None;
         }
         let texture = host.icon(path).and_then(|(width, height, rgba)| {
             if width == 0 || height == 0 || rgba.len() < (width * height * 4) as usize {
