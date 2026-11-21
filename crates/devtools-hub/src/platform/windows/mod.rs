@@ -17,6 +17,7 @@ pub mod panel;
 pub mod pasteboard;
 mod resize;
 pub mod screen;
+pub mod session;
 mod scroll_mask;
 // 这两个 Shell COM 模块依赖只在 Windows 上生成绑定的 windows crate。
 #[cfg(windows)]

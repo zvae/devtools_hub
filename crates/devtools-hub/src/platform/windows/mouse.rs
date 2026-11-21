@@ -8,14 +8,17 @@
 use std::mem::zeroed;
 use std::panic::AssertUnwindSafe;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::thread::JoinHandle;
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, SetWindowsHookExW, HC_ACTION, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
-    WH_MOUSE_LL, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    PeekMessageW, PostThreadMessageW, UnhookWindowsHookEx, PM_NOREMOVE,
+    WH_MOUSE_LL, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_QUIT,
 };
 
 /// 中键按下时的回调，返回是否已处理。
@@ -25,6 +28,8 @@ type Handler = Box<dyn Fn() -> bool + Send + Sync>;
 static ON_PRESS: OnceLock<Handler> = OnceLock::new();
 /// 这次中键按下已被处理（吞掉），对应的松开也一并吞掉。
 static SWALLOWING: AtomicBool = AtomicBool::new(false);
+static THREAD_ID: AtomicU32 = AtomicU32::new(0);
+static WORKER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 /// 启动监听线程。中键按下时在监听线程上调用 `on_press`（必须很快返回），
 /// 返回 true 表示已处理，这次点击不再传给前台程序。
@@ -32,23 +37,44 @@ pub fn spawn_middle_click_listener(on_press: impl Fn() -> bool + Send + Sync + '
     if ON_PRESS.set(Box::new(on_press)).is_err() {
         return;
     }
-    std::thread::Builder::new()
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new()
         .name("middle-click".into())
-        .spawn(|| {
+        .spawn(move || {
             // SAFETY: 钩子过程在整个进程生命周期内有效；消息循环保持钩子线程存活。
             unsafe {
+                let mut message: MSG = zeroed();
+                // 先创建消息队列，再公开线程 ID，保证退出请求不会在队列建立前丢失。
+                PeekMessageW(&mut message, null_mut(), 0, 0, PM_NOREMOVE);
+                THREAD_ID.store(GetCurrentThreadId(), Ordering::Release);
                 let hook =
                     SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), GetModuleHandleW(null()), 0);
                 if hook.is_null() {
+                    THREAD_ID.store(0, Ordering::Release);
+                    let _ = ready_tx.send(());
                     tracing::warn!("无法监听鼠标中键：SetWindowsHookExW 失败");
                     return;
                 }
                 tracing::info!("开始监听鼠标中键");
-                let mut message: MSG = zeroed();
+                let _ = ready_tx.send(());
                 while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {}
+                UnhookWindowsHookEx(hook);
+                THREAD_ID.store(0, Ordering::Release);
             }
         })
         .expect("无法创建鼠标中键监听线程");
+    let _ = ready_rx.recv();
+    *WORKER.lock().unwrap_or_else(|p| p.into_inner()) = Some(worker);
+}
+
+/// 停止消息循环，工作线程返回前主动卸载系统钩子。
+pub fn stop() -> Option<JoinHandle<()>> {
+    let id = THREAD_ID.load(Ordering::Acquire);
+    if id != 0 {
+        // SAFETY: 线程 ID 在消息队列创建后发布；WM_QUIT 只结束本应用的钩子线程。
+        unsafe { PostThreadMessageW(id, WM_QUIT, 0, 0); }
+    }
+    WORKER.lock().unwrap_or_else(|p| p.into_inner()).take()
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

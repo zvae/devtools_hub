@@ -42,7 +42,7 @@ fn run(shared: &Shared, mut store: Store, pasteboard_name: Option<&str>) {
         shared.poll_interval_ms.load(Ordering::Relaxed)
     );
 
-    while !shared.stop.load(Ordering::Relaxed) {
+    while !shared.shutdown.requested() {
         // 记录用户当前所在的程序：从托盘弹出面板时前台是任务栏，用它作为粘贴目标。
         workspace::remember_foreground();
 
@@ -97,7 +97,7 @@ fn run(shared: &Shared, mut store: Store, pasteboard_name: Option<&str>) {
             .poll_interval_ms
             .load(Ordering::Relaxed)
             .clamp(50, 5_000);
-        std::thread::sleep(Duration::from_millis(interval));
+        shared.shutdown.wait_requested(Duration::from_millis(interval));
     }
 }
 
@@ -257,7 +257,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(items().len(), 1, "暂停时不记录");
 
-        shared.stop.store(true, Ordering::Relaxed);
+        shared.shutdown.request(false);
         handle.join().unwrap();
         pasteboard.release();
     }

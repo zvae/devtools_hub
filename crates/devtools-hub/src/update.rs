@@ -138,11 +138,15 @@ impl UpdateState {
 
 /// 启动自动检查的后台线程。是否检查由 `Shared::auto_check_updates` 控制。
 pub fn spawn(shared: Arc<Shared>) {
+    let worker_shared = shared.clone();
     let spawned = std::thread::Builder::new()
         .name("update-check".into())
         .spawn(move || {
-            std::thread::sleep(STARTUP_DELAY);
-            loop {
+            let shared = worker_shared;
+            if shared.shutdown.wait_requested(STARTUP_DELAY) {
+                return;
+            }
+            while !shared.shutdown.requested() {
                 let due = shared.update_state().checked_at.is_none_or(|at| {
                     at.elapsed()
                         .map_or(true, |elapsed| elapsed >= CHECK_INTERVAL)
@@ -150,22 +154,29 @@ pub fn spawn(shared: Arc<Shared>) {
                 if due && shared.auto_check_updates.load(Ordering::Relaxed) {
                     check(&shared, false);
                 }
-                std::thread::sleep(WAKE_INTERVAL);
+                shared.shutdown.wait_requested(WAKE_INTERVAL);
             }
         });
-    if let Err(err) = spawned {
-        tracing::warn!("无法启动检查更新线程：{err}");
+    match spawned {
+        Ok(worker) => shared.shutdown.track(worker),
+        Err(err) => tracing::warn!("无法启动检查更新线程：{err}"),
     }
 }
 
 /// 立即检查一次（设置页的“检查更新”），结果通过 `AppEvent::UpdateChanged` 通知 UI。
 pub fn check_now(shared: &Arc<Shared>) {
-    let shared = shared.clone();
-    std::thread::spawn(move || check(&shared, true));
+    if shared.shutdown.requested() {
+        return;
+    }
+    let worker_shared = shared.clone();
+    shared.shutdown.track(std::thread::spawn(move || check(&worker_shared, true)));
 }
 
 /// 检查一次更新（已经在检查时直接返回）。`manual` 为 true 时失败原因会显示给用户。
 fn check(shared: &Shared, manual: bool) {
+    if shared.shutdown.requested() {
+        return;
+    }
     let started = shared.modify_update(|state| !std::mem::replace(&mut state.checking, true));
     if !started {
         return;
@@ -222,6 +233,9 @@ pub fn can_install(release: &Release) -> bool {
 
 /// 开始下载并安装检查到的新版本；完成后 UI 线程调用 [`restart_if_installed`] 重启。
 pub fn install(shared: &Arc<Shared>) {
+    if shared.shutdown.requested() {
+        return;
+    }
     let started = shared.modify_update(|state| {
         let release = state.available()?.clone();
         if state.install.as_ref().is_some_and(Install::in_progress) {
@@ -239,7 +253,9 @@ pub fn install(shared: &Arc<Shared>) {
     let spawned = std::thread::Builder::new()
         .name("update-install".into())
         .spawn(move || run_install(&worker_shared, &release, &cancel));
-    if let Err(err) = spawned {
+    if let Ok(worker) = spawned {
+        shared.shutdown.track(worker);
+    } else if let Err(err) = spawned {
         tracing::warn!("无法启动安装更新线程：{err}");
         shared.modify_update(|state| {
             state.install = Some(Install::Failed(format!("无法启动安装更新线程：{err}")))
@@ -255,6 +271,11 @@ pub fn cancel_install(shared: &Shared) {
             state.install = None;
         }
     });
+}
+
+/// 退出时取消所有尚未完成的下载/安装步骤；已经开始的原子替换由安装器自行完成。
+pub fn shutdown(shared: &Shared) {
+    shared.modify_update(|state| state.cancel.store(true, Ordering::Release));
 }
 
 /// 待重启的新版本（退出后再启动，§4.6：不再 `process::exit`）。

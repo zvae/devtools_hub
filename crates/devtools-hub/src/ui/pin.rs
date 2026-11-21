@@ -77,6 +77,7 @@ pub struct Pin {
 
 /// 贴图窗口的状态，由主界面和窗口回调共享（都在主线程，锁只是为了满足延迟视口回调的 `Send + Sync`）。
 struct PinState {
+    worker: Option<std::thread::JoinHandle<()>>,
     id: u64,
     title: String,
     viewport: ViewportId,
@@ -145,7 +146,7 @@ impl Pin {
         let image = Arc::new(image);
         let (sender, receiver) = mpsc::channel();
         let source = image.clone();
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("pin-texture".into())
             .spawn(move || {
                 let prepared = Prepared {
@@ -155,7 +156,9 @@ impl Pin {
                 let _ = sender.send(prepared);
             })
             .expect("创建贴图纹理线程失败");
-        Self::create(id, image, false, Some(receiver), base, zoom, top_left)
+        let pin = Self::create(id, image, false, Some(receiver), base, zoom, top_left);
+        pin.state.lock().unwrap().worker = Some(worker);
+        pin
     }
 
     fn create(
@@ -181,6 +184,7 @@ impl Pin {
             .with_active(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
         let state = PinState {
+            worker: None,
             id,
             title,
             viewport,
@@ -248,6 +252,16 @@ impl Pin {
     /// 执行操作（复制、保存、关闭全部由主界面处理，这里忽略），并重绘窗口。
     pub fn apply(&self, ctx: &egui::Context, action: PinAction) {
         self.state.lock().unwrap().apply(ctx, action);
+    }
+
+    /// 退出时关闭窗口并释放预览，尚在准备纹理的任务交由统一退出协调器回收。
+    pub fn shutdown(&self, ctx: &egui::Context) -> Option<std::thread::JoinHandle<()>> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.apply(ctx, PinAction::Close);
+        state.preparing = None;
+        state.prepared = None;
+        state.texture = None;
+        state.worker.take()
     }
 
     /// 窗口在桌面上的位置（逻辑坐标）；还没显示过时为空。

@@ -165,9 +165,11 @@ impl OcrView {
     fn start(&mut self, image: Arc<RgbaImage>, shared: Arc<Shared>) {
         let (sender, receiver) = mpsc::channel();
         let input = image.clone();
-        std::thread::Builder::new()
+        let worker_shared = shared.clone();
+        let worker = std::thread::Builder::new()
             .name("ocr".into())
             .spawn(move || {
+                let shared = worker_shared;
                 let started = Instant::now();
                 let result = platform::ocr::recognize(&input);
                 match &result {
@@ -184,6 +186,7 @@ impl OcrView {
                 shared.post(AppEvent::OcrDone);
             })
             .expect("创建文字识别线程失败");
+        shared.shutdown.track(worker);
         self.job = Some(Job {
             image,
             texture: None,

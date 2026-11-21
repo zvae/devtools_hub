@@ -85,6 +85,12 @@ pub struct Store {
 }
 
 impl Store {
+    /// 退出时尽可能把已提交的 WAL 合并到数据库；不等待仍在读取的连接。
+    pub fn checkpoint(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        Ok(())
+    }
+
     /// 打开（或创建）数据目录下的数据库。多个线程可以各自打开一个 `Store`，WAL 模式下读写互不阻塞。
     pub fn open(dir: &Path) -> Result<Self> {
         let blob_dir = dir.join(BLOB_DIR);

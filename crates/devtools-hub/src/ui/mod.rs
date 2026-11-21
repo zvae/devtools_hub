@@ -20,6 +20,7 @@ mod search_host;
 mod search_lifecycle;
 mod search_window;
 mod settings_page;
+mod shutdown;
 #[cfg(test)]
 mod snapshot_tests;
 mod snipper;
@@ -211,6 +212,8 @@ pub struct HubApp {
     search_stopping: bool,
     /// 本帧绘制结束时收起窗口（Esc）。
     pending_hide: bool,
+    /// 收尾只执行一次；系统通知和 eframe 的 on_exit 可能先后到达。
+    shutdown_started: bool,
 }
 
 impl HubApp {
@@ -344,6 +347,7 @@ impl HubApp {
             search_window_pos: egui::Pos2::ZERO,
             search_stopping: false,
             pending_hide: false,
+            shutdown_started: false,
         }
     }
 
@@ -815,50 +819,26 @@ impl HubApp {
 impl eframe::App for HubApp {
     /// 每帧绘制前先处理后台线程发来的事件。
     fn logic(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.shared.shutdown.requested() {
+            self.prepare_exit();
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         self.check_snip_rescued();
         self.handle_events();
         self.poll_search();
         self.release_idle_panel_resources(native_panel::is_visible(), frame.wgpu_render_state());
     }
 
-    /// 退出前：保存搜索窗口尺寸并停止索引（§4.6：托盘退出、更新重启都走这里）。
+    /// 所有退出路径的兜底；logic 已经收尾时不再重复执行。
     fn on_exit(&mut self) {
-        crate::shared::quit_trace("3 eframe: on_exit start");
-        if self.search_open {
-            crate::shared::quit_trace("4a on_exit: search_open branch, before lock_search");
-            let size = self
-                .ctx
-                .input(|i| {
-                    i.raw
-                        .viewports
-                        .get(&search_window::viewport())
-                        .and_then(|v| v.inner_rect)
-                })
-                .map(|rect| [rect.width().round(), rect.height().round()]);
-            if let Some(handle) = &self.search {
-                let mut search = lock_search(handle);
-                if let Some(size) = size {
-                    if size[0] > 100.0 && size[1] > 100.0 {
-                        search.remember_size(size);
-                    }
-                }
-                search.on_hidden();
-            }
-            self.search_open = false;
-        }
-        crate::shared::quit_trace("4b on_exit: search_open branch done");
-        if let Some(handle) = self.search.take() {
-            // 有界阻塞：取消后等待线程池收尾，最多 1.5 秒。
-            crate::shared::quit_trace("5 on_exit: shutdown_blocking search");
-            let stopped = lock_search(&handle).shutdown_blocking(Duration::from_millis(1500));
-            if !stopped {
-                tracing::warn!("搜索模块未在 1.5 秒内停止，继续退出");
-            }
-        }
-        crate::shared::quit_trace("6 on_exit: done");
+        self.prepare_exit();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.shutdown_started {
+            return;
+        }
         if self.startup_hide_pending {
             // eframe 在第一帧渲染后调用 set_visible(true)，所以在第二帧收起窗口。
             if ui.ctx().cumulative_frame_nr() > 0 {

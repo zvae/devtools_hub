@@ -28,6 +28,7 @@ pub(crate) struct PanelQueries {
     wake: SyncSender<()>,
     pending: Arc<Mutex<Option<Request>>>,
     reply: Arc<Mutex<Option<Reply>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 fn load(store: &Store, query: &ItemQuery) -> Result<LoadedItems> {
@@ -45,7 +46,7 @@ impl PanelQueries {
         let reply = Arc::new(Mutex::new(None));
         let worker_pending = pending.clone();
         let worker_reply = reply.clone();
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("clipboard-query".into())
             .spawn(move || {
                 let mut store = None;
@@ -71,6 +72,7 @@ impl PanelQueries {
             wake,
             pending,
             reply,
+            worker: Some(worker),
         })
     }
 
@@ -80,6 +82,12 @@ impl PanelQueries {
             Ok(()) | Err(mpsc::TrySendError::Full(())) => Ok(()),
             Err(mpsc::TrySendError::Disconnected(())) => Err("剪贴板查询线程已停止".into()),
         }
+    }
+
+    /// 关闭请求通道，丢弃尚未开始的查询；调用方统一等待正在读取的数据库连接释放。
+    pub fn shutdown(mut self) -> Option<std::thread::JoinHandle<()>> {
+        self.pending.lock().unwrap().take();
+        self.worker.take()
     }
 }
 
@@ -221,6 +229,7 @@ mod tests {
             wake,
             pending: Arc::new(Mutex::new(None)),
             reply: Arc::new(Mutex::new(None)),
+            worker: None,
         });
         app.panel.query_generation = 2;
         app.panel.total = 7;

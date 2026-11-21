@@ -67,6 +67,9 @@ impl HotkeyService {
         let actions: Arc<Mutex<HashMap<u32, HotkeyAction>>> = Arc::default();
         let lookup = actions.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+            if shared.shutdown.requested() {
+                return;
+            }
             if event.state() != HotKeyState::Pressed {
                 return;
             }

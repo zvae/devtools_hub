@@ -68,7 +68,7 @@ pub enum AppEvent {
     HidePanel,
     /// 打开 / 切换到文件搜索页。
     ShowSearch(SearchEntry),
-    /// 退出应用（托盘菜单）：走正常关闭流程，不再 `process::exit`。
+    /// 退出应用：托盘、更新重启和系统会话结束统一走清理流程。
     Quit,
 }
 
@@ -105,8 +105,8 @@ pub struct Shared {
     pub writing: AtomicBool,
     /// 每记录一条就加一，UI 据此判断是否需要刷新列表。
     pub revision: AtomicU64,
-    /// 通知监听线程退出（测试里用）。
-    pub stop: AtomicBool,
+    /// 所有退出入口共用的停止信号、任务回收与完成通知。
+    pub shutdown: Arc<crate::shutdown::Shutdown>,
     /// 鼠标中键快捷面板是否开启（监听线程据此决定是否拦截中键）。
     pub middle_click: AtomicBool,
     /// 是否定时检查更新（检查更新线程据此决定是否检查）。
@@ -132,7 +132,7 @@ impl Shared {
             ignore_change_count: AtomicIsize::new(-1),
             writing: AtomicBool::new(false),
             revision: AtomicU64::new(0),
-            stop: AtomicBool::new(false),
+            shutdown: Arc::default(),
             middle_click: AtomicBool::new(settings.middle_click),
             auto_check_updates: AtomicBool::new(settings.auto_check_updates),
             quit_consumed: AtomicBool::new(false),
@@ -209,8 +209,40 @@ impl Shared {
 
     /// 给 UI 线程发事件，并唤醒它。
     pub fn post(&self, event: AppEvent) {
+        if event == AppEvent::Quit {
+            self.request_exit(false);
+            return;
+        }
+        if self.shutdown.requested() {
+            return;
+        }
         self.events.lock().unwrap().push_back(event);
         self.request_repaint();
+    }
+
+    /// 退出后不再接收新工作；看门狗覆盖 UI 未响应和收尾被系统调用卡住两种情况。
+    pub fn request_exit(&self, system_session: bool) {
+        if !self.shutdown.request(system_session) {
+            return;
+        }
+        self.middle_click.store(false, Ordering::Release);
+        self.auto_check_updates.store(false, Ordering::Release);
+        let mut events = self.events.lock().unwrap_or_else(|p| p.into_inner());
+        events.clear();
+        events.push_back(AppEvent::Quit);
+        drop(events);
+        self.request_repaint();
+        // 单元测试只验证状态机，不允许测试失败时的看门狗终止整个测试进程。
+        #[cfg(not(test))]
+        {
+            let shutdown = self.shutdown.clone();
+            std::thread::spawn(move || {
+                if !shutdown.wait_exited(crate::shutdown::EXIT_WATCHDOG) {
+                    tracing::error!("退出清理或事件循环结束超时，结束进程");
+                    std::process::exit(0);
+                }
+            });
+        }
     }
 
     /// 取出所有待处理的事件（UI 线程每帧调用）。
