@@ -43,6 +43,8 @@ pub enum AppEvent {
     /// 需要在主线程显示/切换面板（回调不在主线程时的兜底）。
     TogglePanel,
     OpenSettings,
+    /// 从托盘直接打开工具，不读取或复用中键面板上次的选中内容。
+    OpenTool(crate::tools::QuickAction),
     PauseChanged,
     /// 在其他应用中按下了鼠标中键：读取选中内容并弹出快捷面板。
     MiddleClick,

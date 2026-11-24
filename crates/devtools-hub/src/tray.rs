@@ -4,13 +4,14 @@
 //! 图标是彩色的，菜单栏 / 任务栏明暗主题下都按原色显示。
 //! 发现新版本时，菜单最上面多出一项“发现新版本”，点击打开设置页底部的更新信息。
 //! 菜单里还有截屏、贴图与“关闭所有贴图”（对应 Snipaste 托盘菜单里的同名项）。
+//! “工具”子菜单提供 JSON 编辑器、时间戳转换与随机密码生成的直接入口。
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::controller;
@@ -18,6 +19,7 @@ use crate::hotkey::{self, HotkeyAction};
 use crate::platform::TrayRect;
 use crate::settings::Settings;
 use crate::shared::{AppEvent, SearchEntry, Shared};
+use crate::tools::QuickAction;
 
 /// macOS 在按下时响应（与系统菜单栏一致）；Windows 在松开时响应，
 /// 否则松开鼠标时任务栏会抢走焦点，刚弹出的面板又被隐藏。
@@ -59,6 +61,20 @@ impl Tray {
             settings.search_enabled,
             None,
         );
+        let tools = Submenu::with_items(
+            "工具",
+            true,
+            &[
+                &MenuItem::with_id("tool-json", QuickAction::JsonEditor.label(), true, None),
+                &MenuItem::with_id("tool-timestamp", QuickAction::Timestamp.label(), true, None),
+                &MenuItem::with_id(
+                    "tool-password",
+                    QuickAction::PasswordGenerator.label(),
+                    true,
+                    None,
+                ),
+            ],
+        )?;
         let snip = MenuItem::with_id("snip", label(settings, HotkeyAction::Snip), true, None);
         let pin = MenuItem::with_id("pin", label(settings, HotkeyAction::Pin), true, None);
         let close_pins = MenuItem::with_id("close-pins", "关闭所有贴图", true, None);
@@ -77,6 +93,7 @@ impl Tray {
         let menu = Menu::with_items(&[
             &show,
             &search,
+            &tools,
             &pause,
             &PredefinedMenuItem::separator(),
             &snip,
@@ -112,6 +129,9 @@ impl Tray {
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id.as_ref() {
             "show" => controller::toggle_from_status_item(&shared, None),
             "search" => shared.post(AppEvent::ShowSearch(SearchEntry::Hotkey)),
+            "tool-json" => shared.post(AppEvent::OpenTool(QuickAction::JsonEditor)),
+            "tool-timestamp" => shared.post(AppEvent::OpenTool(QuickAction::Timestamp)),
+            "tool-password" => shared.post(AppEvent::OpenTool(QuickAction::PasswordGenerator)),
             "pause" => {
                 shared.paused.fetch_xor(true, Ordering::Relaxed);
                 shared.post(AppEvent::PauseChanged);

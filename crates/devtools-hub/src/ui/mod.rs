@@ -382,6 +382,12 @@ impl HubApp {
                 AppEvent::TogglePanel => controller::toggle_panel(&self.shared),
                 AppEvent::PanelShown => self.on_shown(Page::Panel),
                 AppEvent::OpenSettings => self.on_shown(Page::Settings),
+                AppEvent::OpenTool(action) => {
+                    self.startup_hide_pending = false;
+                    self.cancel_hotkey_recording();
+                    self.quick.selection = None;
+                    self.run_quick_action(action);
+                }
                 AppEvent::PauseChanged => {
                     self.settings.paused = self.shared.paused.load(Ordering::Relaxed);
                     self.persist_settings();

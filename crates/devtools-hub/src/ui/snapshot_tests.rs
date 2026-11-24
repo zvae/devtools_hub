@@ -1471,3 +1471,36 @@ fn snapshot_password_generator() {
         assert_eq!(harness.state().page, Page::Panel);
     }
 }
+
+
+/// 托盘入口应取消启动隐藏，并保留工具内容，而不是复用上次中键捕获的选区。
+#[test]
+fn tray_tools_open_without_reusing_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings::default();
+    let shared = Shared::new(&settings);
+    let mut app = HubApp::build(
+        egui::Context::default(), shared.clone(), Store::open(dir.path()).unwrap(),
+        dir.path().to_path_buf(), settings,
+    );
+    app.json.text = "{\"keep\":true}".into();
+    app.timestamp.input = "0".into();
+    for (action, page) in [
+        (QuickAction::JsonEditor, Page::JsonEditor),
+        (QuickAction::Timestamp, Page::Timestamp),
+        (QuickAction::PasswordGenerator, Page::PasswordGenerator),
+    ] {
+        app.startup_hide_pending = true;
+        app.quick.selection = Some(Selection::Text("{\"stale\":true}".into()));
+        shared.post(AppEvent::OpenTool(action));
+        app.handle_events();
+        assert_eq!(app.page, page);
+        assert!(!app.startup_hide_pending);
+        assert!(app.quick.selection.is_none());
+    }
+    assert_eq!(app.json.text, "{\"keep\":true}");
+    assert_eq!(app.timestamp.input, "0");
+    assert_eq!(app.password.value.len(), 12);
+    assert!(app.password.value.bytes().any(|b| b.is_ascii_digit()));
+    assert!(app.password.value.bytes().any(|b| b.is_ascii_punctuation()));
+}
