@@ -204,15 +204,16 @@ impl HubApp {
                 let selection = self.quick.selection.take();
                 self.open_json_editor(selection);
             }
+            QuickAction::Timestamp => {
+                let selection = self.quick.selection.take();
+                self.open_timestamp(selection);
+            }
+            QuickAction::PasswordGenerator => self.open_password_generator(),
             QuickAction::ClipboardHistory => self.open_clipboard_panel(),
             QuickAction::FileSearch => {
                 let entry = match self.quick.selection.take() {
-                    Some(Selection::Text(text)) => {
-                        crate::shared::SearchEntry::Text(text)
-                    }
-                    Some(Selection::Files(paths)) => {
-                        crate::shared::SearchEntry::Paths(paths)
-                    }
+                    Some(Selection::Text(text)) => crate::shared::SearchEntry::Text(text),
+                    Some(Selection::Files(paths)) => crate::shared::SearchEntry::Paths(paths),
                     None => crate::shared::SearchEntry::Hotkey,
                 };
                 self.shared.post(crate::shared::AppEvent::ShowSearch(entry));
@@ -320,8 +321,42 @@ pub(super) fn paint_badge(ui: &Ui, rect: Rect, action: QuickAction, palette: &Pa
                 Color32::WHITE,
             );
         }
+        QuickAction::Timestamp => {
+            painter.rect_filled(
+                rect,
+                style::SMALL_RADIUS,
+                Color32::from_rgb(0x20, 0x92, 0x86),
+            );
+            icons::paint_centered(
+                painter,
+                rect,
+                rect.height() * 0.62,
+                Icon::Clock,
+                Color32::WHITE,
+            );
+        }
+        QuickAction::PasswordGenerator => {
+            painter.rect_filled(
+                rect,
+                style::SMALL_RADIUS,
+                Color32::from_rgb(0x66, 0x5b, 0xc8),
+            );
+            // 字体的星号按行框居中时，字形仍受基线影响；改用三条中心对称的矢量线。
+            let center = rect.center();
+            let radius = rect.height() * 0.23;
+            let stroke = Stroke::new(rect.height() * 0.065, Color32::WHITE);
+            for angle in [30.0_f32, 90.0, 150.0] {
+                let angle = angle.to_radians();
+                let offset = Vec2::new(angle.cos(), angle.sin()) * radius;
+                painter.line_segment([center - offset, center + offset], stroke);
+            }
+        }
         QuickAction::FileSearch => {
-            painter.rect_filled(rect, style::SMALL_RADIUS, palette.accent.gamma_multiply(0.9));
+            painter.rect_filled(
+                rect,
+                style::SMALL_RADIUS,
+                palette.accent.gamma_multiply(0.9),
+            );
             icons::paint_centered(
                 painter,
                 rect,

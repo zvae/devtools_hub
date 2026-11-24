@@ -13,6 +13,7 @@ mod menu;
 mod native_menu;
 mod ocr;
 mod panel;
+mod password;
 mod pin;
 mod quick_panel;
 mod screenshot;
@@ -26,6 +27,7 @@ mod snapshot_tests;
 mod snipper;
 mod style;
 mod textures;
+mod timestamp;
 mod widgets;
 
 use std::path::PathBuf;
@@ -80,6 +82,10 @@ enum Page {
     /// 鼠标中键弹出的快捷面板。
     QuickActions,
     JsonEditor,
+    /// 时间戳转换工具。
+    Timestamp,
+    /// 随机密码生成器。
+    PasswordGenerator,
     /// 提取文字（截屏、贴图的识别结果）。
     Ocr,
     /// 文件搜索页。生产环境搜索页是独立窗口（见 `search_window`），
@@ -144,6 +150,8 @@ pub struct HubApp {
     settings_view: SettingsView,
     quick: QuickPanelView,
     json: JsonEditorView,
+    timestamp: timestamp::TimestampView,
+    password: password::PasswordView,
     ocr: OcrView,
     /// 鼠标中键监听线程是否已启动（只启动一次，之后由设置控制是否拦截）。
     middle_click_started: bool,
@@ -313,6 +321,8 @@ impl HubApp {
             settings_view: SettingsView::default(),
             quick: QuickPanelView::default(),
             json: JsonEditorView::default(),
+            timestamp: timestamp::TimestampView::default(),
+            password: password::PasswordView::default(),
             ocr: OcrView::default(),
             middle_click_started: false,
             textures: Textures::default(),
@@ -472,7 +482,9 @@ impl HubApp {
                 Page::Panel | Page::Settings => Some(&mut self.settings.window_size),
                 Page::JsonEditor => Some(&mut self.settings.json_editor_size),
                 Page::Ocr => Some(&mut self.settings.ocr_size),
-                Page::QuickActions | Page::Search => None,
+                Page::QuickActions | Page::Search | Page::Timestamp | Page::PasswordGenerator => {
+                    None
+                }
             };
             if let Some(saved) = saved {
                 if size != *saved && size[0] > 100.0 && size[1] > 100.0 {
@@ -758,6 +770,8 @@ impl HubApp {
             Page::QuickActions => true,
             Page::JsonEditor => self.settings.hide_on_blur && !self.json.pinned,
             Page::Ocr => self.settings.hide_on_blur && !self.ocr.pinned,
+            Page::Timestamp => self.settings.hide_on_blur && !self.timestamp.pinned,
+            Page::PasswordGenerator => self.settings.hide_on_blur && !self.password.pinned,
             // 搜索页按窗口策略决定（Floating 失焦收起，Pinned 保留，§5.2）。
             Page::Search => self
                 .search
@@ -905,7 +919,12 @@ impl HubApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let palette = self.palette(ui.ctx());
         let inner_margin = match self.page {
-            Page::Panel | Page::JsonEditor | Page::Ocr | Page::Search => egui::Margin::ZERO,
+            Page::Panel
+            | Page::JsonEditor
+            | Page::Timestamp
+            | Page::PasswordGenerator
+            | Page::Ocr
+            | Page::Search => egui::Margin::ZERO,
             Page::Settings => egui::Margin::same(style::PAD),
             Page::QuickActions => egui::Margin::same(quick_panel::MARGIN as i8),
         };
@@ -931,6 +950,8 @@ impl HubApp {
                 Page::Settings => self.settings_ui(ui),
                 Page::QuickActions => self.quick_ui(ui),
                 Page::JsonEditor => self.json_editor_ui(ui),
+                Page::Timestamp => self.timestamp_ui(ui),
+                Page::PasswordGenerator => self.password_ui(ui),
                 Page::Ocr => self.ocr_ui(ui),
                 Page::Search => self.search_ui(ui),
             });

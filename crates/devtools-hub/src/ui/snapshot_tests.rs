@@ -1341,3 +1341,133 @@ fn snapshot_search_empty() {
     harness.run_steps(4);
     save(&mut harness, "search-empty");
 }
+
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_timestamp() {
+    use egui_kittest::kittest::Queryable;
+    let dir = tempfile::tempdir().unwrap();
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(680.0, 570.0), |app| {
+            app.quick.open(Some(Selection::Text("1700000000123".into())), false);
+            app.page = Page::QuickActions;
+        });
+        assert_eq!(harness.state().quick.actions[0], QuickAction::Timestamp);
+        harness.key_press(Key::Enter);
+        harness.run_steps(2);
+        assert_eq!(harness.state().page, Page::Timestamp);
+        assert_eq!(harness.state().timestamp.input, "1700000000123");
+        harness.state_mut().timestamp.running = false;
+        harness.state_mut().timestamp.now_ms = 1700000000123;
+        harness.state_mut().timestamp.date = "2023-11-15 06:13:20.123".into();
+        harness.run_steps(3);
+        save(&mut harness, &format!("timestamp-{suffix}"));
+        harness.get(egui_kittest::kittest::By::new().value("1700000000123").role(egui::accesskit::Role::TextInput)).click();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(2);
+        save(&mut harness, &format!("timestamp-input-focus-{suffix}"));
+        harness.get_by_label("格式说明 ⓘ").hover();
+        harness.run_steps(3);
+        save(&mut harness, &format!("timestamp-help-{suffix}"));
+        // 点击时钟带入并复制，再验证暂停／继续不会清空编辑中的输入。
+        harness.state_mut().timestamp.input = "0".into();
+        harness.get_by_label("1700000000123").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().timestamp.input, "1700000000123");
+        assert_eq!(harness.state().toast.as_ref().map(|t| t.text.as_str()), Some("已复制"));
+        harness.get_by_label("继续").click();
+        harness.run_steps(2);
+        assert!(harness.state().timestamp.running);
+        harness.get_by_label("暂停").click();
+        harness.run_steps(2);
+        assert!(!harness.state().timestamp.running);
+        let paused = harness.state().timestamp.now_ms;
+        harness.run_steps(2);
+        assert_eq!(harness.state().timestamp.now_ms, paused);
+        assert_eq!(harness.state().timestamp.input, "1700000000123");
+        harness.state_mut().timestamp.now_ms = 1700000000123;
+        harness.state_mut().toast = None;
+        harness.get_by_label("日期 → 时间戳").click();
+        harness.run_steps(2);
+        assert!(harness.state().timestamp.date_to_timestamp);
+        save(&mut harness, &format!("timestamp-date-{suffix}"));
+        harness.get(egui_kittest::kittest::By::new().value("2023-11-15 06:13:20.123").role(egui::accesskit::Role::TextInput)).click();
+        harness.run_steps(2);
+        save(&mut harness, &format!("timestamp-date-focus-{suffix}"));
+        harness.get_by_label("时间戳 → 日期").click();
+        harness.run_steps(2);
+        assert!(!harness.state().timestamp.date_to_timestamp);
+        harness.state_mut().timestamp.input = "invalid".into();
+        harness.run_steps(2);
+        save(&mut harness, &format!("timestamp-error-{suffix}"));
+        harness.set_size(egui::vec2(380.0, 600.0));
+        harness.run_steps(3);
+        save(&mut harness, &format!("timestamp-narrow-{suffix}"));
+        harness.key_press(Key::Escape);
+        harness.run_steps(2);
+        assert_eq!(harness.state().page, Page::Panel);
+    }
+}
+
+
+#[test]
+#[ignore = "需要 GPU 离屏渲染，手动运行"]
+fn snapshot_password_generator() {
+    use egui_kittest::kittest::Queryable;
+    let dir = tempfile::tempdir().unwrap();
+    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
+        let mut harness = harness_for(dir.path(), theme, egui::vec2(680.0, 560.0), |app| {
+            app.quick.open(None, false);
+            app.page = Page::QuickActions;
+        });
+        assert_eq!(harness.state().quick.actions[2], QuickAction::PasswordGenerator);
+        harness.key_press(Key::Num3);
+        harness.run_steps(2);
+        assert_eq!(harness.state().page, Page::PasswordGenerator);
+        assert_eq!(harness.state().password.value.len(), 12);
+        assert!(harness.state().password.options.numbers);
+        assert!(harness.state().password.options.symbols);
+        // 快照使用固定的展示样例，不输出随机生成的真实结果。
+        harness.state_mut().password.value = "vK7!mR2@nT9#".into();
+        harness.run_steps(2);
+        save(&mut harness, &format!("password-{suffix}"));
+        #[cfg(target_os = "macos")]
+        {
+            let pasteboard = crate::platform::pasteboard::Pasteboard::unique();
+            harness.state_mut().pasteboard_name = Some(pasteboard.name());
+            harness.get_by_label("复制密码").click();
+            harness.run_steps(2);
+            let snapshot = pasteboard.read();
+            assert_eq!(snapshot.first(uti::PLAIN_TEXT), Some(b"vK7!mR2@nT9#".as_slice()));
+            assert!(snapshot.has_type(uti::CONCEALED));
+            pasteboard.release();
+        }
+        harness.get_by_label("包含数字").click();
+        harness.run_steps(2);
+        assert!(!harness.state().password.options.numbers);
+        assert!(!harness.state().password.value.bytes().any(|b| b.is_ascii_digit()));
+        harness.get_by_label("包含符号").click();
+        harness.run_steps(2);
+        assert!(!harness.state().password.options.symbols);
+        assert!(harness.state().password.value.bytes().all(|b| b.is_ascii_alphabetic()));
+        harness.get_by_label("包含符号").click();
+        harness.run_steps(2);
+        assert!(harness.state().password.options.symbols);
+        assert!(harness.state().password.value.bytes().any(|b| b.is_ascii_punctuation()));
+        harness.state_mut().password.options.length = 100;
+        harness.get_by_label("重新生成").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().password.value.len(), 100);
+        harness.state_mut().password.value = "aB!xY#cD$mN%pQ&kR*sT".repeat(5);
+        harness.state_mut().toast = None;
+        harness.run_steps(2);
+        save(&mut harness, &format!("password-long-{suffix}"));
+        harness.set_size(egui::vec2(380.0, 640.0));
+        harness.run_steps(3);
+        save(&mut harness, &format!("password-narrow-{suffix}"));
+        harness.key_press(Key::Escape);
+        harness.run_steps(2);
+        assert_eq!(harness.state().page, Page::Panel);
+    }
+}

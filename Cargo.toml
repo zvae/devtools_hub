@@ -3,6 +3,8 @@ members = [
     "crates/devtools-clipboard",
     "crates/devtools-hub",
     "crates/devtools-json",
+    "crates/devtools-timestamp",
+    "crates/devtools-password",
     "crates/devtools-search",
     "crates/devtools-search/core",
     "crates/devtools-ui",
@@ -14,7 +16,7 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/zvae/devtools_hub"
 rust-version = "1.95"
-version = "0.2.0"
+version = "0.2.1"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -32,6 +34,8 @@ eframe = { version = "0.36", default-features = false, features = [
 ] }
 egui = "0.36"
 global-hotkey = "0.8"
+# 复用锁文件中已有的 getrandom，直接使用系统安全随机源生成密码。
+getrandom = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "gif", "bmp", "webp"] }
 # 系统字体按需映射，避免把整个中文字体集合复制到堆中；已是间接依赖。
 memmap2 = "0.9"
@@ -147,6 +151,8 @@ unicode-normalization = "0.1"
 
 devtools-clipboard = { path = "crates/devtools-clipboard" }
 devtools-json = { path = "crates/devtools-json" }
+devtools-timestamp = { path = "crates/devtools-timestamp" }
+devtools-password = { path = "crates/devtools-password" }
 devtools-search = { path = "crates/devtools-search" }
 devtools-ui = { path = "crates/devtools-ui" }
 

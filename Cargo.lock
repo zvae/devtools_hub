@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-clipboard"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "image",
@@ -906,14 +906,16 @@ dependencies = [
 
 [[package]]
 name = "devtools-hub"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
  "chrono",
  "devtools-clipboard",
  "devtools-json",
+ "devtools-password",
  "devtools-search",
+ "devtools-timestamp",
  "devtools-ui",
  "directories",
  "eframe",
@@ -944,15 +946,22 @@ dependencies = [
 
 [[package]]
 name = "devtools-json"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "devtools-password"
+version = "0.2.1"
+dependencies = [
+ "getrandom 0.4.3",
+]
+
+[[package]]
 name = "devtools-search"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -977,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-search-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "globset",
@@ -992,8 +1001,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "devtools-timestamp"
+version = "0.2.1"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "devtools-ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eframe",
  "egui",

@@ -7,9 +7,10 @@
 //! 这里功能是内置的，匹配规则直接写成代码。
 //!
 //! 匹配规则和功能名在这里（依赖选中内容，属于界面编排）；JSON 的处理在
-//! [`devtools_json`] 里，不依赖界面与平台。
+//! [`devtools_json`] 里，时间戳处理在 [`devtools_timestamp`] 里，两者均不依赖界面与平台。
 
 pub use devtools_json as json;
+pub use devtools_timestamp as timestamp;
 
 use crate::selection::Selection;
 
@@ -18,6 +19,10 @@ use crate::selection::Selection;
 pub enum QuickAction {
     /// 用 JSON 编辑器打开选中的 JSON（或 .json 文件）；没有选中内容时直接打开编辑器。
     JsonEditor,
+    /// 秒／毫秒时间戳与日期双向转换。
+    Timestamp,
+    /// 生成随机密码，不消费选中内容。
+    PasswordGenerator,
     /// 打开剪贴板历史面板。
     ClipboardHistory,
     /// 文件搜索：把选中的文本/路径带到搜索页。
@@ -29,6 +34,8 @@ impl QuickAction {
     pub fn label(self) -> &'static str {
         match self {
             QuickAction::JsonEditor => "JSON 编辑器",
+            QuickAction::Timestamp => "时间戳转换",
+            QuickAction::PasswordGenerator => "密码生成器",
             QuickAction::ClipboardHistory => "剪贴板历史",
             QuickAction::FileSearch => "文件搜索",
         }
@@ -38,6 +45,8 @@ impl QuickAction {
     pub fn description(self) -> &'static str {
         match self {
             QuickAction::JsonEditor => "格式化、压缩、转义、路径过滤",
+            QuickAction::Timestamp => "秒、毫秒与北京时间互转",
+            QuickAction::PasswordGenerator => "随机密码、长度与字符设置",
             QuickAction::ClipboardHistory => "查看并粘贴复制过的内容",
             QuickAction::FileSearch => "按文件名、路径查找本机文件",
         }
@@ -50,7 +59,9 @@ impl QuickAction {
             (QuickAction::JsonEditor, Selection::Files(paths)) => {
                 matches!(paths.as_slice(), [path] if is_json_file(path))
             }
-            (QuickAction::ClipboardHistory, _) => false,
+            (QuickAction::Timestamp, Selection::Text(text)) => timestamp::matches(text),
+            (QuickAction::Timestamp, _) => false,
+            (QuickAction::ClipboardHistory | QuickAction::PasswordGenerator, _) => false,
             // 文件搜索能处理任何选中内容：文本按字面短语搜，路径作为范围。
             (QuickAction::FileSearch, _) => true,
         }
@@ -58,7 +69,7 @@ impl QuickAction {
 }
 
 /// 按选中内容匹配的功能。
-const CONTENT_ACTIONS: [QuickAction; 1] = [QuickAction::JsonEditor];
+const CONTENT_ACTIONS: [QuickAction; 2] = [QuickAction::JsonEditor, QuickAction::Timestamp];
 
 /// 面板里列出的功能：能处理选中内容的排在前面，最后是总是可用的“剪贴板历史”。
 /// 没有选中内容时列出所有功能（对应 uTools 未选中时显示的常用功能）。
@@ -68,6 +79,9 @@ pub fn actions_for(selection: Option<&Selection>, search_enabled: bool) -> Vec<Q
         .into_iter()
         .filter(|action| selection.is_none_or(|selection| action.matches(selection)))
         .collect();
+    if selection.is_none() {
+        actions.push(QuickAction::PasswordGenerator);
+    }
     if search_enabled {
         actions.push(QuickAction::FileSearch);
     }
@@ -99,12 +113,19 @@ mod tests {
     fn lists_actions_by_selection() {
         assert_eq!(
             actions_for(None, false),
-            [QuickAction::JsonEditor, QuickAction::ClipboardHistory]
+            [
+                QuickAction::JsonEditor,
+                QuickAction::Timestamp,
+                QuickAction::PasswordGenerator,
+                QuickAction::ClipboardHistory
+            ]
         );
         assert_eq!(
             actions_for(None, true),
             [
                 QuickAction::JsonEditor,
+                QuickAction::Timestamp,
+                QuickAction::PasswordGenerator,
                 QuickAction::FileSearch,
                 QuickAction::ClipboardHistory
             ]
@@ -116,17 +137,35 @@ mod tests {
         );
         assert!(has_match(&json, false));
         let text = Selection::Text("hello".into());
-        assert_eq!(actions_for(Some(&text), false), [QuickAction::ClipboardHistory]);
+        assert_eq!(
+            actions_for(Some(&text), false),
+            [QuickAction::ClipboardHistory]
+        );
         assert!(!has_match(&text, false));
         // 开启文件搜索后，任何文本都能搜索，面板不再显示"没有能处理的功能"。
         assert!(has_match(&text, true));
+
+        for text in ["1700000000", "1700000000123", "2026-11-23 12:30:00"] {
+            let selection = Selection::Text(text.into());
+            assert_eq!(
+                actions_for(Some(&selection), false),
+                [QuickAction::Timestamp, QuickAction::ClipboardHistory]
+            );
+            assert!(has_match(&selection, false));
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("data.JSON");
         std::fs::write(&file, "{}").unwrap();
         let file = file.to_string_lossy().into_owned();
         assert!(has_match(&Selection::Files(vec![file.clone()]), false));
-        assert!(!has_match(&Selection::Files(vec![file.clone(), file]), false));
-        assert!(!has_match(&Selection::Files(vec!["/nope/a.json".into()]), false));
+        assert!(!has_match(
+            &Selection::Files(vec![file.clone(), file]),
+            false
+        ));
+        assert!(!has_match(
+            &Selection::Files(vec!["/nope/a.json".into()]),
+            false
+        ));
     }
 }

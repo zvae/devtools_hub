@@ -1,0 +1,10 @@
+[package]
+name = "devtools-timestamp"
+description = "时间戳处理：秒与毫秒转换、北京时间与 ISO 8601 日期解析"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
