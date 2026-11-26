@@ -817,6 +817,10 @@ impl eframe::App for HubApp {
         }
         self.check_snip_rescued();
         self.handle_events();
+        #[cfg(target_os = "macos")]
+        if native_panel::update_drag() {
+            self.ctx.request_repaint_after(Duration::from_millis(16));
+        }
         self.poll_search();
         self.release_idle_panel_resources(native_panel::is_visible(), frame.wgpu_render_state());
     }

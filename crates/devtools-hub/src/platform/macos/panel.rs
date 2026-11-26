@@ -22,11 +22,11 @@ use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{define_class, msg_send, sel, AnyThread, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
-    NSAutoresizingMaskOptions, NSEvent, NSEventModifierFlags, NSEventType, NSGlassEffectView,
-    NSGlassEffectViewStyle, NSImage, NSPanel, NSPopUpMenuWindowLevel, NSResponder,
-    NSRunningApplication, NSScreen, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowOrderingMode, NSWindowStyleMask, NSWorkspace, NSWorkspaceIconCreationOptions,
+    NSAutoresizingMaskOptions, NSEvent, NSGlassEffectView, NSGlassEffectViewStyle, NSImage,
+    NSPanel, NSPopUpMenuWindowLevel, NSResponder, NSRunningApplication, NSScreen, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask, NSWorkspace,
+    NSWorkspaceIconCreationOptions,
 };
 use objc2_foundation::{NSData, NSObject, NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -34,6 +34,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 thread_local! {
     /// 面板窗口（eframe 创建的窗口，绑定后保存在这里，只在主线程访问）。
     static PANEL: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+    /// 拖动时鼠标相对窗口左下角的偏移；窗口事件继续由正常事件循环处理。
+    static DRAG_OFFSET: RefCell<Option<NSPoint>> = const { RefCell::new(None) };
     /// 弹出面板前的前台应用，收起面板时把焦点还给它。
     static PREVIOUS_APP: RefCell<Option<Retained<NSRunningApplication>>> = const { RefCell::new(None) };
 }
@@ -395,48 +397,58 @@ pub fn finish_wake() {
 
 /// 从标题栏空白处开始拖动面板。返回 false 表示面板尚未绑定，由调用方交给 winit。
 ///
-/// winit 的 `drag_window` 直接把 `NSApp.currentEvent` 交给 `performWindowDragWithEvent:`，
-/// 系统按这个事件在窗口中的位置计算拖动起点。从菜单栏图标弹出面板后第一次点击面板时，
-/// 当前事件可能是窗口激活产生的系统事件而不是这次按下，起点算错，窗口就跳到了鼠标处。
-/// 这里只在当前事件确实是本窗口的左键按下 / 拖动时直接使用，否则按鼠标的实际位置构造一个按下事件；
-/// 鼠标已经松开（只是单击）时不拖动。
+/// 不在 egui 的绘制回调里调用 `performWindowDragWithEvent:`：它会进入嵌套的原生事件循环，
+/// 拖动期间 eframe 无法正常处理窗口更新和鼠标松开。这里只记下当前鼠标与窗口的偏移，
+/// 与贴图窗口一样，在正常事件循环里移动窗口，避免拖动后留下变虚的画面或按住状态。
 pub fn start_drag() -> bool {
-    with_panel(drag).is_some()
+    with_panel(|_, window| {
+        if NSEvent::pressedMouseButtons() & 1 != 0 {
+            let mouse = NSEvent::mouseLocation();
+            let origin = window.frame().origin;
+            DRAG_OFFSET.with(|offset| {
+                *offset.borrow_mut() = Some(NSPoint::new(mouse.x - origin.x, mouse.y - origin.y));
+            });
+        }
+    })
+    .is_some()
 }
 
-/// 按住鼠标拖动窗口（面板与贴图窗口共用，做法见 [`start_drag`]）。
-pub(super) fn drag(mtm: MainThreadMarker, window: &NSWindow) {
-    let current = NSApplication::sharedApplication(mtm).currentEvent();
-    let usable = current.as_deref().filter(|event| {
-        let kind = event.r#type();
-        (kind == NSEventType::LeftMouseDown || kind == NSEventType::LeftMouseDragged)
-            && event.windowNumber() == window.windowNumber()
+/// 处理拖动中的移动和松开。返回本帧是否有拖动，宿主据此只在拖动期间安排后续帧。
+pub fn update_drag() -> bool {
+    let Some(offset) = DRAG_OFFSET.with(|offset| *offset.borrow()) else {
+        return false;
+    };
+    let updated = with_panel(|mtm, window| {
+        let mouse = NSEvent::mouseLocation();
+        let screen = NSScreen::screens(mtm)
+            .iter()
+            .find(|screen| contains(screen.frame(), mouse))
+            .or_else(|| window.screen());
+        let scale = screen.as_ref().map_or_else(
+            || window.backingScaleFactor(),
+            |screen| screen.backingScaleFactor(),
+        );
+        let mut frame = window.frame();
+        frame.origin = drag_origin(mouse, offset, scale);
+        // 保留普通工具窗口不能拖到菜单栏上方的约束，贴图窗口则允许超出屏幕。
+        let frame = window.constrainFrameRect_toScreen(frame, screen.as_deref());
+        if window.frame().origin != frame.origin {
+            window.setFrameOrigin(frame.origin);
+        }
+        window.isVisible() && NSEvent::pressedMouseButtons() & 1 != 0
     });
-    if let Some(event) = usable {
-        window.performWindowDragWithEvent(event);
-        return;
+    if updated != Some(true) {
+        DRAG_OFFSET.with(|offset| offset.borrow_mut().take());
     }
-    tracing::debug!(
-        "拖动窗口：当前事件 {:?} 不是本窗口的鼠标按下，按鼠标位置重建",
-        current.as_ref().map(|event| event.r#type())
-    );
-    if NSEvent::pressedMouseButtons() & 1 == 0 {
-        return;
-    }
-    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-        NSEventType::LeftMouseDown,
-        window.mouseLocationOutsideOfEventStream(),
-        NSEventModifierFlags::empty(),
-        current.map_or(0.0, |event| event.timestamp()),
-        window.windowNumber(),
-        None,
-        0,
-        1,
-        1.0,
-    );
-    if let Some(event) = event {
-        window.performWindowDragWithEvent(&event);
-    }
+    true
+}
+
+/// 按当前显示器的物理像素对齐，避免窗口层在两个像素之间被插值采样。
+fn drag_origin(mouse: NSPoint, offset: NSPoint, scale: f64) -> NSPoint {
+    NSPoint::new(
+        ((mouse.x - offset.x) * scale).round() / scale,
+        ((mouse.y - offset.y) * scale).round() / scale,
+    )
 }
 
 /// 显示面板并让它成为键盘窗口（不激活本应用）。`size` 是内容区大小（逻辑像素）：同一个窗口既用作剪贴板面板，
@@ -496,6 +508,7 @@ fn resize(window: &NSWindow, size: [f32; 2]) -> bool {
 
 /// 隐藏面板；`restore_focus` 为 true 时确保弹出面板之前的前台应用拿回键盘焦点。
 pub fn hide(restore_focus: bool) {
+    DRAG_OFFSET.with(|offset| offset.borrow_mut().take());
     with_panel(|mtm, window| {
         window.orderOut(None);
         if WAKING.swap(false, Ordering::Relaxed) {
@@ -758,5 +771,38 @@ fn set_application_icon(app: &NSApplication) {
                 tracing::warn!("无法设置可执行文件图标（Dock 会显示通用图标）");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    #[test]
+    fn dragging_preserves_grab_point_on_both_sides_of_screen_origin() {
+        let offset = NSPoint::new(80.0, 240.0);
+        for (mouse, expected) in [
+            (NSPoint::new(200.0, 500.0), NSPoint::new(120.0, 260.0)),
+            (NSPoint::new(-350.0, 100.0), NSPoint::new(-430.0, -140.0)),
+        ] {
+            assert_eq!(drag_origin(mouse, offset, 1.0), expected);
+            assert_eq!(drag_origin(mouse, offset, 2.0), expected);
+        }
+    }
+
+    #[test]
+    fn dragging_snaps_to_current_screen_pixels() {
+        let mouse = NSPoint::new(100.3, -50.3);
+        let offset = NSPoint::new(10.0, 20.0);
+        assert_eq!(drag_origin(mouse, offset, 1.0), NSPoint::new(90.0, -70.0));
+        assert_eq!(drag_origin(mouse, offset, 2.0), NSPoint::new(90.5, -70.5));
+    }
+
+    #[test]
+    fn missing_window_cancels_drag_and_stops_requesting_frames() {
+        DRAG_OFFSET.with(|offset| *offset.borrow_mut() = Some(NSPoint::new(10.0, 20.0)));
+        assert!(update_drag());
+        assert!(!update_drag());
+        assert!(DRAG_OFFSET.with(|offset| offset.borrow().is_none()));
     }
 }

@@ -296,7 +296,7 @@ pub fn set_shadow(title: &str, shadow: bool) {
 /// `grab` 是按下鼠标的位置（相对窗口左上角，点）：开始拖动时鼠标已经移动了一小段，
 /// 按这个位置算，按住的那一点始终在鼠标下面。
 ///
-/// 不用系统的拖动（`performWindowDragWithEvent`，主面板仍然用它）：系统让窗口保持在菜单栏下面，
+/// 不用系统的拖动（`performWindowDragWithEvent`）：系统让窗口保持在菜单栏下面，
 /// 比屏幕还高的长截图贴图就拖不上去了。返回 false 表示没找到窗口，由调用方交给 winit。
 pub fn start_drag(title: &str, grab: egui::Vec2) -> bool {
     let Some((_, window)) = find(title) else {

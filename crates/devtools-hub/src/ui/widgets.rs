@@ -13,8 +13,18 @@ pub use devtools_ui::widgets::*;
 /// 栏的空白处可以拖动窗口。先于栏里的控件注册，后添加的控件会覆盖它。
 pub(super) fn drag_window(ui: &mut Ui, rect: Rect) {
     let drag = ui.interact(rect, ui.id().with("drag-window"), Sense::drag());
-    // macOS 由平台层自己发起拖动（winit 的实现可能用错起点，见 `panel::start_drag`）。
-    if drag.drag_started() && !native_panel::start_drag() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    // macOS 由平台层逐帧拖动，Windows 交给 winit。
+    if drag.drag_started() {
+        start_window_drag(ui.ctx());
+    }
+}
+
+/// 开始拖动，并唤醒宿主的逐帧移动处理。
+pub(super) fn start_window_drag(ctx: &egui::Context) {
+    // macOS 只记录拖动起点，后续由正常事件循环更新窗口；这里先安排第一帧。
+    if native_panel::start_drag() {
+        ctx.request_repaint();
+    } else {
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
 }

@@ -43,9 +43,7 @@ impl HubApp {
                 ToolEffect::Toast(text) => self.show_toast(text),
                 ToolEffect::Close => self.pending_hide = true,
                 ToolEffect::StartDrag => {
-                    if !platform::panel::start_drag() {
-                        self.ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
+                    super::widgets::start_window_drag(&self.ctx);
                 }
                 ToolEffect::Copy { text, sensitive } => {
                     let snapshot = if sensitive {
