@@ -66,5 +66,27 @@ mod tests {
             actions_for(Some(&Selection::Text("hello".into())), true),
             [QuickAction::FileSearch, QuickAction::ClipboardHistory]
         );
+        // 已编码的文本只带出对应的编码工具，普通文本不会被误判。
+        assert_eq!(
+            actions_for(Some(&Selection::Text("5Lit5paH".into())), false),
+            [
+                QuickAction::Tool("devtools.base64"),
+                QuickAction::ClipboardHistory
+            ]
+        );
+        assert_eq!(
+            actions_for(Some(&Selection::Text("%E4%B8%AD%E6%96%87".into())), false),
+            [
+                QuickAction::Tool("devtools.url"),
+                QuickAction::ClipboardHistory
+            ]
+        );
+        assert_eq!(
+            actions_for(Some(&Selection::Text("\\xE4\\xB8\\xAD".into())), false),
+            [
+                QuickAction::Tool("devtools.utf8"),
+                QuickAction::ClipboardHistory
+            ]
+        );
     }
 }

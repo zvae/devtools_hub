@@ -29,3 +29,6 @@ macro_rules! tool_helpers {
     };
 }
 pub(crate) use tool_helpers;
+
+/// Base64、URL、UTF-8 等编码工具共用的编码／解码界面；放在宏定义之后，保证 `tool_helpers!` 已可用。
+pub(crate) mod codec;

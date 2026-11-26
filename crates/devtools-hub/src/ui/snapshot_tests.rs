@@ -1348,6 +1348,18 @@ fn tray_tools_open_without_reusing_selection() {
             QuickAction::Tool("devtools.password"),
             Page::Tool("devtools.password"),
         ),
+        (
+            QuickAction::Tool("devtools.base64"),
+            Page::Tool("devtools.base64"),
+        ),
+        (
+            QuickAction::Tool("devtools.url"),
+            Page::Tool("devtools.url"),
+        ),
+        (
+            QuickAction::Tool("devtools.utf8"),
+            Page::Tool("devtools.utf8"),
+        ),
     ] {
         app.startup_hide_pending = true;
         app.quick.selection = Some(Selection::Text("{\"stale\":true}".into()));
@@ -1357,5 +1369,5 @@ fn tray_tools_open_without_reusing_selection() {
         assert!(!app.startup_hide_pending);
         assert!(app.quick.selection.is_none());
     }
-    assert_eq!(app.tools.instantiated(), 3);
+    assert_eq!(app.tools.instantiated(), 6);
 }
