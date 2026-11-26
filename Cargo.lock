@@ -912,10 +912,10 @@ dependencies = [
  "block2 0.6.2",
  "chrono",
  "devtools-clipboard",
- "devtools-json",
- "devtools-password",
+ "devtools-module-api",
+ "devtools-module-runtime",
  "devtools-search",
- "devtools-timestamp",
+ "devtools-tools",
  "devtools-ui",
  "directories",
  "eframe",
@@ -945,18 +945,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "devtools-json"
+name = "devtools-module-api"
 version = "0.2.1"
 dependencies = [
+ "devtools-ui",
+ "egui",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "devtools-password"
+name = "devtools-module-runtime"
 version = "0.2.1"
 dependencies = [
- "getrandom 0.4.3",
+ "devtools-module-api",
+ "devtools-ui",
+ "egui",
+ "serde_json",
 ]
 
 [[package]]
@@ -1001,10 +1006,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "devtools-timestamp"
+name = "devtools-tools"
 version = "0.2.1"
 dependencies = [
  "chrono",
+ "devtools-module-api",
+ "devtools-ui",
+ "egui",
+ "egui_kittest",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

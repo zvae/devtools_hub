@@ -146,6 +146,8 @@ macOS 用 `⌘`，Windows 用 `Ctrl`：
 
 快捷面板中：`↑` `↓` 选择，`↩` 或数字键 `1`–`9` 执行，`esc` 或点击别处关闭。
 
+编译期工具采用目录自动发现，新增工具无需修改宿主入口。开发说明见 [添加工具](docs/添加工具.md)。
+
 ### JSON 编辑器
 
 JSON 编辑器中（快捷键与 uTools 的 JSON 编辑器插件一致）：
@@ -419,24 +421,19 @@ codesign --display --requirements - "/Applications/DevTools Hub.app"
 │   │           ├── panel/               剪贴板面板
 │   │           ├── settings_page/       应用设置页
 │   │           ├── quick_panel.rs       中键快捷面板
-│   │           ├── json_editor.rs       JSON 编辑器
-│   │           ├── timestamp.rs         时间戳转换界面
-│   │           ├── password.rs          随机密码生成界面
+│   │           ├── tool_host.rs         通用工具导航、原生请求、配置与热键适配
 │   │           ├── screenshot.rs        调度截屏与贴图
 │   │           ├── snipper/             截屏遮罩、选区、放大镜与标注交互
 │   │           ├── pin.rs               贴图窗口
 │   │           ├── search_host.rs       为搜索模块提供原生对话框、系统菜单和缩略图
 │   │           └── search_window.rs     文件搜索的独立视口
-│   ├── devtools-password/               独立随机密码库（系统安全随机源、长度与字符约束）
-│   │   └── src/                        无偏采样、生成配置及边界测试
-│   ├── devtools-timestamp/              独立时间戳处理库（仅依赖 chrono，不依赖界面与平台）
-│   │   └── src/                        秒／毫秒与日期转换、内容识别及边界测试
-│   ├── devtools-json/                   JSON 文本处理库
-│   │   └── src/
-│   │       ├── lexer.rs                 词法分析与语法高亮支持
-│   │       ├── parser.rs                解析为保留原文的语法树
-│   │       ├── format.rs                格式化与压缩
-│   │       └── path.rs                  按 JSON 路径过滤
+│   ├── devtools-module-api/             工具描述符、输入、实例协议与配置
+│   ├── devtools-module-runtime/         注册校验、惰性实例与配置合并
+│   ├── devtools-tools/                  build.rs 自动发现 src/tools/*/mod.rs
+│   │   └── src/tools/                  工具界面、状态、算法与测试自包含
+│   │       ├── json/core/              JSON 词法、解析、格式化与路径过滤
+│   │       ├── password/model.rs       安全随机密码生成与字符约束
+│   │       └── timestamp/model.rs      时间戳与日期转换
 │   ├── devtools-search/                 文件搜索模块
 │   │   ├── core/                       独立 crate devtools-search-core
 │   │   │   └── src/                    平台无关的索引、查询、扫描与快照
@@ -464,9 +461,9 @@ cargo test --workspace
 ```
 
 - `devtools-clipboard` 的单元测试，包括 Windows 剪贴板格式转换（纯 Rust，任何平台都能运行）
-- `devtools-password` 的单元测试：长度和字符约束、采样分布、随机源失败路径，可单独运行 `cargo test -p devtools-password`
-- `devtools-timestamp` 的单元测试：时区解析、负数与毫秒往返、无效日期及超范围输入，可单独运行 `cargo test -p devtools-timestamp`
-- `devtools-json` 的单元测试：格式化、保留数字与注释、错误位置、转义、路径过滤（纯 Rust，不依赖界面，可以单独跑 `cargo test -p devtools-json`）
+- 密码工具核心测试：长度和字符约束、采样分布、随机源失败路径，可运行 `cargo test -p devtools-tools tool_password::model`
+- 时间戳工具核心测试：时区解析、负数与毫秒往返、无效日期及超范围输入，可运行 `cargo test -p devtools-tools tool_timestamp::model`
+- JSON 工具核心测试：格式化、保留数字与注释、错误位置、转义、路径过滤，可运行 `cargo test -p devtools-tools tool_json::core`
 - 截屏与贴图：选区计算、窗口识别、标注（马赛克、橡皮擦命中、撤销重做）的单元测试，以及用 egui_kittest 模拟鼠标、键盘驱动截屏遮罩和贴图窗口的交互测试（不创建真实窗口）
 - 中键面板功能匹配与托盘工具入口的测试，验证直接打开工具时不会复用上次中键选区；macOS 上还在私有命名剪贴板上验证“模拟复制 → 读取 → 恢复剪贴板”
 - macOS 上还有在私有命名剪贴板上的端到端测试：监听线程的记录、去重、隐私过滤、跳过本应用自己写入的内容、暂停。这些测试不会碰系统剪贴板
@@ -492,9 +489,10 @@ cargo check -p devtools-hub --features windows-typecheck
 
 ```bash
 cargo test -p devtools-hub snapshot -- --ignored
+cargo test -p devtools-tools snapshot -- --ignored
 ```
 
-它会用示例数据渲染面板、设置页、新版本提示、中键快捷面板、JSON 编辑器、时间戳转换、密码生成器（深色、浅色两套）以及文件搜索、文字识别和截屏标注界面，截图输出到 `target/ui-snapshots/`。同时验证键盘选择、搜索、分类切换、打开设置、JSON 格式化与复制、时间戳转换方向与暂停 / 继续、密码长度与字符开关，以及私有剪贴板上的密码复制。密码截图使用固定示例。
+它会用示例数据渲染面板、设置页、新版本提示、中键快捷面板、JSON 编辑器、时间戳转换、密码生成器（深色、浅色两套）以及文件搜索、文字识别和截屏标注界面，截图输出到 `target/ui-snapshots/`。同时验证键盘选择、搜索、分类切换、打开设置、JSON 格式化与复制、时间戳转换方向与暂停 / 继续、密码长度与字符开关，以及敏感复制请求和跨平台隐私标记。密码截图使用固定示例。
 
 ## 当前限制
 

@@ -52,19 +52,34 @@ impl HotkeyAction {
     }
 }
 
+/// 统一注册宿主热键与按 ID 声明的工具热键。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RegisteredAction {
+    Host(HotkeyAction),
+    Tool(&'static str),
+}
+impl RegisteredAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Host(action) => action.label(),
+            Self::Tool(id) => devtools_tools::descriptor(id).map_or("工具", |d| d.name),
+        }
+    }
+}
+
 /// 注册全局快捷键：唤起面板、截屏、贴图。
 pub struct HotkeyService {
     manager: GlobalHotKeyManager,
-    current: HashMap<HotkeyAction, HotKey>,
+    current: HashMap<RegisteredAction, HotKey>,
     /// 快捷键 id → 操作，事件回调据此分派（回调在主线程执行，见 `controller`）。
-    actions: Arc<Mutex<HashMap<u32, HotkeyAction>>>,
+    actions: Arc<Mutex<HashMap<u32, RegisteredAction>>>,
 }
 
 impl HotkeyService {
     /// 必须在主线程创建。
     pub fn new(shared: Arc<Shared>) -> anyhow::Result<Self> {
         let manager = GlobalHotKeyManager::new()?;
-        let actions: Arc<Mutex<HashMap<u32, HotkeyAction>>> = Arc::default();
+        let actions: Arc<Mutex<HashMap<u32, RegisteredAction>>> = Arc::default();
         let lookup = actions.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
             if shared.shutdown.requested() {
@@ -75,10 +90,19 @@ impl HotkeyService {
             }
             let action = lookup.lock().unwrap().get(&event.id()).copied();
             match action {
-                Some(HotkeyAction::Panel) => controller::toggle_panel(&shared),
-                Some(HotkeyAction::Snip) => shared.post(AppEvent::Snip),
-                Some(HotkeyAction::Pin) => shared.post(AppEvent::PinClipboard),
-                Some(HotkeyAction::Search) => shared.post(AppEvent::ShowSearch(SearchEntry::Hotkey)),
+                Some(RegisteredAction::Host(HotkeyAction::Panel)) => {
+                    controller::toggle_panel(&shared)
+                }
+                Some(RegisteredAction::Host(HotkeyAction::Snip)) => shared.post(AppEvent::Snip),
+                Some(RegisteredAction::Host(HotkeyAction::Pin)) => {
+                    shared.post(AppEvent::PinClipboard)
+                }
+                Some(RegisteredAction::Host(HotkeyAction::Search)) => {
+                    shared.post(AppEvent::ShowSearch(SearchEntry::Hotkey))
+                }
+                Some(RegisteredAction::Tool(id)) => {
+                    shared.post(AppEvent::OpenTool(crate::tools::QuickAction::Tool(id)))
+                }
                 None => {}
             }
         }));
@@ -91,6 +115,15 @@ impl HotkeyService {
 
     /// 暂时注销某个快捷键（录制新快捷键时使用），之后调用 [`Self::apply`] 恢复。
     pub fn suspend(&mut self, action: HotkeyAction) {
+        self.suspend_registered(RegisteredAction::Host(action));
+    }
+    pub fn apply(&mut self, action: HotkeyAction, spec: &str) -> Result<(), String> {
+        self.apply_registered(RegisteredAction::Host(action), spec)
+    }
+    pub fn apply_tool(&mut self, id: &'static str, spec: &str) -> Result<(), String> {
+        self.apply_registered(RegisteredAction::Tool(id), spec)
+    }
+    fn suspend_registered(&mut self, action: RegisteredAction) {
         if let Some(old) = self.current.remove(&action) {
             self.actions.lock().unwrap().remove(&old.id());
             let _ = self.manager.unregister(old);
@@ -98,9 +131,9 @@ impl HotkeyService {
     }
 
     /// 为 `action` 注册新的快捷键；`spec` 为空表示不使用快捷键。
-    pub fn apply(&mut self, action: HotkeyAction, spec: &str) -> Result<(), String> {
+    fn apply_registered(&mut self, action: RegisteredAction, spec: &str) -> Result<(), String> {
         if spec.trim().is_empty() {
-            self.suspend(action);
+            self.suspend_registered(action);
             return Ok(());
         }
         let hotkey = parse(spec)?;
@@ -114,7 +147,7 @@ impl HotkeyService {
         {
             return Err(format!("{spec} 已用作{}", other.label()));
         }
-        self.suspend(action);
+        self.suspend_registered(action);
         match self.manager.register(hotkey) {
             Ok(()) => {
                 self.current.insert(action, hotkey);

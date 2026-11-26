@@ -1,18 +1,17 @@
-//! 随机密码生成器的宿主界面；生成算法在独立的 devtools-password 中。
+//! 随机密码工具：界面与私有 model 中的生成算法共同归属于本目录。
 //! 密码仅保存在当前内存状态，复制走带隐私标记的写入流程，不进入本应用历史。
 
-use devtools_clipboard::{uti, windows_formats, Representation, Snapshot};
-use devtools_password::{Options, MAX_LENGTH, MIN_LENGTH};
+mod model;
+use self::model::{Options, MAX_LENGTH, MIN_LENGTH};
 use egui::{
     Align, Align2, Color32, FontId, Frame, Key, Layout, Margin, Modifiers, Rect, RichText, Sense,
     Stroke, Ui, Vec2,
 };
 
-use super::icons::Icon;
-use super::widgets::{centered_row, drag_window, icon_button};
-use super::{style, HubApp, Page};
-use crate::platform::panel::{self as native_panel, Anchor};
-use crate::platform::Placement;
+use crate::support::drag_window;
+use crate::support::icons::Icon;
+use crate::support::widgets::{centered_row, icon_button};
+use crate::support::{style, widgets};
 
 #[derive(Default)]
 pub(super) struct PasswordView {
@@ -25,7 +24,7 @@ pub(super) struct PasswordView {
 impl PasswordView {
     /// 失败时清除旧结果，避免用户误以为旧密码符合刚修改的配置。
     fn regenerate(&mut self) {
-        match devtools_password::generate(self.options) {
+        match model::generate(self.options) {
             Ok(value) => {
                 self.value = value;
                 self.error = None;
@@ -38,14 +37,7 @@ impl PasswordView {
     }
 }
 
-impl HubApp {
-    pub(super) fn open_password_generator(&mut self) {
-        self.quick.selection = None;
-        self.password.regenerate();
-        self.set_page(Page::PasswordGenerator);
-        native_panel::show(Anchor::Placement(Placement::ScreenCenter), [680.0, 560.0]);
-    }
-
+impl Tool {
     pub(super) fn password_ui(&mut self, ui: &mut Ui) {
         let palette = self.palette(ui.ctx());
         let mut close = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
@@ -54,11 +46,11 @@ impl HubApp {
         Frame::NONE
             .inner_margin(Margin::symmetric(style::PAD, 12))
             .show(ui, |ui| {
-                drag_window(ui, ui.max_rect());
+                drag_window(ui, ui.max_rect(), &mut self.effects);
                 centered_row(ui, 28.0, |ui| {
                     #[cfg(target_os = "macos")]
                     {
-                        close |= super::widgets::traffic_light_close(ui).clicked();
+                        close |= widgets::traffic_light_close(ui).clicked();
                         ui.add_space(4.0);
                     }
                     ui.label(
@@ -257,9 +249,10 @@ impl HubApp {
             self.password.regenerate();
         }
         if copy && !self.password.value.is_empty() {
-            let snapshot = password_snapshot(&self.password.value);
-            let pasteboard = self.pasteboard();
-            self.shared.write_pasteboard(|| pasteboard.write(&snapshot));
+            self.effects.push(ToolEffect::Copy {
+                text: self.password.value.clone(),
+                sensitive: true,
+            });
             self.show_toast("已复制密码");
         }
         if close {
@@ -353,51 +346,79 @@ fn option_row(
     response.changed()
 }
 
-/// 同时携带 macOS 与 Windows 的隐私标记；Windows 写回层保留注册格式，macOS 使用 ConcealedType。
-fn password_snapshot(value: &str) -> Snapshot {
-    let mut snapshot = Snapshot::from_text(value);
-    snapshot.items[0].push(Representation::new(uti::CONCEALED, Vec::new()));
-    for (name, flag) in [
-        (windows_formats::EXCLUDE_FROM_MONITOR, 1u32),
-        (windows_formats::CAN_INCLUDE_IN_HISTORY, 0),
-        ("CanUploadToCloudClipboard", 0),
-    ] {
-        snapshot.items[0].push(Representation::new(
-            format!("{}{name}", windows_formats::RAW_PREFIX),
-            flag.to_le_bytes().to_vec(),
-        ));
+use devtools_module_api::{ModuleDescriptor, ToolEffect, ToolModule};
+use serde_json::Value;
+
+struct Tool {
+    password: PasswordView,
+    palette: style::Palette,
+    effects: Vec<ToolEffect>,
+}
+crate::support::tool_helpers!(Tool);
+
+fn create(_config: &Value) -> Box<dyn ToolModule> {
+    Box::new(Tool {
+        password: PasswordView::default(),
+        palette: style::Palette::new(true),
+        effects: Vec::new(),
+    })
+}
+
+fn paint_icon(ui: &Ui, rect: Rect, _palette: &style::Palette) {
+    ui.painter().rect_filled(
+        rect,
+        style::SMALL_RADIUS,
+        Color32::from_rgb(0x66, 0x5b, 0xc8),
+    );
+    let center = rect.center();
+    let radius = rect.height() * 0.23;
+    for angle in [30.0_f32, 90.0, 150.0] {
+        let angle = angle.to_radians();
+        let offset = Vec2::new(angle.cos(), angle.sin()) * radius;
+        ui.painter().line_segment(
+            [center - offset, center + offset],
+            Stroke::new(rect.height() * 0.065, Color32::WHITE),
+        );
     }
-    snapshot
+}
+
+pub(super) fn descriptor() -> ModuleDescriptor {
+    ModuleDescriptor {
+        id: "devtools.password",
+        name: "密码生成器",
+        description: "随机密码、长度与字符设置",
+        order: 30,
+        size: [680.0, 560.0],
+        toast_offset: -48.0,
+        matches: |input| {
+            let _ = input;
+            false
+        },
+        paint_icon,
+        create,
+        validate_config: |config| config.is_object(),
+        default_hotkey: "",
+    }
+}
+
+impl ToolModule for Tool {
+    fn activate(&mut self, input: Option<devtools_module_api::Selection>) -> Vec<ToolEffect> {
+        let _ = input;
+        self.password.regenerate();
+        std::mem::take(&mut self.effects)
+    }
+    fn render(&mut self, ui: &mut Ui, palette: &style::Palette) -> Vec<ToolEffect> {
+        self.palette = *palette;
+        self.password_ui(ui);
+        std::mem::take(&mut self.effects)
+    }
+    fn pinned(&self) -> bool {
+        self.password.pinned
+    }
+    fn on_hidden(&mut self) {
+        self.password.value.clear();
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn copied_password_has_cross_platform_privacy_markers() {
-        let snapshot = password_snapshot("sample-password");
-        assert_eq!(
-            snapshot.first(uti::PLAIN_TEXT),
-            Some(b"sample-password".as_slice())
-        );
-        assert!(snapshot.has_type(uti::CONCEALED));
-        let types = snapshot
-            .representations()
-            .map(|rep| rep.uti.clone())
-            .collect::<Vec<_>>();
-        assert!(devtools_clipboard::rules::CaptureRules::default()
-            .check_markers(&types, &devtools_clipboard::SourceApp::default())
-            .is_err());
-        let formats = windows_formats::windows_formats_from_snapshot(&snapshot);
-        for (name, value) in [
-            (windows_formats::EXCLUDE_FROM_MONITOR, 1u32),
-            (windows_formats::CAN_INCLUDE_IN_HISTORY, 0),
-            ("CanUploadToCloudClipboard", 0),
-        ] {
-            assert!(formats.iter().any(|format| format.target
-                == windows_formats::FormatTarget::Registered(name.into())
-                && format.data == value.to_le_bytes()));
-        }
-    }
-}
+mod tests;

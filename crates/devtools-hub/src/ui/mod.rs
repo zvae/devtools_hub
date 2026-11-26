@@ -7,13 +7,11 @@ mod code_text;
 mod fonts;
 mod glass;
 mod icons;
-mod json_editor;
 mod liquid_glass;
 mod menu;
 mod native_menu;
 mod ocr;
 mod panel;
-mod password;
 mod pin;
 mod quick_panel;
 mod screenshot;
@@ -27,7 +25,7 @@ mod snapshot_tests;
 mod snipper;
 mod style;
 mod textures;
-mod timestamp;
+mod tool_host;
 mod widgets;
 
 use std::path::PathBuf;
@@ -61,7 +59,6 @@ fn lock_search(search: &SearchHandle) -> MutexGuard<'_, SearchModule> {
 }
 
 use code_text::CodeStyles;
-use json_editor::JsonEditorView;
 use liquid_glass::LiquidGlass;
 use native_menu::NativeMenu;
 use ocr::OcrView;
@@ -81,11 +78,8 @@ enum Page {
     Settings,
     /// 鼠标中键弹出的快捷面板。
     QuickActions,
-    JsonEditor,
-    /// 时间戳转换工具。
-    Timestamp,
-    /// 随机密码生成器。
-    PasswordGenerator,
+    /// 编译期注册的普通工具。
+    Tool(&'static str),
     /// 提取文字（截屏、贴图的识别结果）。
     Ocr,
     /// 文件搜索页。生产环境搜索页是独立窗口（见 `search_window`），
@@ -124,9 +118,6 @@ const NUMBER_KEYS: [egui::Key; 9] = [
     egui::Key::Num9,
 ];
 
-/// JSON 编辑器直接打开的 .json 文件大小上限。
-const JSON_FILE_MAX_BYTES: u64 = 20 * 1024 * 1024;
-
 /// 整个界面的状态，同时是 eframe 的应用对象（只在主线程上访问）。
 pub struct HubApp {
     ctx: egui::Context,
@@ -149,9 +140,8 @@ pub struct HubApp {
     panel_queries: Option<panel::query::PanelQueries>,
     settings_view: SettingsView,
     quick: QuickPanelView,
-    json: JsonEditorView,
-    timestamp: timestamp::TimestampView,
-    password: password::PasswordView,
+    tools: devtools_module_runtime::ModuleRuntime,
+    tool_hotkey_errors: std::collections::BTreeMap<&'static str, String>,
     ocr: OcrView,
     /// 鼠标中键监听线程是否已启动（只启动一次，之后由设置控制是否拦截）。
     middle_click_started: bool,
@@ -269,6 +259,7 @@ impl HubApp {
                     Some(format!("无法初始化全局快捷键：{err}"));
             }
         }
+        app.sync_tool_hotkeys();
         app.sync_middle_click();
         app.sync_search_module();
         app.tray = Tray::new(shared.clone(), app.data_dir.clone(), &app.settings)
@@ -300,11 +291,12 @@ impl HubApp {
         shared: Arc<Shared>,
         store: Store,
         data_dir: PathBuf,
-        settings: Settings,
+        mut settings: Settings,
     ) -> Self {
         style::install(&ctx);
         shared.set_ctx(ctx.clone());
         let search_host = HostBridge::new(shared.clone());
+        settings.migrate_tools();
         Self {
             ctx,
             shared,
@@ -320,9 +312,11 @@ impl HubApp {
             panel_queries: None,
             settings_view: SettingsView::default(),
             quick: QuickPanelView::default(),
-            json: JsonEditorView::default(),
-            timestamp: timestamp::TimestampView::default(),
-            password: password::PasswordView::default(),
+            tools: devtools_module_runtime::ModuleRuntime::new(
+                devtools_tools::registrations().to_vec(),
+            )
+            .expect("工具注册声明无效"),
+            tool_hotkey_errors: Default::default(),
             ocr: OcrView::default(),
             middle_click_started: false,
             textures: Textures::default(),
@@ -449,6 +443,9 @@ impl HubApp {
         if from == to {
             return;
         }
+        if let Page::Tool(id) = from {
+            self.tools.on_hidden(id);
+        }
         self.page = to;
         if from == Page::Search {
             if let Some(handle) = &self.search {
@@ -486,11 +483,9 @@ impl HubApp {
             let size = [rect.width().round(), rect.height().round()];
             let saved = match self.page {
                 Page::Panel | Page::Settings => Some(&mut self.settings.window_size),
-                Page::JsonEditor => Some(&mut self.settings.json_editor_size),
+                Page::Tool(_) => None,
                 Page::Ocr => Some(&mut self.settings.ocr_size),
-                Page::QuickActions | Page::Search | Page::Timestamp | Page::PasswordGenerator => {
-                    None
-                }
+                Page::QuickActions | Page::Search => None,
             };
             if let Some(saved) = saved {
                 if size != *saved && size[0] > 100.0 && size[1] > 100.0 {
@@ -505,6 +500,7 @@ impl HubApp {
                 }
             }
         }
+        self.remember_tool_size();
         self.set_page(Page::Panel);
         native_panel::hide(restore_focus);
         self.cancel_hotkey_recording();
@@ -558,6 +554,7 @@ impl HubApp {
         if let Err(err) = self.settings.save(&self.data_dir) {
             self.show_toast(format!("保存设置失败：{err:#}"));
         }
+        self.sync_tool_hotkeys();
         // 文件搜索开关变化时创建/释放模块并重新注册热键（§4.4）。
         self.sync_search_module();
         self.sync_update_prompt();
@@ -683,40 +680,16 @@ impl HubApp {
                 .map_or_else(|| "没有选中内容".to_string(), Selection::label)
         );
         self.quick.open(selection, self.settings.search_enabled);
+        self.quick.actions.retain(|action| match action {
+            crate::tools::QuickAction::Tool(id) => {
+                self.settings.modules.get(*id).is_none_or(|s| s.enabled)
+            }
+            _ => true,
+        });
         self.set_page(Page::QuickActions);
         native_panel::show(
             Anchor::Placement(Placement::NearCursor),
             self.quick.window_size(),
-        );
-    }
-
-    /// 打开 JSON 编辑器：有选中内容时载入并自动格式化，没有时保留上次的内容。
-    fn open_json_editor(&mut self, selection: Option<Selection>) {
-        let indent = self.settings.json_indent;
-        match selection {
-            Some(Selection::Text(text)) => self.json.load(&text, indent),
-            Some(Selection::Files(paths)) => {
-                let path = std::path::Path::new(&paths[0]);
-                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                if size > JSON_FILE_MAX_BYTES {
-                    self.show_toast(format!("文件太大（{}）", style::byte_size(size)));
-                    self.json.focus();
-                } else {
-                    match std::fs::read_to_string(path) {
-                        Ok(text) => self.json.load(&text, indent),
-                        Err(err) => {
-                            self.show_toast(format!("读取文件失败：{err}"));
-                            self.json.focus();
-                        }
-                    }
-                }
-            }
-            None => self.json.focus(),
-        }
-        self.set_page(Page::JsonEditor);
-        native_panel::show(
-            Anchor::Placement(Placement::ScreenCenter),
-            self.settings.json_editor_size,
         );
     }
 
@@ -774,10 +747,8 @@ impl HubApp {
             Page::Settings => false,
             // 快捷面板与 uTools 一样，点到别处就收起。
             Page::QuickActions => true,
-            Page::JsonEditor => self.settings.hide_on_blur && !self.json.pinned,
+            Page::Tool(id) => self.settings.hide_on_blur && !self.tools.pinned(id),
             Page::Ocr => self.settings.hide_on_blur && !self.ocr.pinned,
-            Page::Timestamp => self.settings.hide_on_blur && !self.timestamp.pinned,
-            Page::PasswordGenerator => self.settings.hide_on_blur && !self.password.pinned,
             // 搜索页按窗口策略决定（Floating 失焦收起，Pinned 保留，§5.2）。
             Page::Search => self
                 .search
@@ -811,7 +782,7 @@ impl HubApp {
         }
         // JSON 编辑器底部有两行工具栏、提取文字有一行，提示放在它们上面。
         let bottom = match self.page {
-            Page::JsonEditor => -96.0,
+            Page::Tool(id) => self.tools.descriptor(id).map_or(-48.0, |d| d.toast_offset),
             Page::Ocr => -64.0,
             _ => -48.0,
         };
@@ -925,12 +896,7 @@ impl HubApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let palette = self.palette(ui.ctx());
         let inner_margin = match self.page {
-            Page::Panel
-            | Page::JsonEditor
-            | Page::Timestamp
-            | Page::PasswordGenerator
-            | Page::Ocr
-            | Page::Search => egui::Margin::ZERO,
+            Page::Panel | Page::Tool(_) | Page::Ocr | Page::Search => egui::Margin::ZERO,
             Page::Settings => egui::Margin::same(style::PAD),
             Page::QuickActions => egui::Margin::same(quick_panel::MARGIN as i8),
         };
@@ -955,9 +921,7 @@ impl HubApp {
                 Page::Panel => self.panel_ui(ui),
                 Page::Settings => self.settings_ui(ui),
                 Page::QuickActions => self.quick_ui(ui),
-                Page::JsonEditor => self.json_editor_ui(ui),
-                Page::Timestamp => self.timestamp_ui(ui),
-                Page::PasswordGenerator => self.password_ui(ui),
+                Page::Tool(id) => self.tool_ui(id, ui),
                 Page::Ocr => self.ocr_ui(ui),
                 Page::Search => self.search_ui(ui),
             });

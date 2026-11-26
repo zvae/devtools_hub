@@ -136,6 +136,9 @@ impl HubApp {
                     let rect = tabs.rect.with_min_y(tabs.rect.top() - top - 8.0);
                     ui.scroll_to_rect(rect, Some(Align::Min));
                 }
+                section(ui, &palette, "工具", |ui| {
+                    self.tool_settings_section(ui, &mut settings)
+                });
                 section(ui, &palette, "列表", |ui| {
                     self.lists_section(ui, &palette)
                 });

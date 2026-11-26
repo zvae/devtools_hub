@@ -1,0 +1,23 @@
+[package]
+name = "devtools-tools"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "tools-fmt"
+path = "format.rs"
+
+[dependencies]
+devtools-module-api.workspace = true
+devtools-ui.workspace = true
+egui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
+tempfile.workspace = true

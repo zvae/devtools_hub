@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::hotkey::HotkeyAction;
 use crate::platform::panel::Placement;
-use crate::tools::json::Indent;
 
 /// 设置文件名（在数据目录下）。
 const SETTINGS_FILE: &str = "settings.json";
@@ -147,6 +146,11 @@ pub struct TabSetting {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// 工具配置独立命名空间，未知工具原样保留。
+    pub modules: std::collections::BTreeMap<String, devtools_module_api::ModuleSettings>,
+    /// 未识别的全局字段往返保留。
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
     /// 唤起面板的全局快捷键，格式如 `Cmd+Shift+V`。
     pub hotkey: String,
     /// 检查剪贴板变化的间隔（毫秒），可选值见 [`POLL_INTERVALS`]。
@@ -166,9 +170,6 @@ pub struct Settings {
     pub window_size: [f32; 2],
     /// 在其他应用中按下鼠标中键时弹出快捷面板（对应 uTools 的“鼠标按键弹出：按下鼠标中键”）。
     pub middle_click: bool,
-    /// JSON 编辑器窗口大小（逻辑像素）。
-    pub json_editor_size: [f32; 2],
-    pub json_indent: Indent,
     /// 提取文字窗口大小（逻辑像素）。
     pub ocr_size: [f32; 2],
     /// 面板底色的透明度（0–100）。窗口背景是液态玻璃 / 毛玻璃时生效，越大越能透出背后的内容。
@@ -194,6 +195,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            modules: Default::default(),
+            extra: Default::default(),
             hotkey: DEFAULT_HOTKEY.to_string(),
             poll_interval_ms: 500,
             paused: false,
@@ -206,8 +209,6 @@ impl Default for Settings {
             hide_on_blur: true,
             window_size: [380.0, 640.0],
             middle_click: true,
-            json_editor_size: [760.0, 560.0],
-            json_indent: Indent::default(),
             ocr_size: [860.0, 560.0],
             panel_transparency: 60,
             auto_check_updates: true,
@@ -223,6 +224,29 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// 旧版 JSON 字段只作为迁移输入，不覆盖已有工具命名空间。
+    pub fn migrate_tools(&mut self) {
+        // 只搬运旧配置数据，不依赖工具私有类型；默认值与校验留在工具中。
+        let indent = self.extra.remove("json_indent");
+        let size = self.extra.remove("json_editor_size");
+        if indent.is_none() && size.is_none() {
+            return;
+        }
+        self.modules
+            .entry("devtools.json".into())
+            .or_insert_with(|| {
+                let mut legacy = serde_json::json!({"version": 1, "settings": {}});
+                if let Some(indent) = indent {
+                    legacy["settings"]["indent"] = indent;
+                }
+                if let Some(size) = size {
+                    legacy["window_size"] = size;
+                }
+                // 损坏的单条记录由 ModuleSettings 只读保留，避免迁移时丢失原值。
+                serde_json::from_value(legacy).expect("工具配置解码应保留任意 JSON 值")
+            });
+    }
+
     /// 某个操作的全局快捷键。
     pub fn hotkey(&self, action: HotkeyAction) -> &str {
         match action {
@@ -257,7 +281,10 @@ impl Settings {
             }
         };
         match serde_json::from_str(&text) {
-            Ok(settings) => Ok(settings),
+            Ok(mut settings) => {
+                Settings::migrate_tools(&mut settings);
+                Ok(settings)
+            }
             Err(error) => {
                 let backup = tempfile::Builder::new()
                     .prefix("settings.invalid.")
@@ -278,7 +305,9 @@ impl Settings {
     /// 唯一临时文件 → 同步落盘 → 原子替换。
     pub fn save(&self, dir: &Path) -> Result<()> {
         let path = dir.join(SETTINGS_FILE);
-        devtools_clipboard::storage::atomic_write(&path, &serde_json::to_vec_pretty(self)?)
+        let mut snapshot = self.clone();
+        snapshot.migrate_tools();
+        devtools_clipboard::storage::atomic_write(&path, &serde_json::to_vec_pretty(&snapshot)?)
             .with_context(|| format!("保存设置失败：{}", path.display()))
     }
 
@@ -319,14 +348,70 @@ mod tests {
     #[test]
     fn save_and_load_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let settings = Settings {
+        let mut settings = Settings {
             hotkey: "Ctrl+Alt+V".into(),
             retention: Retention::Forever,
             placement: Placement::LastPosition,
             ..Settings::default()
         };
+        settings.migrate_tools();
         settings.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()).unwrap(), settings);
+    }
+
+    #[test]
+    fn legacy_tool_settings_migrate_without_overwriting_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), r#"{"json_indent":"Two","json_editor_size":[900,600],"future_global":{"keep":true},"modules":{"future.tool":{"version":9,"unknown":123},"broken.tool":{"enabled":"invalid"}}}"#).unwrap();
+        let settings = Settings::load(dir.path()).unwrap();
+        assert_eq!(settings.modules["devtools.json"].settings["indent"], "Two");
+        assert_eq!(
+            settings.modules["devtools.json"].window_size,
+            Some([900.0, 600.0])
+        );
+        settings.save(dir.path()).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(saved["modules"]["broken.tool"]["enabled"], "invalid");
+        assert_eq!(saved["modules"]["future.tool"]["unknown"], 123);
+        assert_eq!(saved["future_global"]["keep"], true);
+        assert!(saved.get("json_indent").is_none());
+        assert!(saved.get("json_editor_size").is_none());
+        let loaded = Settings::load(dir.path()).unwrap();
+        assert_eq!(loaded.modules, settings.modules);
+    }
+
+    #[test]
+    fn legacy_fields_do_not_replace_existing_tool_config() {
+        let mut settings: Settings = serde_json::from_value(serde_json::json!({
+            "json_indent": "Two",
+            "json_editor_size": [900, 600],
+            "modules": {"devtools.json": {"version": 99, "settings": {"indent": "Future"}, "future": true}}
+        })).unwrap();
+        let before = settings.modules["devtools.json"].clone();
+        settings.migrate_tools();
+        assert_eq!(settings.modules["devtools.json"], before);
+        assert!(!settings.extra.contains_key("json_indent"));
+    }
+
+    #[test]
+    fn invalid_legacy_tool_data_survives_without_resetting_global_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), r#"{"poll_interval_ms":250,"json_indent":{"unknown":true},"json_editor_size":"broken"}"#).unwrap();
+        let settings = Settings::load(dir.path()).unwrap();
+        assert_eq!(settings.poll_interval_ms, 250);
+        assert!(settings.modules["devtools.json"].raw_invalid.is_some());
+        settings.save(dir.path()).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(
+            saved["modules"]["devtools.json"]["settings"]["indent"]["unknown"],
+            true
+        );
+        assert_eq!(saved["modules"]["devtools.json"]["window_size"], "broken");
+        assert_eq!(saved["poll_interval_ms"], 250);
     }
 
     #[test]

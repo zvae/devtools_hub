@@ -15,17 +15,13 @@ use egui::{
     Sense, Stroke, TextBuffer, Ui, Vec2,
 };
 
-use super::fonts;
-use super::icons::{self, Icon};
-#[cfg(not(target_os = "macos"))]
-use super::quick_panel::paint_badge;
-use super::style::{self, Palette};
-use super::widgets::{centered_row, drag_window, icon_button};
-use super::HubApp;
-use crate::keys;
-use crate::tools::json::{self, Indent, JsonError, TokenKind};
-#[cfg(not(target_os = "macos"))]
-use crate::tools::QuickAction;
+use crate::support::drag_window;
+use crate::support::icons::Icon;
+use crate::support::style::Palette;
+use crate::support::widgets::{centered_row, icon_button};
+use crate::support::{fonts, icons, keys, style, widgets};
+mod core;
+use self::core::{self as json, Indent, JsonError, TokenKind};
 
 /// 超过这个大小不做语法高亮：egui 排版大量带格式的片段会明显变慢。
 const HIGHLIGHT_MAX_BYTES: usize = 256 * 1024;
@@ -151,7 +147,7 @@ enum EditorAction {
     Close,
 }
 
-impl HubApp {
+impl Tool {
     /// 绘制编辑器：顶部标题栏，底部过滤框与操作按钮，中间是编辑区；有过滤表达式时右侧显示过滤结果。
     pub(super) fn json_editor_ui(&mut self, ui: &mut Ui) {
         let palette = self.palette(ui.ctx());
@@ -183,7 +179,7 @@ impl HubApp {
             .frame(Frame::NONE)
             .show(ui, |ui| {
                 if !self.json.filter.trim().is_empty() {
-                    let indent = self.settings.json_indent;
+                    let indent = self.indent;
                     let result = self.json.filtered(indent);
                     egui::Panel::right("json-filter-result")
                         .resizable(true)
@@ -206,11 +202,11 @@ impl HubApp {
     ///
     /// macOS 的窗口把关闭按钮放在左上角（一个红点，与系统的红绿灯一致），其他平台放在右上角。
     fn json_header(&mut self, ui: &mut Ui, palette: &Palette, actions: &mut Vec<EditorAction>) {
-        drag_window(ui, ui.max_rect());
+        drag_window(ui, ui.max_rect(), &mut self.effects);
         centered_row(ui, 28.0, |ui| {
             #[cfg(target_os = "macos")]
             {
-                if super::widgets::traffic_light_close(ui)
+                if widgets::traffic_light_close(ui)
                     .on_hover_text(format!("关闭  {}", keys::ESCAPE))
                     .clicked()
                 {
@@ -221,7 +217,7 @@ impl HubApp {
             #[cfg(not(target_os = "macos"))]
             {
                 let (badge, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                paint_badge(ui, badge, QuickAction::JsonEditor, palette);
+                paint_icon(ui, badge, palette);
             }
             ui.label(
                 RichText::new("JSON 编辑器")
@@ -352,7 +348,7 @@ impl HubApp {
                 {
                     actions.push(EditorAction::Format);
                 }
-                let mut indent = self.settings.json_indent;
+                let mut indent = self.indent;
                 egui::ComboBox::from_id_salt("json-indent")
                     .width(74.0)
                     .selected_text(indent.label())
@@ -361,7 +357,7 @@ impl HubApp {
                             ui.selectable_value(&mut indent, option, option.label());
                         }
                     });
-                if indent != self.settings.json_indent {
+                if indent != self.indent {
                     actions.push(EditorAction::SetIndent(indent));
                 }
                 ui.add_space(6.0);
@@ -488,8 +484,8 @@ impl HubApp {
     }
 
     /// 执行编辑器上的操作。格式不对时提示错误并把光标移到出错位置。
-    fn apply_editor_actions(&mut self, ctx: &egui::Context, actions: Vec<EditorAction>) {
-        let indent = self.settings.json_indent;
+    fn apply_editor_actions(&mut self, _ctx: &egui::Context, actions: Vec<EditorAction>) {
+        let indent = self.indent;
         for action in actions {
             match action {
                 EditorAction::Format => match json::format(&self.json.text, indent) {
@@ -511,26 +507,34 @@ impl HubApp {
                     None => self.show_toast("不是转义过的文本"),
                 },
                 EditorAction::Copy => {
-                    ctx.copy_text(self.json.text.clone());
+                    self.effects.push(ToolEffect::Copy {
+                        text: self.json.text.clone(),
+                        sensitive: false,
+                    });
                     self.show_toast("已复制");
                 }
                 EditorAction::CopyMinified => match json::minify(&self.json.text) {
                     Ok(text) => {
-                        ctx.copy_text(text);
+                        self.effects.push(ToolEffect::Copy {
+                            text,
+                            sensitive: false,
+                        });
                         self.show_toast("已复制压缩后的 JSON");
                     }
                     Err(err) => self.json_error("无法压缩", &err),
                 },
                 EditorAction::CopyEscaped => match json::escape(&self.json.text) {
                     Ok(text) => {
-                        ctx.copy_text(text);
+                        self.effects.push(ToolEffect::Copy {
+                            text,
+                            sensitive: false,
+                        });
                         self.show_toast("已复制压缩、转义后的 JSON");
                     }
                     Err(err) => self.json_error("无法转义", &err),
                 },
                 EditorAction::SetIndent(new) => {
-                    self.settings.json_indent = new;
-                    self.persist_settings();
+                    self.indent = new;
                     if let Ok(text) = json::format(&self.json.text, new) {
                         self.json.set_text(text);
                     }
@@ -708,3 +712,123 @@ fn layout_job(text: &str, dark: bool, font: &FontId) -> LayoutJob {
     }
     job
 }
+
+use devtools_module_api::{ModuleDescriptor, ToolEffect, ToolModule};
+use serde_json::Value;
+
+struct Tool {
+    json: JsonEditorView,
+    indent: Indent,
+    palette: style::Palette,
+    effects: Vec<ToolEffect>,
+}
+crate::support::tool_helpers!(Tool);
+
+fn create(config: &Value) -> Box<dyn ToolModule> {
+    Box::new(Tool {
+        json: JsonEditorView::default(),
+        indent: config
+            .get("indent")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        palette: style::Palette::new(true),
+        effects: Vec::new(),
+    })
+}
+
+fn paint_icon(ui: &Ui, rect: Rect, _palette: &style::Palette) {
+    ui.painter().rect_filled(
+        rect,
+        style::SMALL_RADIUS,
+        Color32::from_rgb(0x3a, 0x3d, 0x46),
+    );
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "{ }",
+        FontId::monospace(rect.height() * 0.42),
+        Color32::WHITE,
+    );
+}
+
+pub(super) fn descriptor() -> ModuleDescriptor {
+    ModuleDescriptor {
+        id: "devtools.json",
+        name: "JSON 编辑器",
+        description: "格式化、压缩、转义、路径过滤",
+        order: 10,
+        size: [760.0, 560.0],
+        toast_offset: -96.0,
+        matches: |input| {
+            let _ = input;
+            match input {
+                devtools_module_api::Selection::Text(text) => json::looks_like_json(text),
+                devtools_module_api::Selection::Files(paths) => {
+                    matches!(paths.as_slice(), [path] if std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("json")))
+                }
+            }
+        },
+        paint_icon,
+        create,
+        validate_config: |config| {
+            config.is_object()
+                && config
+                    .get("indent")
+                    .is_none_or(|v| serde_json::from_value::<Indent>(v.clone()).is_ok())
+        },
+        default_hotkey: "",
+    }
+}
+
+impl ToolModule for Tool {
+    fn activate(&mut self, input: Option<devtools_module_api::Selection>) -> Vec<ToolEffect> {
+        match input {
+            Some(devtools_module_api::Selection::Text(text)) => self.json.load(&text, self.indent),
+            Some(devtools_module_api::Selection::Files(paths)) => {
+                if let [path] = paths.as_slice() {
+                    use std::io::Read;
+                    let result = (|| -> std::io::Result<String> {
+                        let mut bytes = Vec::new();
+                        std::fs::File::open(path)?
+                            .take(20 * 1024 * 1024 + 1)
+                            .read_to_end(&mut bytes)?;
+                        if bytes.len() > 20 * 1024 * 1024 {
+                            return Err(std::io::Error::other("文件太大，最多支持 20 MiB"));
+                        }
+                        String::from_utf8(bytes).map_err(std::io::Error::other)
+                    })();
+                    match result {
+                        Ok(text) => self.json.load(&text, self.indent),
+                        Err(error) => self.show_toast(format!("读取文件失败：{error}")),
+                    }
+                }
+                self.json.focus();
+            }
+            None => self.json.focus(),
+        }
+        std::mem::take(&mut self.effects)
+    }
+    fn render(&mut self, ui: &mut Ui, palette: &style::Palette) -> Vec<ToolEffect> {
+        self.palette = *palette;
+        self.json_editor_ui(ui);
+        std::mem::take(&mut self.effects)
+    }
+    fn pinned(&self) -> bool {
+        self.json.pinned
+    }
+    fn config(&self) -> Value {
+        serde_json::json!({"indent": self.indent})
+    }
+    fn settings_ui(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label("默认缩进");
+            for value in Indent::ALL {
+                ui.selectable_value(&mut self.indent, value, value.label());
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests;

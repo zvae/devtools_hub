@@ -103,4 +103,5 @@ fn uniform_index(byte: u8, count: usize) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[path = "model_tests.rs"]
 mod tests;

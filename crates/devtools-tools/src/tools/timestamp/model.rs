@@ -1,6 +1,6 @@
 //! 时间戳与日期双向转换：复用 chrono，全部离线处理，不依赖系统时区。
 //! 默认采用固定 UTC+08:00（北京时间）；显式偏移的 ISO 8601 输入尊重其自身时区。
-//! 与 devtools-json 一样，不依赖界面与平台，可单独运行转换与边界测试。
+//! 工具内部的纯转换逻辑，不依赖界面与平台。
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 
@@ -110,4 +110,5 @@ pub fn matches(text: &str) -> bool {
 }
 
 #[cfg(test)]
+#[path = "model_tests.rs"]
 mod tests;

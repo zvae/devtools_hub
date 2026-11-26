@@ -21,33 +21,17 @@ const POLL: Duration = Duration::from_millis(10);
 /// 序号变化后再等一会儿：有的应用分几次写入剪贴板（先清空再写入各种格式）。
 const SETTLE: Duration = Duration::from_millis(30);
 
-/// 选中的内容。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Selection {
-    Text(String),
-    /// 在访达 / 资源管理器中选中的文件。
-    Files(Vec<String>),
-}
+pub use devtools_module_api::Selection;
 
-impl Selection {
-    /// 从复制得到的剪贴板内容中取出选中的文件或文字；都没有时返回 `None`。
-    fn from_snapshot(snapshot: &Snapshot) -> Option<Self> {
-        let analysis = uti::analyze(snapshot);
-        if !analysis.file_paths.is_empty() {
-            return Some(Selection::Files(analysis.file_paths));
-        }
-        uti::plain_text(snapshot)
-            .filter(|text| !text.trim().is_empty())
-            .map(Selection::Text)
+/// 从复制得到的剪贴板内容中取出选中的文件或文字；都没有时返回 `None`。
+fn from_snapshot(snapshot: &Snapshot) -> Option<Selection> {
+    let analysis = uti::analyze(snapshot);
+    if !analysis.file_paths.is_empty() {
+        return Some(Selection::Files(analysis.file_paths));
     }
-
-    /// 面板标题，与 uTools 的写法一致：“选中的文本 389 个”。
-    pub fn label(&self) -> String {
-        match self {
-            Selection::Text(text) => format!("选中的文本 {} 个", text.chars().count()),
-            Selection::Files(paths) => format!("选中的文件 {} 个", paths.len()),
-        }
-    }
+    uti::plain_text(snapshot)
+        .filter(|text| !text.trim().is_empty())
+        .map(Selection::Text)
 }
 
 /// 模拟复制并读出选中的内容，之后恢复剪贴板。`send_copy` 负责发送复制快捷键。
@@ -67,7 +51,7 @@ pub fn capture(
             tracing::debug!("模拟复制后剪贴板没有变化：没有选中内容");
             return before;
         }
-        selection = Selection::from_snapshot(&pasteboard.read());
+        selection = from_snapshot(&pasteboard.read());
         pasteboard.write(&saved)
     });
     selection
