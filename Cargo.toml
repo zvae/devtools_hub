@@ -16,7 +16,7 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/zvae/devtools_hub"
 rust-version = "1.95"
-version = "0.2.1"
+version = "0.2.2"
 
 [workspace.dependencies]
 devtools-module-api = { path = "crates/devtools-module-api" }

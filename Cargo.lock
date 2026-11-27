@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-clipboard"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "image",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-hub"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-module-api"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "devtools-ui",
  "egui",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-module-runtime"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "devtools-module-api",
  "devtools-ui",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-search"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-search-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "globset",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-tools"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "devtools-module-api",
@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "devtools-ui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "eframe",
  "egui",
