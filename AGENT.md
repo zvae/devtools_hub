@@ -17,7 +17,9 @@ DevTools Hub：剪贴板历史管理器（参照 PasteNow），附带鼠标中�
 ```
 crates/
 ├── devtools-clipboard/   平台无关：剪贴板数据模型、UTI、隐私规则、SQLite 存储
-├── devtools-json/        平台无关：JSON 词法/解析/格式化/路径过滤（只依赖 serde）
+├── devtools-tools/       自动发现工具目录；JSON/core、密码/model 与时间戳/model 各自包含算法和测试
+├── devtools-module-api/  工具描述符、输入、实例协议与配置
+├── devtools-module-runtime/ 注册校验、惰性实例与配置合并
 ├── devtools-ui/          平台无关：基础界面样式（字体、矢量图标、配色/圆角规范、通用小控件、栏的液态玻璃背景；依赖 egui / eframe）
 └── devtools-hub/         应用本体：monitor、中键面板、截屏贴图 snip/、platform/、ui/
 docs/                     实现分析与排查记录（修改对应功能前先读相关文档）
@@ -30,9 +32,10 @@ scripts/                  bundle-macos.sh、create-signing-cert.sh、generate-ic
 ```bash
 cargo check -p devtools-hub                              # 快速类型检查
 cargo test --workspace                                   # 全部单元/交互测试
-cargo test -p devtools-json                              # 只跑 JSON 模块（纯 Rust）
+cargo test -p devtools-tools tool_json::core             # 只跑 JSON 工具核心测试
 cargo check -p devtools-hub --features windows-typecheck # macOS 上对 Windows 实现做类型检查
-cargo test -p devtools-hub snapshot -- --ignored         # 离屏渲染快照（需 GPU，输出 target/ui-snapshots/）
+cargo test -p devtools-hub snapshot -- --ignored         # 宿主离屏快照（需 GPU）
+cargo test -p devtools-tools snapshot -- --ignored       # 工具离屏快照（输出 target/ui-snapshots/）
 cargo run -p devtools-hub --release                      # 运行
 cargo run -p devtools-hub -- --show --data-dir /tmp/dth-dev  # 开发调试（隔离数据目录）
 zsh scripts/bundle-macos.sh                              # 打包 macOS .app

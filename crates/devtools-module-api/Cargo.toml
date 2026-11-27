@@ -1,0 +1,12 @@
+[package]
+name = "devtools-module-api"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+egui.workspace = true
+devtools-ui.workspace = true
+serde.workspace = true
+serde_json.workspace = true

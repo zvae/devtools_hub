@@ -6,13 +6,13 @@ use egui::{
     Stroke, Ui, Vec2,
 };
 
-use super::icons::Icon;
-use super::widgets::{centered_row, drag_window, icon_button};
-use super::{style, HubApp, Page};
-use crate::platform::panel::{self as native_panel, Anchor};
-use crate::platform::Placement;
-use crate::selection::Selection;
-use crate::tools::timestamp::{self, Unit};
+use crate::support::drag_window;
+use crate::support::icons::Icon;
+use crate::support::widgets::{centered_row, icon_button};
+use crate::support::{icons, style, widgets};
+use devtools_module_api::Selection;
+mod model;
+use self::model::{self as timestamp, Unit};
 
 pub(super) struct TimestampView {
     pub pinned: bool,
@@ -57,26 +57,18 @@ impl TimestampView {
     }
 }
 
-impl HubApp {
-    pub(super) fn open_timestamp(&mut self, selection: Option<Selection>) {
-        if let Some(Selection::Text(text)) = selection {
-            self.timestamp.load(&text);
-        }
-        self.set_page(Page::Timestamp);
-        native_panel::show(Anchor::Placement(Placement::ScreenCenter), [680.0, 570.0]);
-    }
-
+impl Tool {
     pub(super) fn timestamp_ui(&mut self, ui: &mut Ui) {
         let palette = self.palette(ui.ctx());
         let mut close = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         Frame::NONE
             .inner_margin(Margin::symmetric(style::PAD, 12))
             .show(ui, |ui| {
-                drag_window(ui, ui.max_rect());
+                drag_window(ui, ui.max_rect(), &mut self.effects);
                 centered_row(ui, 28.0, |ui| {
                     #[cfg(target_os = "macos")]
                     {
-                        close |= super::widgets::traffic_light_close(ui).clicked();
+                        close |= widgets::traffic_light_close(ui).clicked();
                         ui.add_space(4.0);
                     }
                     ui.label(
@@ -201,7 +193,10 @@ impl HubApp {
                                 view.input = value.clone();
                                 view.input_unit = view.clock_unit;
                                 view.date_to_timestamp = false;
-                                ui.ctx().copy_text(value.clone());
+                                self.effects.push(ToolEffect::Copy {
+                                    text: value.clone(),
+                                    sensitive: false,
+                                });
                                 copied = true;
                             }
                             let units = Rect::from_min_max(
@@ -338,7 +333,7 @@ impl HubApp {
                                 Vec2::new(ui.available_width(), 16.0),
                                 Sense::hover(),
                             );
-                            super::icons::paint_centered(
+                            icons::paint_centered(
                                 ui.painter(),
                                 Rect::from_center_size(
                                     hint.left_center() + Vec2::new(6.0, 0.0),
@@ -437,7 +432,10 @@ impl HubApp {
                                         )
                                         .clicked()
                                     {
-                                        ui.ctx().copy_text(text);
+                                        self.effects.push(ToolEffect::Copy {
+                                            text,
+                                            sensitive: false,
+                                        });
                                         copied = true;
                                     }
                                 }
@@ -586,3 +584,75 @@ fn help_section(
             });
     });
 }
+
+use devtools_module_api::{ModuleDescriptor, ToolEffect, ToolModule};
+use serde_json::Value;
+
+struct Tool {
+    timestamp: TimestampView,
+    palette: style::Palette,
+    effects: Vec<ToolEffect>,
+}
+crate::support::tool_helpers!(Tool);
+
+fn create(_config: &Value) -> Box<dyn ToolModule> {
+    Box::new(Tool {
+        timestamp: TimestampView::default(),
+        palette: style::Palette::new(true),
+        effects: Vec::new(),
+    })
+}
+
+fn paint_icon(ui: &Ui, rect: Rect, _palette: &style::Palette) {
+    ui.painter().rect_filled(
+        rect,
+        style::SMALL_RADIUS,
+        Color32::from_rgb(0x20, 0x92, 0x86),
+    );
+    icons::paint_centered(
+        ui.painter(),
+        rect,
+        rect.height() * 0.62,
+        Icon::Clock,
+        Color32::WHITE,
+    );
+}
+
+pub(super) fn descriptor() -> ModuleDescriptor {
+    ModuleDescriptor {
+        id: "devtools.timestamp",
+        name: "时间戳转换",
+        description: "秒、毫秒与北京时间互转",
+        order: 20,
+        size: [680.0, 570.0],
+        toast_offset: -48.0,
+        matches: |input| {
+            let _ = input;
+            matches!(input, devtools_module_api::Selection::Text(text) if timestamp::matches(text))
+        },
+        paint_icon,
+        create,
+        validate_config: |config| config.is_object(),
+        default_hotkey: "",
+    }
+}
+
+impl ToolModule for Tool {
+    fn activate(&mut self, input: Option<devtools_module_api::Selection>) -> Vec<ToolEffect> {
+        if let Some(Selection::Text(text)) = input {
+            self.timestamp.load(&text);
+        }
+        std::mem::take(&mut self.effects)
+    }
+    fn render(&mut self, ui: &mut Ui, palette: &style::Palette) -> Vec<ToolEffect> {
+        self.palette = *palette;
+        self.timestamp_ui(ui);
+        std::mem::take(&mut self.effects)
+    }
+    fn pinned(&self) -> bool {
+        self.timestamp.pinned
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -37,8 +37,6 @@ pub struct QuickPanelView {
     pub actions: Vec<QuickAction>,
     /// 高亮的功能在 `actions` 中的下标。
     pub selected: usize,
-    /// 文件搜索是否启用（决定是否列出 FileSearch）。
-    search_enabled: bool,
 }
 
 impl QuickPanelView {
@@ -47,14 +45,16 @@ impl QuickPanelView {
         self.actions = tools::actions_for(selection.as_ref(), search_enabled);
         self.selection = selection;
         self.selected = 0;
-        self.search_enabled = search_enabled;
     }
 
     /// 选中了内容，但没有功能能处理它。
     fn unmatched(&self) -> bool {
-        self.selection
-            .as_ref()
-            .is_some_and(|selection| !tools::has_match(selection, self.search_enabled))
+        self.selection.as_ref().is_some_and(|_selection| {
+            !self
+                .actions
+                .iter()
+                .any(|action| matches!(action, QuickAction::Tool(_) | QuickAction::FileSearch))
+        })
     }
 
     /// 窗口大小随功能个数变化。
@@ -63,7 +63,7 @@ impl QuickPanelView {
         let rows = self.actions.len() as f32;
         [
             WIDTH,
-            MARGIN * 2.0 + HEADER_HEIGHT + hint + rows * (ROW_HEIGHT + ROW_GAP) + 4.0,
+            (MARGIN * 2.0 + HEADER_HEIGHT + hint + rows * (ROW_HEIGHT + ROW_GAP) + 4.0).min(520.0),
         ]
     }
 }
@@ -75,6 +75,7 @@ impl HubApp {
         let count = self.quick.actions.len();
         let mut run = None;
         let mut close = false;
+        let previous_selected = self.quick.selected;
         ui.input_mut(|input| {
             if count > 0 {
                 if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
@@ -108,25 +109,35 @@ impl HubApp {
             );
         }
         ui.spacing_mut().item_spacing.y = ROW_GAP;
-        for index in 0..count {
-            let action = self.quick.actions[index];
-            let (rect, response) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
-            if response.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
-                self.quick.selected = index;
-            }
-            if response.clicked() {
-                run = Some(index);
-            }
-            action_row(
-                ui,
-                rect,
-                action,
-                index == self.quick.selected,
-                index,
-                &palette,
-            );
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("quick-actions-list")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for index in 0..count {
+                    let action = self.quick.actions[index];
+                    let (rect, response) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), ROW_HEIGHT),
+                        Sense::click(),
+                    );
+                    if response.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
+                        self.quick.selected = index;
+                    }
+                    if response.clicked() {
+                        run = Some(index);
+                    }
+                    if index == self.quick.selected && previous_selected != self.quick.selected {
+                        response.scroll_to_me(None);
+                    }
+                    action_row(
+                        ui,
+                        rect,
+                        action,
+                        index == self.quick.selected,
+                        index,
+                        &palette,
+                    );
+                }
+            });
 
         if let Some(action) = run.and_then(|index| self.quick.actions.get(index).copied()) {
             self.run_quick_action(action);
@@ -200,15 +211,10 @@ impl HubApp {
     /// 执行快捷面板中选中的功能。
     pub(super) fn run_quick_action(&mut self, action: QuickAction) {
         match action {
-            QuickAction::JsonEditor => {
+            QuickAction::Tool(id) => {
                 let selection = self.quick.selection.take();
-                self.open_json_editor(selection);
+                self.open_tool(id, selection);
             }
-            QuickAction::Timestamp => {
-                let selection = self.quick.selection.take();
-                self.open_timestamp(selection);
-            }
-            QuickAction::PasswordGenerator => self.open_password_generator(),
             QuickAction::ClipboardHistory => self.open_clipboard_panel(),
             QuickAction::FileSearch => {
                 let entry = match self.quick.selection.take() {
@@ -297,19 +303,10 @@ fn action_row(
 pub(super) fn paint_badge(ui: &Ui, rect: Rect, action: QuickAction, palette: &Palette) {
     let painter = ui.painter();
     match action {
-        QuickAction::JsonEditor => {
-            painter.rect_filled(
-                rect,
-                style::SMALL_RADIUS,
-                Color32::from_rgb(0x3a, 0x3d, 0x46),
-            );
-            painter.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                "{ }",
-                FontId::monospace(rect.height() * 0.42),
-                Color32::WHITE,
-            );
+        QuickAction::Tool(id) => {
+            if let Some(descriptor) = devtools_tools::descriptor(id) {
+                (descriptor.paint_icon)(ui, rect, palette);
+            }
         }
         QuickAction::ClipboardHistory => {
             painter.rect_filled(rect, style::SMALL_RADIUS, palette.accent);
@@ -320,36 +317,6 @@ pub(super) fn paint_badge(ui: &Ui, rect: Rect, action: QuickAction, palette: &Pa
                 Icon::Document,
                 Color32::WHITE,
             );
-        }
-        QuickAction::Timestamp => {
-            painter.rect_filled(
-                rect,
-                style::SMALL_RADIUS,
-                Color32::from_rgb(0x20, 0x92, 0x86),
-            );
-            icons::paint_centered(
-                painter,
-                rect,
-                rect.height() * 0.62,
-                Icon::Clock,
-                Color32::WHITE,
-            );
-        }
-        QuickAction::PasswordGenerator => {
-            painter.rect_filled(
-                rect,
-                style::SMALL_RADIUS,
-                Color32::from_rgb(0x66, 0x5b, 0xc8),
-            );
-            // 字体的星号按行框居中时，字形仍受基线影响；改用三条中心对称的矢量线。
-            let center = rect.center();
-            let radius = rect.height() * 0.23;
-            let stroke = Stroke::new(rect.height() * 0.065, Color32::WHITE);
-            for angle in [30.0_f32, 90.0, 150.0] {
-                let angle = angle.to_radians();
-                let offset = Vec2::new(angle.cos(), angle.sin()) * radius;
-                painter.line_segment([center - offset, center + offset], stroke);
-            }
         }
         QuickAction::FileSearch => {
             painter.rect_filled(

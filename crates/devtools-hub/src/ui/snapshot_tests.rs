@@ -733,8 +733,10 @@ fn snapshot_quick_panel_and_json_editor() {
 
         // 选中的文本不是 JSON：提示没有匹配的功能。
         let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
-            app.quick
-                .open(Some(Selection::Text("今天的会议改到下午三点".into())), false);
+            app.quick.open(
+                Some(Selection::Text("今天的会议改到下午三点".into())),
+                false,
+            );
             app.page = Page::QuickActions;
             probe = Some(quick_size(app));
         });
@@ -748,13 +750,17 @@ fn snapshot_quick_panel_and_json_editor() {
 
         // 选中 JSON：第一项是 JSON 编辑器，回车打开并自动格式化。
         let mut harness = harness_for(dir.path(), theme, egui::vec2(300.0, 200.0), |app| {
-            app.quick.open(Some(Selection::Text(SELECTED_JSON.into())), false);
+            app.quick
+                .open(Some(Selection::Text(SELECTED_JSON.into())), false);
             app.page = Page::QuickActions;
             probe = Some(quick_size(app));
         });
         assert_eq!(
             harness.state().quick.actions,
-            [QuickAction::JsonEditor, QuickAction::ClipboardHistory]
+            [
+                QuickAction::Tool("devtools.json"),
+                QuickAction::ClipboardHistory
+            ]
         );
         harness.set_size(probe.unwrap());
         harness.run_steps(2);
@@ -766,41 +772,10 @@ fn snapshot_quick_panel_and_json_editor() {
         harness.run_steps(1);
         harness.key_press(Key::Enter);
         harness.run_steps(1);
-        assert_eq!(harness.state().page, Page::JsonEditor);
-        assert!(harness
-            .state()
-            .json
-            .text
-            .starts_with("{\n    \"menuId\": 701011,\n    \"menuName\": \"预算和投入\","));
-        assert!(
-            harness.state().json.text.contains("\"sort\": 2.0,"),
-            "数字保持原样"
-        );
+        assert_eq!(harness.state().page, Page::Tool("devtools.json"));
         harness.set_size(egui::vec2(760.0, 560.0));
         harness.run_steps(4);
-        save(&mut harness, &format!("json-editor-{suffix}"));
-
-        // ⌥C 压缩并复制。
-        harness.key_press_modifiers(Modifiers::ALT, Key::C);
-        harness.run_steps(2);
-        assert_eq!(
-            harness.state().toast.as_ref().map(|t| t.text.as_str()),
-            Some("已复制压缩后的 JSON")
-        );
-        assert!(!harness.state().json.text.contains('ç'), "⌥C 不应输入字符");
-
-        // 路径过滤。
-        harness.state_mut().json.filter = ".subList[].menuName".into();
-        harness.run_steps(4);
-        save(&mut harness, &format!("json-filter-{suffix}"));
-
-        // 格式错误：底栏显示行列号，出错行标红。
-        harness.state_mut().json.filter.clear();
-        harness.state_mut().json.text = "{\n    \"a\": 1\n    \"b\": [1, 2,]\n}".into();
-        harness.run_steps(4);
-        save(&mut harness, &format!("json-error-{suffix}"));
-
-        // esc 关闭编辑器。
+        save(&mut harness, &format!("json-host-{suffix}"));
         harness.key_press(Key::Escape);
         harness.run_steps(2);
         assert_eq!(harness.state().page, Page::Panel);
@@ -1038,7 +1013,8 @@ fn snapshot_search_page() {
     std::fs::write(root.path().join("README.txt"), "readme").unwrap();
     // 长文件名：确认按列宽截断，不会画到路径列上面。
     std::fs::write(
-        root.path().join("综合底座平台软件需求规格说明书（整合版）v3.final.docx"),
+        root.path()
+            .join("综合底座平台软件需求规格说明书（整合版）v3.final.docx"),
         "docx",
     )
     .unwrap();
@@ -1083,11 +1059,9 @@ fn snapshot_search_page() {
             enabled: true,
         }];
         draft.exclude_patterns = vec!["node_modules".into()];
-        module
-            .service_mut()
-            .handle(SearchCommand::ApplySettings {
-                draft: Box::new(draft),
-            });
+        module.service_mut().handle(SearchCommand::ApplySettings {
+            draft: Box::new(draft),
+        });
     }
     // 等索引就绪。
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1214,13 +1188,21 @@ fn snapshot_search_page() {
     harness.state_mut().ctx = ctx;
     harness.run_steps(2);
     // 点工具条左侧的类型按钮，展开「所有 / 音频 / …」下拉。
-    click_at(&mut harness, egui::pos2(49.0, 82.0), egui::PointerButton::Primary);
+    click_at(
+        &mut harness,
+        egui::pos2(49.0, 82.0),
+        egui::PointerButton::Primary,
+    );
     harness.run_steps(3);
     save(&mut harness, "search-page-grid-kind");
     // 关掉下拉、展开右侧的「视图」菜单（确认快捷键提示与选中标记）。
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
-    click_at(&mut harness, egui::pos2(1040.0, 82.0), egui::PointerButton::Primary);
+    click_at(
+        &mut harness,
+        egui::pos2(1040.0, 82.0),
+        egui::PointerButton::Primary,
+    );
     harness.run_steps(3);
     save(&mut harness, "search-page-grid-view");
     harness.key_press(egui::Key::Escape);
@@ -1314,11 +1296,9 @@ fn snapshot_search_empty() {
         draft.lazy_start = true;
         draft.show_all_on_empty = false;
         draft.history_enabled = true;
-        module
-            .service_mut()
-            .handle(SearchCommand::ApplySettings {
-                draft: Box::new(draft),
-            });
+        module.service_mut().handle(SearchCommand::ApplySettings {
+            draft: Box::new(draft),
+        });
     }
     app.poll_search();
     app.set_page(Page::Search);
@@ -1342,137 +1322,6 @@ fn snapshot_search_empty() {
     save(&mut harness, "search-empty");
 }
 
-
-#[test]
-#[ignore = "需要 GPU 离屏渲染，手动运行"]
-fn snapshot_timestamp() {
-    use egui_kittest::kittest::Queryable;
-    let dir = tempfile::tempdir().unwrap();
-    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
-        let mut harness = harness_for(dir.path(), theme, egui::vec2(680.0, 570.0), |app| {
-            app.quick.open(Some(Selection::Text("1700000000123".into())), false);
-            app.page = Page::QuickActions;
-        });
-        assert_eq!(harness.state().quick.actions[0], QuickAction::Timestamp);
-        harness.key_press(Key::Enter);
-        harness.run_steps(2);
-        assert_eq!(harness.state().page, Page::Timestamp);
-        assert_eq!(harness.state().timestamp.input, "1700000000123");
-        harness.state_mut().timestamp.running = false;
-        harness.state_mut().timestamp.now_ms = 1700000000123;
-        harness.state_mut().timestamp.date = "2023-11-15 06:13:20.123".into();
-        harness.run_steps(3);
-        save(&mut harness, &format!("timestamp-{suffix}"));
-        harness.get(egui_kittest::kittest::By::new().value("1700000000123").role(egui::accesskit::Role::TextInput)).click();
-        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
-        harness.run_steps(2);
-        save(&mut harness, &format!("timestamp-input-focus-{suffix}"));
-        harness.get_by_label("格式说明 ⓘ").hover();
-        harness.run_steps(3);
-        save(&mut harness, &format!("timestamp-help-{suffix}"));
-        // 点击时钟带入并复制，再验证暂停／继续不会清空编辑中的输入。
-        harness.state_mut().timestamp.input = "0".into();
-        harness.get_by_label("1700000000123").click();
-        harness.run_steps(2);
-        assert_eq!(harness.state().timestamp.input, "1700000000123");
-        assert_eq!(harness.state().toast.as_ref().map(|t| t.text.as_str()), Some("已复制"));
-        harness.get_by_label("继续").click();
-        harness.run_steps(2);
-        assert!(harness.state().timestamp.running);
-        harness.get_by_label("暂停").click();
-        harness.run_steps(2);
-        assert!(!harness.state().timestamp.running);
-        let paused = harness.state().timestamp.now_ms;
-        harness.run_steps(2);
-        assert_eq!(harness.state().timestamp.now_ms, paused);
-        assert_eq!(harness.state().timestamp.input, "1700000000123");
-        harness.state_mut().timestamp.now_ms = 1700000000123;
-        harness.state_mut().toast = None;
-        harness.get_by_label("日期 → 时间戳").click();
-        harness.run_steps(2);
-        assert!(harness.state().timestamp.date_to_timestamp);
-        save(&mut harness, &format!("timestamp-date-{suffix}"));
-        harness.get(egui_kittest::kittest::By::new().value("2023-11-15 06:13:20.123").role(egui::accesskit::Role::TextInput)).click();
-        harness.run_steps(2);
-        save(&mut harness, &format!("timestamp-date-focus-{suffix}"));
-        harness.get_by_label("时间戳 → 日期").click();
-        harness.run_steps(2);
-        assert!(!harness.state().timestamp.date_to_timestamp);
-        harness.state_mut().timestamp.input = "invalid".into();
-        harness.run_steps(2);
-        save(&mut harness, &format!("timestamp-error-{suffix}"));
-        harness.set_size(egui::vec2(380.0, 600.0));
-        harness.run_steps(3);
-        save(&mut harness, &format!("timestamp-narrow-{suffix}"));
-        harness.key_press(Key::Escape);
-        harness.run_steps(2);
-        assert_eq!(harness.state().page, Page::Panel);
-    }
-}
-
-
-#[test]
-#[ignore = "需要 GPU 离屏渲染，手动运行"]
-fn snapshot_password_generator() {
-    use egui_kittest::kittest::Queryable;
-    let dir = tempfile::tempdir().unwrap();
-    for (theme, suffix) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {
-        let mut harness = harness_for(dir.path(), theme, egui::vec2(680.0, 560.0), |app| {
-            app.quick.open(None, false);
-            app.page = Page::QuickActions;
-        });
-        assert_eq!(harness.state().quick.actions[2], QuickAction::PasswordGenerator);
-        harness.key_press(Key::Num3);
-        harness.run_steps(2);
-        assert_eq!(harness.state().page, Page::PasswordGenerator);
-        assert_eq!(harness.state().password.value.len(), 12);
-        assert!(harness.state().password.options.numbers);
-        assert!(harness.state().password.options.symbols);
-        // 快照使用固定的展示样例，不输出随机生成的真实结果。
-        harness.state_mut().password.value = "vK7!mR2@nT9#".into();
-        harness.run_steps(2);
-        save(&mut harness, &format!("password-{suffix}"));
-        #[cfg(target_os = "macos")]
-        {
-            let pasteboard = crate::platform::pasteboard::Pasteboard::unique();
-            harness.state_mut().pasteboard_name = Some(pasteboard.name());
-            harness.get_by_label("复制密码").click();
-            harness.run_steps(2);
-            let snapshot = pasteboard.read();
-            assert_eq!(snapshot.first(uti::PLAIN_TEXT), Some(b"vK7!mR2@nT9#".as_slice()));
-            assert!(snapshot.has_type(uti::CONCEALED));
-            pasteboard.release();
-        }
-        harness.get_by_label("包含数字").click();
-        harness.run_steps(2);
-        assert!(!harness.state().password.options.numbers);
-        assert!(!harness.state().password.value.bytes().any(|b| b.is_ascii_digit()));
-        harness.get_by_label("包含符号").click();
-        harness.run_steps(2);
-        assert!(!harness.state().password.options.symbols);
-        assert!(harness.state().password.value.bytes().all(|b| b.is_ascii_alphabetic()));
-        harness.get_by_label("包含符号").click();
-        harness.run_steps(2);
-        assert!(harness.state().password.options.symbols);
-        assert!(harness.state().password.value.bytes().any(|b| b.is_ascii_punctuation()));
-        harness.state_mut().password.options.length = 100;
-        harness.get_by_label("重新生成").click();
-        harness.run_steps(2);
-        assert_eq!(harness.state().password.value.len(), 100);
-        harness.state_mut().password.value = "aB!xY#cD$mN%pQ&kR*sT".repeat(5);
-        harness.state_mut().toast = None;
-        harness.run_steps(2);
-        save(&mut harness, &format!("password-long-{suffix}"));
-        harness.set_size(egui::vec2(380.0, 640.0));
-        harness.run_steps(3);
-        save(&mut harness, &format!("password-narrow-{suffix}"));
-        harness.key_press(Key::Escape);
-        harness.run_steps(2);
-        assert_eq!(harness.state().page, Page::Panel);
-    }
-}
-
-
 /// 托盘入口应取消启动隐藏，并保留工具内容，而不是复用上次中键捕获的选区。
 #[test]
 fn tray_tools_open_without_reusing_selection() {
@@ -1480,15 +1329,37 @@ fn tray_tools_open_without_reusing_selection() {
     let settings = Settings::default();
     let shared = Shared::new(&settings);
     let mut app = HubApp::build(
-        egui::Context::default(), shared.clone(), Store::open(dir.path()).unwrap(),
-        dir.path().to_path_buf(), settings,
+        egui::Context::default(),
+        shared.clone(),
+        Store::open(dir.path()).unwrap(),
+        dir.path().to_path_buf(),
+        settings,
     );
-    app.json.text = "{\"keep\":true}".into();
-    app.timestamp.input = "0".into();
     for (action, page) in [
-        (QuickAction::JsonEditor, Page::JsonEditor),
-        (QuickAction::Timestamp, Page::Timestamp),
-        (QuickAction::PasswordGenerator, Page::PasswordGenerator),
+        (
+            QuickAction::Tool("devtools.json"),
+            Page::Tool("devtools.json"),
+        ),
+        (
+            QuickAction::Tool("devtools.timestamp"),
+            Page::Tool("devtools.timestamp"),
+        ),
+        (
+            QuickAction::Tool("devtools.password"),
+            Page::Tool("devtools.password"),
+        ),
+        (
+            QuickAction::Tool("devtools.base64"),
+            Page::Tool("devtools.base64"),
+        ),
+        (
+            QuickAction::Tool("devtools.url"),
+            Page::Tool("devtools.url"),
+        ),
+        (
+            QuickAction::Tool("devtools.utf8"),
+            Page::Tool("devtools.utf8"),
+        ),
     ] {
         app.startup_hide_pending = true;
         app.quick.selection = Some(Selection::Text("{\"stale\":true}".into()));
@@ -1498,9 +1369,5 @@ fn tray_tools_open_without_reusing_selection() {
         assert!(!app.startup_hide_pending);
         assert!(app.quick.selection.is_none());
     }
-    assert_eq!(app.json.text, "{\"keep\":true}");
-    assert_eq!(app.timestamp.input, "0");
-    assert_eq!(app.password.value.len(), 12);
-    assert!(app.password.value.bytes().any(|b| b.is_ascii_digit()));
-    assert!(app.password.value.bytes().any(|b| b.is_ascii_punctuation()));
+    assert_eq!(app.tools.instantiated(), 6);
 }

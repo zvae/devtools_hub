@@ -36,6 +36,7 @@ const SNIP_DELAY: Duration = Duration::from_millis(250);
 pub struct Tray {
     _icon: TrayIcon,
     menu: Menu,
+    tool_items: Vec<(&'static str, MenuItem)>,
     pause: CheckMenuItem,
     show: MenuItem,
     search: MenuItem,
@@ -61,20 +62,14 @@ impl Tray {
             settings.search_enabled,
             None,
         );
-        let tools = Submenu::with_items(
-            "工具",
-            true,
-            &[
-                &MenuItem::with_id("tool-json", QuickAction::JsonEditor.label(), true, None),
-                &MenuItem::with_id("tool-timestamp", QuickAction::Timestamp.label(), true, None),
-                &MenuItem::with_id(
-                    "tool-password",
-                    QuickAction::PasswordGenerator.label(),
-                    true,
-                    None,
-                ),
-            ],
-        )?;
+        let tools = Submenu::new("工具", true);
+        let mut tool_items = Vec::new();
+        for d in devtools_tools::registrations() {
+            let enabled = settings.modules.get(d.id).is_none_or(|s| s.enabled);
+            let item = MenuItem::with_id(format!("tool:{}", d.id), d.name, enabled, None);
+            tools.append(&item)?;
+            tool_items.push((d.id, item));
+        }
         let snip = MenuItem::with_id("snip", label(settings, HotkeyAction::Snip), true, None);
         let pin = MenuItem::with_id("pin", label(settings, HotkeyAction::Pin), true, None);
         let close_pins = MenuItem::with_id("close-pins", "关闭所有贴图", true, None);
@@ -129,9 +124,6 @@ impl Tray {
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id.as_ref() {
             "show" => controller::toggle_from_status_item(&shared, None),
             "search" => shared.post(AppEvent::ShowSearch(SearchEntry::Hotkey)),
-            "tool-json" => shared.post(AppEvent::OpenTool(QuickAction::JsonEditor)),
-            "tool-timestamp" => shared.post(AppEvent::OpenTool(QuickAction::Timestamp)),
-            "tool-password" => shared.post(AppEvent::OpenTool(QuickAction::PasswordGenerator)),
             "pause" => {
                 shared.paused.fetch_xor(true, Ordering::Relaxed);
                 shared.post(AppEvent::PauseChanged);
@@ -159,6 +151,11 @@ impl Tray {
                 shared.post(AppEvent::Quit)
             }
             // 面板的右键菜单（见 `ui::native_menu`）：交给界面在下一帧处理。
+            id if id.starts_with("tool:") => {
+                if let Some(d) = devtools_tools::descriptor(&id[5..]) {
+                    shared.post(AppEvent::OpenTool(QuickAction::Tool(d.id)));
+                }
+            }
             id => shared.post(AppEvent::MenuCommand(id.to_string())),
         }));
 
@@ -176,6 +173,7 @@ impl Tray {
         Ok(Self {
             _icon: icon,
             menu,
+            tool_items,
             pause,
             show,
             search,
@@ -189,6 +187,9 @@ impl Tray {
 
     /// 设置变化后同步菜单：“暂停记录”的勾选状态与快捷键提示。
     pub fn sync(&self, settings: &Settings) {
+        for (id, item) in &self.tool_items {
+            item.set_enabled(settings.modules.get(*id).is_none_or(|s| s.enabled));
+        }
         self.pause.set_checked(settings.paused);
         self.show.set_text(label(settings, HotkeyAction::Panel));
         self.search.set_text(search_label(settings));

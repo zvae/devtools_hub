@@ -1,10 +1,10 @@
 [workspace]
 members = [
+    "crates/devtools-module-api",
+    "crates/devtools-module-runtime",
+    "crates/devtools-tools",
     "crates/devtools-clipboard",
     "crates/devtools-hub",
-    "crates/devtools-json",
-    "crates/devtools-timestamp",
-    "crates/devtools-password",
     "crates/devtools-search",
     "crates/devtools-search/core",
     "crates/devtools-ui",
@@ -16,9 +16,12 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/zvae/devtools_hub"
 rust-version = "1.95"
-version = "0.2.1"
+version = "0.2.2"
 
 [workspace.dependencies]
+devtools-module-api = { path = "crates/devtools-module-api" }
+devtools-module-runtime = { path = "crates/devtools-module-runtime" }
+devtools-tools = { path = "crates/devtools-tools" }
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 directories = "6.0"
@@ -150,9 +153,6 @@ regex = "1"
 unicode-normalization = "0.1"
 
 devtools-clipboard = { path = "crates/devtools-clipboard" }
-devtools-json = { path = "crates/devtools-json" }
-devtools-timestamp = { path = "crates/devtools-timestamp" }
-devtools-password = { path = "crates/devtools-password" }
 devtools-search = { path = "crates/devtools-search" }
 devtools-ui = { path = "crates/devtools-ui" }
 
