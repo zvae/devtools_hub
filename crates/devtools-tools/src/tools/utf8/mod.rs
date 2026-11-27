@@ -15,11 +15,13 @@ static SPEC: Spec = Spec {
     variants: &["\\x 转义", "十六进制", "十进制"],
     variant_help: &[
         VariantHelp {
-            description: "每个字节写成 \\xHH，常见于 C、Python 与日志；解码时未转义的字符原样保留。",
+            description:
+                "每个字节写成 \\xHH，常见于 C、Python 与日志；解码时未转义的字符原样保留。",
             example: "中  →  \\xE4\\xB8\\xAD",
         },
         VariantHelp {
-            description: "每个字节写成两位十六进制并用空格分隔；解码也接受 0x 前缀、逗号和连续写法。",
+            description:
+                "每个字节写成两位十六进制并用空格分隔；解码也接受 0x 前缀、逗号和连续写法。",
             example: "中  →  E4 B8 AD",
         },
         VariantHelp {

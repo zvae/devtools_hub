@@ -89,7 +89,11 @@ impl CodecView {
             c.decode == self.decode && c.variant == self.variant && c.input == self.input
         });
         if !fresh {
-            let convert = if self.decode { spec.decode } else { spec.encode };
+            let convert = if self.decode {
+                spec.decode
+            } else {
+                spec.encode
+            };
             self.cache = Some(Cached {
                 input: self.input.clone(),
                 decode: self.decode,
@@ -190,8 +194,8 @@ impl CodecTool {
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             // 按最长的标签定宽，“URL 安全”“完整 URL”等不会被挤得换行。
-                            let width = segment_width(ui, spec.variants, 11.5)
-                                * spec.variants.len() as f32;
+                            let width =
+                                segment_width(ui, spec.variants, 11.5) * spec.variants.len() as f32;
                             let (rect, _) =
                                 ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::hover());
                             segmented(
@@ -211,9 +215,13 @@ impl CodecTool {
                 let mut clear = false;
                 widgets::centered_row(ui, 20.0, |ui| {
                     ui.label(
-                        RichText::new(if view.decode { "编码文本" } else { "原文" })
-                            .size(11.5)
-                            .color(palette.secondary),
+                        RichText::new(if view.decode {
+                            "编码文本"
+                        } else {
+                            "原文"
+                        })
+                        .size(11.5)
+                        .color(palette.secondary),
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         clear = ui
@@ -248,7 +256,11 @@ impl CodecTool {
                     .max(MIN_BOX);
                 let id = ui.id().with("codec-input");
                 let focus = ui.memory(|m| m.has_focus(id));
-                let border = if focus { palette.accent } else { palette.border };
+                let border = if focus {
+                    palette.accent
+                } else {
+                    palette.border
+                };
                 let hint = if view.decode {
                     spec.decode_hint
                 } else {
@@ -281,9 +293,13 @@ impl CodecTool {
                     !view.input.is_empty() && result.as_ref().is_ok_and(|t| !t.is_empty());
                 widgets::centered_row(ui, OUTPUT_HEADER, |ui| {
                     ui.label(
-                        RichText::new(if view.decode { "解码结果" } else { "编码结果" })
-                            .size(11.5)
-                            .color(palette.secondary),
+                        RichText::new(if view.decode {
+                            "解码结果"
+                        } else {
+                            "编码结果"
+                        })
+                        .size(11.5)
+                        .color(palette.secondary),
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
@@ -404,7 +420,11 @@ fn segment_width(ui: &Ui, labels: &[&str], size: f32) -> f32 {
         .iter()
         .map(|label| {
             ui.painter()
-                .layout_no_wrap((*label).to_owned(), FontId::proportional(size), Color32::WHITE)
+                .layout_no_wrap(
+                    (*label).to_owned(),
+                    FontId::proportional(size),
+                    Color32::WHITE,
+                )
                 .size()
                 .x
         })
